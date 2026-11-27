@@ -41,17 +41,20 @@ function drillWorld() {
   // docker: logs every call; `run` extracts the one archive it was given into
   // a temp dir and counts the files under agents/, as the real command does.
   // A volume named *broken* fails to extract. DRILL_CTS and DRILL_VOLS are
-// drills' containers and volumes already there, "<name>|<label value>" each;
-// a label filter lists those it matches, by key alone or key=value. Once the
-// file DRILL_RM_HANG names is there, removing a container or a volume never
-// answers (30 s).
+// drills' containers and volumes already there, "<name>|<label value>" each,
+// or "<name>|<label value>|<started>|<at>" with the times a drill labels them
+// with (a + for each space in <started>); a label filter lists those it
+// matches, by key alone or key=value, with those times when the format asks
+// for its labels. Once the file DRILL_RM_HANG names is there, removing a
+// container or a volume never answers (30 s).
   writeFileSync(join(bin, 'docker'), `#!/usr/bin/env bash
 echo "$*" >> "${log}"
 labelled() {
-  local f="" a e
-  for a in "$@"; do case "$a" in label=*) f="\${a#label=}";; esac; done
+  local f="" a e n o st at times=""
+  for a in "$@"; do case "$a" in label=*) f="\${a#label=}";; *'{{.Label '*) times=1 ;; esac; done
   for e in $LIST; do
-    case "$f" in hatchabot.restore-drill|"hatchabot.restore-drill=\${e#*|}") echo "\${e%%|*}" ;; esac
+    IFS='|' read -r n o st at <<<"$e"
+    case "$f" in hatchabot.restore-drill|"hatchabot.restore-drill=$o") if [ -n "$times" ]; then echo "$n|\${st//+/ }|$at"; else echo "$n"; fi ;; esac
   done
 }
 case "$1" in
@@ -184,7 +187,7 @@ describe('the drill writes a record of every run', () => {
     // The larger archive first (the old drill's one restore).
     expect(runs[0]).toContain('notes-2-vol.tgz');
     // Each throwaway volume is made labelled, and removed.
-    const made = [...w.dockerLog().matchAll(new RegExp(`volume create --label hatchabot.restore-drill=${w.owner()} (\\S+)`, 'g'))].map((m) => m[1]);
+    const made = [...w.dockerLog().matchAll(new RegExp(`^volume create --label hatchabot.restore-drill=${w.owner()} .* (\\S+)$`, 'gm'))].map((m) => m[1]);
     expect(made).toHaveLength(2);
     for (const v of made) expect(w.dockerLog()).toContain(`volume rm -f ${v}`);
   });
@@ -317,6 +320,38 @@ exec "${realTimeout}" "\${o[@]}" "\${k[@]}" "$d" "$@"
     for (const n of [3, 5]) expect(w.dockerLog()).not.toContain(`hatchabot-restore-drill-${live}-${n}\n`);
     expect(w.dockerLog()).toContain('volume rm -f acl-restore-drill-123'); // the old drill's name
     expect(w.dockerLog()).not.toContain('volume rm -f hatchabot-kitchen-1-vol');
+  });
+
+  it('what a killed drill left is judged by its pid and the start the drill labelled it with: a pid given since to another program does not keep it; a drill running however long, or one whose start a clock step may have moved, is not touched (HB-1373)', () => {
+    const w = drillWorld();
+    w.set('2026-10-08', { 'hatchabot-kitchen-1-vol': LAYOUT }, { state: 'complete' });
+    const dead = spawnSync('bash', ['-c', 'echo $$']).stdout.toString().trim();
+    const live = String(process.pid);
+    // This test's own process stands for whichever program has the pid now: its start, as ps gives it.
+    const start = spawnSync('ps', ['-o', 'lstart=', '-p', live], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', LC_ALL: 'C', TZ: 'UTC0' } }).stdout.trim().replace(/\s+/g, ' ');
+    expect(start).not.toBe('');
+    const now = Math.floor(Date.now() / 1000), old = now - 4 * 3600;
+    const other = 'Mon+Jan+1+00:00:00+2001', mine = start.replace(/ /g, '+');
+    const left = [
+      `hatchabot-restore-drill-${live}-1|4242|${other}|${old}`, // killed hours ago, its pid another program's now: removed
+      `hatchabot-restore-drill-${live}-2|4242|${other}|${now}`, // a start that differs, made minutes ago: may be a clock step, kept
+      `hatchabot-restore-drill-${live}-3|4242|${mine}|${old}`, // its drill, running for hours: kept
+      `hatchabot-restore-drill-${dead}-4|4242|${mine}|${now}`, // its drill's process gone: removed
+      `hatchabot-restore-drill-${live}-5|4242`, // from before the times: by the pid alone, as before
+    ].join(' ');
+    const r = w.run({ DRILL_CTS: left, DRILL_VOLS: left });
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    const log = w.dockerLog().split('\n');
+    for (const name of [`hatchabot-restore-drill-${live}-1`, `hatchabot-restore-drill-${dead}-4`]) {
+      expect(log, name).toContain(`rm -f ${name}`);
+      expect(log, name).toContain(`volume rm -f ${name}`);
+    }
+    for (const n of [2, 3, 5]) expect(w.dockerLog(), String(n)).not.toContain(`hatchabot-restore-drill-${live}-${n}\n`);
+    // This drill's own throwaway volume and container carry the times for the next one.
+    const create = log.find((l) => l.startsWith('volume create '))!;
+    expect(create).toMatch(/--label hatchabot\.restore-drill\.started=\S+ .*\d\d:\d\d:\d\d/);
+    expect(create).toMatch(/--label hatchabot\.restore-drill\.at=\d{10,} /);
+    expect(log.find((l) => l.startsWith('run '))).toMatch(/--label hatchabot\.restore-drill\.at=\d{10,} /);
   });
 
   it('a torn archive, one with no OpenClaw files, one that will not extract: each named, the drill fails, the record says which', () => {

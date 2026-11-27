@@ -19,7 +19,7 @@ import { ChannelSetupRequired } from '../../channels/channel.js';
 import { DOORMAN_EMBED_PORT } from '../../ops/doorman.js';
 import { agentTimeZone } from '../schedules/timezone.js';
 import { AgentBusyError, freedWithin, OWED_BUSY_WAIT_MS, OWED_BUSY_WAITS, whileBusy, type Reservation } from './busy.js';
-import { rethrowIfCrash } from './operations.js';
+import { noteFilesReplacing, rethrowIfCrash } from './operations.js';
 import { notifyAgentChat } from '../../channels/notify.js';
 import { autoSnapshot, workspacePath, writeFileInAgent } from '../files/snapshots.js';
 import { addCron, conversationDeliverySupported, cronTargetFor, listCrons, type Cron } from '../schedules/crons.js';
@@ -27,7 +27,7 @@ import { syncModelReviewCron } from '../usage/modelReview.js';
 import { channelTimeoutEnv } from '../channels/channelTimeout.js';
 import { syncContextCap } from '../memory/compaction.js';
 import { clearStaleRuntimePins } from '../sources/runtimePins.js';
-import { attachedGoogleAccounts, syncConnections } from '../google/googleConnections.js';
+import { attachedGoogleAccounts, GOG_HOME, syncConnections } from '../google/googleConnections.js';
 import { verifyAgentAccess } from '../google/accessOverview.js';
 import { forgetDmPolicy } from '../channels/dmPolicyMemo.js';
 import { buildWorkspaceSeed, dataSourcesSection, GOOGLE_ACCOUNTS_HEADING, googleAccountsSection, memoryPolicySection, operatorSection, peerOneLine, peerToolsSection, extractSection, fenceDisagreement, readFences, removeSection, replaceSection, scheduledResultsSection, unsureSections, PEERS_HEADING, DATA_SOURCES_HEADING, INSTALL_HEADING, OPERATOR_HEADING, SCHEDULED_RESULTS_HEADING, toolsMdWithoutInstallSection, withInstallSection } from '../../openclaw/workspace.js';
@@ -286,7 +286,9 @@ export async function runProvisionSteps(
   agentId: string,
   opts: { reuse?: Reservation } = {},
 ): Promise<ProvisionResult> {
-  return whileBusy(agentId, 'provision', () => runProvisionStepsInner(deps, agentId), { reuse: opts.reuse });
+  // Counted as replacing its files in the tick of its take, under it: one
+  // another holder refuses counts nothing (HB-1491).
+  return whileBusy(agentId, 'provision', () => { noteFilesReplacing(agentId); return runProvisionStepsInner(deps, agentId); }, { reuse: opts.reuse });
 }
 
 async function runProvisionStepsInner(
@@ -338,6 +340,11 @@ async function runProvisionStepsInner(
         if (clash && clash.id !== agentId) {
           // Deliberately NOT released: release() deletes the stored token for
           // this account, and that token is the OTHER agent's credential.
+          // A pool bot's lease is undone, which touches no token: kept, it
+          // stayed this agent's for good (a Retry found the same lease and
+          // the same clash, and a Delete frees only its row's bot).
+          const pool = (channel as { pool?: { owns(u: string): boolean; returnUnused?(u: string, agentId: string): void } }).pool;
+          if (pool?.returnUnused && pool.owns(result.accountId)) pool.returnUnused(result.accountId, agentId);
           throw new ChannelConflictError(
             `@${result.accountId} already belongs to "${clash.name}". Each agent needs its ` +
               `own bot — create another with @BotFather and paste that token instead.`,
@@ -752,7 +759,7 @@ export async function buildRuntimeSpec(
     // machine at, and the port this instance listens on (several instances
     // share a rootless host, each on its own port).
     perAgentEnv.HATCHABOT_INTERNAL_URL = process.env.HATCHABOT_INTERNAL_URL
-      ?? `http://${(await deps.provider.hostAddressForAgents?.()) ?? '172.17.0.1'}:${process.env.PORT?.trim() || 8080}`;
+      ?? `http://${(await deps.provider.hostAddressForAgents?.()) ?? '172.17.0.1'}:${Number(process.env.PORT) || 8080}`;
   }
   // The management agent: a fresh propose-only key on every build, and the
   // address of the ops server — its tools and its only way to its AI provider.
@@ -931,7 +938,7 @@ export async function buildRuntimeSpec(
       // Google-connection credentials (gog) live ON THE VOLUME: they refresh
       // in place and ride Move/backup/export with the agent, while Share
       // templates never include them. See docs/connections-design.md.
-      GOG_HOME: '/home/node/.openclaw/connections/gog',
+      GOG_HOME,
       // $HOME is the agent's persistent volume, so put the conventional
       // user-install locations on PATH for EVERY process (a login shell isn't
       // guaranteed — Claude Code spawns plain `bash -c`). This is what makes a
@@ -1147,10 +1154,14 @@ async function applyPendingSchedules(
       // Quiet in the template, quiet here; unsaid (older templates) announces.
       announce: sch.announce !== false,
       deliverTo: cronTargetFor(store, agent),
-    }).catch(() => ({ ok: false as const, error: 'exec failed' }));
+    }).catch(() => ({ ok: false as const, error: EXEC_FAILED }));
     if (!out.ok) {
       const error = String((out as { error?: unknown }).error ?? 'refused');
-      stillPending.push({ ...sch, why: `the agent refused it: ${error.slice(0, 200)}` });
+      // A call that timed out or never reached the agent is not its answer:
+      // recorded as the call that failed, and still owed (waitsForItsOwner).
+      // As a refusal ("docker exec timed out"), the boot left it for its owner (HB-1409 review).
+      const said = (out as { cutOff?: true }).cutOff ? EXEC_FAILED : error;
+      stillPending.push({ ...sch, why: `${REFUSED_WHY}${said.slice(0, 200)}` });
       log('schedule.apply_failed', { agentId, name: sch.name, error });
     } else {
       if (out.quieted && out.id) store.addQuietedCron(agentId, out.id, new Date().toISOString());
@@ -1175,6 +1186,22 @@ function sameSchedule(c: Cron, sch: { message: string; cron?: string; everyMs?: 
 
 /** Why a template task is parked when another task has its name: its owner settles it (HB-0290, HB-0962). */
 export const NAME_TAKEN_WHY = 'another task already has this name (with another schedule or message), so it was not added: rename or remove that one, then Try again';
+const REFUSED_WHY = 'the agent refused it: ';
+/** The call to add it never came back (its container did not answer), which `why` writes as a refusal. */
+const EXEC_FAILED = 'exec failed';
+
+/**
+ * Whether a parked template task waits for its owner rather than for the
+ * agent: a clash with a task of its name (HB-0833 review), or one the agent
+ * answered with a refusal (HB-1409). A start, a wake, a rebuild and Try again
+ * still try them; the boot does not owe them to an agent it finds running,
+ * which tried each again at every restart, though nothing had changed. One
+ * the agent never answered for (its call failed, timed out or never reached
+ * it; its list could not be read) is still owed.
+ */
+export function waitsForItsOwner(why: string | undefined): boolean {
+  return why === NAME_TAKEN_WHY || (!!why?.startsWith(REFUSED_WHY) && why !== REFUSED_WHY + EXEC_FAILED);
+}
 
 /**
  * Parked template tasks, tried again now (HB-0231): the agent must be RUNNING,
@@ -1240,7 +1267,8 @@ export async function retryPendingSchedulesWhenUp(
 }
 
 export async function rebuildAgent(deps: ProvisionDeps, agentId: string): Promise<Agent> {
-  return whileBusy(agentId, 'rebuild', () => rebuildAgentInner(deps, agentId));
+  // Counted under its take, as a setup is (runProvisionSteps, HB-1491).
+  return whileBusy(agentId, 'rebuild', () => { noteFilesReplacing(agentId); return rebuildAgentInner(deps, agentId); });
 }
 
 async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<Agent> {
@@ -1417,6 +1445,8 @@ export async function finishInterruptedRebuild(
 ): Promise<Agent | undefined> {
   // `reuse`: as for runProvisionSteps (an owner's "Try again" already holds it).
   const run = async (): Promise<Agent | undefined> => {
+    // Counted under its take, as a setup is (runProvisionSteps, HB-1491).
+    noteFilesReplacing(agentId);
     const log = deps.log ?? (() => {});
     const agent = deps.store.getAgent(agentId);
     if (!agent?.runtimeRef || agent.state !== 'REBUILDING') return agent;

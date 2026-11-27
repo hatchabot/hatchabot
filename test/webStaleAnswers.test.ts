@@ -82,7 +82,7 @@ function page(names: string[], extra: Record<string, unknown> = {}) {
     api: async (url: string, init?: { method?: string; body?: Record<string, unknown> }) => { calls.push({ url, ...init }); return {}; },
     confirm: () => true, prompt: () => '', toast: noop, refresh: async () => {},
     editDlg: { open: false, close: () => closed.push('edit') }, v2AgentDlg: { open: false }, v2AgentId: null, editParamsFills: 0, inviteDlg: { open: false, showModal() { this.open = true; } }, proposalsDlg: { showModal: noop },
-    peersLoadedFor: null, peersCurrent: null, // what the shared buttons' locks ask (SHEET_BUTTONS)
+    peersLoadedFor: null, peersCurrent: null, sharePeopleFor: null, // what the shared buttons' locks ask (SHEET_BUTTONS)
     esc: (v: unknown) => String(v ?? ''), jsq: (v: unknown) => String(v ?? ''), onAction, ago: () => 'just now',
     sourceOptionLabel: (p: { name: string }) => p.name, localClashWarning: () => '', confirmRebuild: () => true,
     showEditTab: noop, populateImagePicker: async () => {}, embedModeText: () => '', renderSetupValues: noop, renderBotWho: noop,
@@ -98,8 +98,8 @@ function page(names: string[], extra: Record<string, unknown> = {}) {
   });
   // Whose forms an answer is drawn in, and where it is said: the page's own helpers (forAgent, agentPrefix, and the saves, reads and fills
   // built on it), and the forms' shared buttons, held by a press and given back to its own agent's forms (HB-1484).
-  for (const n of ['agentPrefix', 'forAgent', 'sheetSave', 'sheetRead', 'sheetFill', 'sheetPress', 'sheetButton', 'sourceAsSaved', 'inviteCurrent', 'sharingRead', ...names]) vm.runInContext(source(n), c);
-  for (const n of ['sheetPresses', 'MODEL_WAITS_ON_SOURCE', 'SHEET_BUTTONS', 'SHEET_HINTS']) vm.runInContext(constant(n), c);
+  for (const n of ['agentPrefix', 'forAgent', 'sheetSave', 'sheetRead', 'sheetFill', 'sheetPress', 'sheetButton', 'sourceAsSaved', 'inviteCurrent', 'sharingRead', 'sharingPage', ...names]) vm.runInContext(source(n), c);
+  for (const n of ['sheetPresses', 'MODEL_WAITS_ON_SOURCE', 'SHEET_BUTTONS', 'SHEET_HINTS', 'HANDLE_LINK', 'HANDLE_MAX']) vm.runInContext(constant(n), c);
   vm.runInContext("const v2Find = id => agents.find(a => a.id === id); const v2Mine = a => !a.role || a.role === 'owner';", c);
   return { c: c as Record<string, any>, $, calls, closed };
 }
@@ -119,7 +119,7 @@ describe('the AI tab: one press acts on the agent it was pressed for (audit #047
     expect(closed).toEqual([]); // B's sheet stays open
   });
 
-  it('the image pin rebuilds its original agent; a peer grant is saved without a later prompt in another agent view', async () => {
+  it("the image pin rebuilds its original agent; a peer grant answered in another agent view offers its own agent's rebuild, by its name (HB-1486)", async () => {
     const pin = page(['saveImagePin']);
     pin.$('editImage').value = 'hatchabot-runtime:candidate';
     const saved = gate();
@@ -127,20 +127,101 @@ describe('the AI tab: one press acts on the agent it was pressed for (audit #047
     const p1 = pin.c.saveImagePin(); pin.c.editAgentId = 'a2'; saved.open({}); await p1;
     expect(pin.calls.map((x) => x.url)).toEqual(['/v1/agents/a1', '/v1/agents/a1/rebuild']);
 
-    const peers = page(['savePeers'], { peersLoadedFor: 'a1', document: { querySelectorAll: (sel: string) => sel === '.peerCb:checked' ? [{ dataset: { id: 'a2' } }] : [] } });
+    const toasts: string[] = [], asked: string[] = [];
+    const peers = page(['savePeers'], { peersLoadedFor: 'a1', toast: (t: string) => toasts.push(t), document: { querySelectorAll: (sel: string) => sel === '.peerCb:checked' ? [{ dataset: { id: 'a2' } }] : [] } });
     peers.c.peersCurrent = peers.c.sharingRead(peers.$('agentPeerList'), 'a1');
-    let confirmations = 0; peers.c.confirm = () => { confirmations++; return true; };
-    const put = gate();
+    peers.c.confirm = (q: string) => { asked.push(q); return true; };
+    let put = gate();
     peers.c.api = async (url: string, init: Init) => { peers.calls.push({ url, ...init }); return init.method === 'PUT' ? put.p : {}; };
     const p2 = peers.c.savePeers(); peers.c.editAgentId = 'a2'; put.open({}); await p2;
-    expect(peers.calls).toEqual([{ url: '/v1/agents/a1/peers', method: 'PUT', body: { peerIds: ['a2'], allowActions: [] } }]);
-    expect(confirmations).toBe(0);
-    expect(peers.closed).toEqual([]);
+    // Was: saved, and nothing asked or said: the grant waited for a rebuild nobody was offered (HB-1486).
+    expect(peers.calls.map((x) => [x.method, x.url])).toEqual([['PUT', '/v1/agents/a1/peers'], ['POST', '/v1/agents/a1/rebuild']]);
+    expect(peers.calls[0]!.body).toEqual({ peerIds: ['a2'], allowActions: [] });
+    expect(asked).toEqual([expect.stringMatching(/^Saved\. Rebuild "Homework Helper" now so it can consult 1 peer\?/)]);
+    expect(toasts).toEqual(['Homework Helper: Rebuilding so it can consult its peers…']);
+    expect(peers.closed).toEqual([]); // B's sheet stays open
     peers.c.editAgentId = 'a1'; peers.$('peerSaveBtn').disabled = false;
     peers.c.peersCurrent = peers.c.sharingRead(peers.$('agentPeerList'), 'a1');
     await peers.c.savePeers();
-    expect(confirmations).toBe(1);
+    expect(asked).toHaveLength(2);
     expect(peers.calls.at(-1)!.url).toBe('/v1/agents/a1/rebuild');
+    // The session ended before the answer: nothing asked, said or sent after the save.
+    peers.$('peerSaveBtn').disabled = false; put = gate();
+    peers.c.peersCurrent = peers.c.sharingRead(peers.$('agentPeerList'), 'a1');
+    const sent = peers.calls.length, said = toasts.length;
+    const p3 = peers.c.savePeers(); peers.c.pageSignedOut = true; put.open({}); await p3;
+    expect([peers.calls.slice(sent).map((x) => x.method), asked.length, toasts.length]).toEqual([['PUT'], 2, said]);
+  });
+
+  it('a late peer save: no rebuild offered for an agent deleted or no longer theirs, and nothing said once the rebuild answers to another person (HB-1486 review)', async () => {
+    const toasts: string[] = [], asked: string[] = [];
+    const peers = page(['savePeers'], { peersLoadedFor: 'a1', toast: (t: string) => toasts.push(t), document: { querySelectorAll: (sel: string) => sel === '.peerCb:checked' ? [{ dataset: { id: 'a2' } }] : [] } });
+    peers.c.confirm = (q: string) => { asked.push(q); return true; };
+    let put = gate(), rebuild = gate();
+    peers.c.api = async (url: string, init: Init) => { peers.calls.push({ url, ...init }); return init.method === 'PUT' ? put.p : rebuild.p; };
+    const press = async (meanwhile: () => void, answer = () => put.open({})) => {
+      peers.$('peerSaveBtn').disabled = false; put = gate(); rebuild = gate();
+      peers.c.peersCurrent = peers.c.sharingRead(peers.$('agentPeerList'), 'a1');
+      const from = peers.calls.length;
+      const pressed = peers.c.savePeers(); meanwhile(); answer(); await pressed;
+      return peers.calls.slice(from).map((x) => `${x.method} ${x.url}`);
+    };
+    // No longer theirs (now shared with them as a member) while it saved: saved, no rebuild offered.
+    expect(await press(() => { peers.c.editAgentId = 'a2'; peers.c.agents[0].role = 'member'; })).toEqual(['PUT /v1/agents/a1/peers']);
+    expect([asked, toasts]).toEqual([[], ['Homework Helper: Saved.']]);
+    // Deleted meanwhile: the same, by no name.
+    peers.c.editAgentId = 'a1'; delete peers.c.agents[0].role;
+    expect(await press(() => { peers.c.editAgentId = 'a2'; peers.c.agents = peers.c.agents.slice(1); })).toEqual(['PUT /v1/agents/a1/peers']);
+    expect([asked, toasts.at(-1)]).toEqual([[], 'The agent: Saved.']);
+    // Its rebuild answered after the session ended: rebuilt as asked, then nothing said and nothing closed.
+    peers.c.editAgentId = 'a1'; peers.c.agents = AGENTS.map((a) => ({ ...a }));
+    const said = toasts.length;
+    expect(await press(() => {}, () => { put.open({}); setTimeout(() => { peers.c.pageSignedOut = true; rebuild.open({}); }, 0); }))
+      .toEqual(['PUT /v1/agents/a1/peers', 'POST /v1/agents/a1/rebuild']);
+    expect([asked.length, toasts.length, peers.closed]).toEqual([1, said, []]);
+  });
+
+  it('a Gmail test, a removal and a bot token answered once the page is not its person\'s: nothing said, nothing shown (HB-1486 review)', async () => {
+    const ends: Array<[string, (c: Record<string, any>) => void]> = [
+      ['signed out', (c) => { c.pageSignedOut = true; }],
+      ['another person', (c) => { c.pagePerson = 'synthetic-other'; }],
+      ['away', (c) => { c.pagePersonAway = true; }],
+      ['sharing put away', (c) => { c.sharingEpoch++; }],
+    ];
+    for (const [end, change] of ends) {
+      for (const fails of [false, true]) {
+        const toasts: string[] = [];
+        const { c, $, calls } = page(['testAgentGmail', 'kick', 'showBotToken'], { toast: (t: string) => toasts.push(t), pairTick: 1, copyText: async () => true });
+        let answer = gate();
+        c.api = async (url: string, init?: Init) => { calls.push({ url, ...init }); return answer.p; };
+        const run = async (press: () => Promise<void>, body: unknown) => {
+          answer = gate();
+          const pressed = press(); change(c);
+          if (fails) answer.fail(new Error('Refused, made up.')); else answer.open(body);
+          await pressed;
+          c.pageSignedOut = false; c.pagePerson = 'synthetic-owner'; c.pagePersonAway = false;
+        };
+        const btn = element();
+        await run(() => c.testAgentGmail(btn, 'family@example.com', 0), { ok: true, detail: 'Inbox read.' });
+        await run(() => c.kick('a1', 'u-made-up', 'Sam Example'), {});
+        await run(() => c.showBotToken(), { botToken: 'made-up-bot-token', pooled: true });
+        const what = `${end}, ${fails ? 'refused' : 'answered'}`;
+        expect(calls.map((x) => x.url), what).toEqual(['/v1/agents/a1/connections/family%40example.com/test', '/v1/agents/a1/members/u-made-up', '/v1/agents/a1/bot-token']);
+        expect(toasts, what).toEqual([]);
+        expect([$('connGmailOut0').textContent, $('editBotToken').value, $('editErr').textContent], what).toEqual(['Testing…', '', '']);
+        expect(c.pairTick, what).toBe(1);
+      }
+    }
+    // The same presses with the page still its person's, under another agent's sheet: said with the agent's name.
+    const toasts: string[] = [];
+    const { c } = page(['testAgentGmail', 'kick', 'showBotToken'], { toast: (t: string) => toasts.push(t), pairTick: 1, copyText: async () => true });
+    let answer = gate();
+    c.api = async () => answer.p;
+    for (const press of [() => c.testAgentGmail(element(), 'family@example.com', 0), () => c.kick('a1', 'u-made-up', 'Sam Example'), () => c.showBotToken()]) {
+      answer = gate(); c.editAgentId = 'a1';
+      const pressed = press(); c.editAgentId = 'a2'; answer.fail(new Error('Refused, made up.')); await pressed;
+    }
+    expect(toasts).toEqual(['Homework Helper: ⚠ Refused, made up.', 'Homework Helper: Refused, made up.', 'Homework Helper: Refused, made up.']);
   });
 
   it("a source picked and not applied leaves the model button usable on the next agent's sheet", () => {
@@ -281,7 +362,7 @@ describe('Invite: a web-chat link lands only in the invite it was made for (audi
   });
 
   it("the Telegram invite: A's answer, late, does not fill B's", async () => {
-    const { c, $, calls } = page(['invite']);
+    const { c, $, calls } = page(['invite', 'askHandle', 'handleTyped']); // its handle asked as the page does (HB-1439 review)
     const made = gate();
     c.api = async (url: string, init: Init) => { calls.push({ url, ...init }); return url.includes('/a1/') ? made.p : { url: 'https://hatchabot.example/i/b', code: 'b' }; };
     const pending = c.invite('a1', 'Homework Helper');

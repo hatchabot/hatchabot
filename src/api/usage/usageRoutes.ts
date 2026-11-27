@@ -11,6 +11,7 @@ import { CACHE_READ_DEFAULT, CACHE_WRITE_MULTIPLIER, priceList, PRICES_CHECKED, 
 import { summarizeSourceUsage } from '../../orchestrator/usage/sourceUsage.js';
 import { buildTokenHealth } from '../../orchestrator/usage/tokenHealth.js';
 import { agentUsage } from '../../orchestrator/usage/usage.js';
+import { ranOnAnEarlierSource } from '../../orchestrator/usage/usageReadings.js';
 import { NO_CHAT_NOTE } from '../../orchestrator/usage/monthlyBudgets.js';
 import { ownerIdOf } from '../principal.js';
 import { MACHINE_OWNER_ONLY, queryLimit, type RouteContext } from '../routeContext.js';
@@ -115,7 +116,8 @@ export function registerUsageRoutes(app: FastifyInstance, ctx: RouteContext): vo
     // the newest call of ANY session (a scheduled run, a sub-agent) is not it (audit, 2026-10-23).
     const mainNow = u.health?.main?.[agent.slug]?.ctx;
     // Its practice runs count once, and say so (HB-0933): what its own transcripts do not hold of them is added.
-    return { ...foldPractice(rest, practiceSummary(store, agent.id)), ...(typeof mainNow === 'number' && mainNow > 0 ? { lastContext: mainNow } : {}), alerts: store.usageAlertsSince(new Date(Date.now() - 7 * 86_400_000).toISOString(), { agentId: agent.id }) };
+    // Its totals are its lifetime's: marked when they include time on an earlier source (HB-1272).
+    return { ...foldPractice(rest, practiceSummary(store, agent.id)), ...(typeof mainNow === 'number' && mainNow > 0 ? { lastContext: mainNow } : {}), ...(ranOnAnEarlierSource(agent) ? { earlierSource: true } : {}), alerts: store.usageAlertsSince(new Date(Date.now() - 7 * 86_400_000).toISOString(), { agentId: agent.id }) };
   });
 
   // The fleet usage rollup (usageReadings.ts): every RUNNING agent of the caller's, ranked by tokens.

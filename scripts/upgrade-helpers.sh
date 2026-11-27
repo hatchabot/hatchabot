@@ -29,10 +29,11 @@
 # and never read it.
 #
 # They read the names both scripts give: the tree DIR, the release going in
-# TARGET and the one it replaces CUR, what a person runs REDO, the lock
-# LOCK_PATH (LOCK, LOCK_RC, ME, ME_UTC), the dependencies' lock DEPS_LOCK
-# (DEPS_ME, DEPS_WAIT, DEPS_HELD), the step's log STEP_LOG, and CHANGING and
-# DISK for finish.
+# TARGET and the one it replaces CUR, what a person runs REDO, the run's own
+# name RUN_NOUN, the lock LOCK_PATH (LOCK, LOCK_RC, ME, ME_UTC), the record
+# FROM_FILE (FROM, TO), the dependencies' lock DEPS_LOCK (DEPS_LOCK_OLD,
+# DEPS_ME, DEPS_WAIT, DEPS_HELD; ASIDE), the step's log STEP_LOG, and
+# CHANGING and DISK for finish.
 
 # ---- The machine's words, and the steps they are read from ----
 # The machine, said as the machine: exit 5, which the timers never count
@@ -74,10 +75,15 @@ said_kind() {
   # writes to a temporary file, on the disk that may be full.
   local line p run=0 deny=0 out=0 anon=0 short=0 fail=0 said=0 glob=1 IFS='
 '
-  case "$-" in *f*) glob=0 ;; esac
+  case "$-" in
+    *f*) glob=0 ;;
+  esac
   set -f
   for line in $1; do
-    case "$line" in *[![:space:]]*) said=1 ;; *) continue ;; esac
+    case "$line" in
+      *[![:space:]]*) said=1 ;;
+      *) continue ;;
+    esac
     # The disk's words are read in the whole text, below (disk_words).
     ! disk_words "$line" || continue
     case "$line" in
@@ -98,8 +104,14 @@ said_kind() {
       # made read-only), as a redirection's would be.
       *": line "[0-9]*": "*": Permission denied"*)
         p="${line%: Permission denied*}"; p="${p##*: }"
-        case "$p" in /*) ;; *) p="$PWD/$p" ;; esac
-        case "$p" in "${DIR:-$PWD}"/*) if [ -f "$p" ] && [ ! -x "$p" ] && [ -w "$p" ]; then run=1; else deny=1; fi ;; *) if own_place "$p"; then deny=1; else out=1; fi ;; esac ;;
+        case "$p" in
+          /*) ;;
+          *) p="$PWD/$p" ;;
+        esac
+        case "$p" in
+          "${DIR:-$PWD}"/*) if [ -f "$p" ] && [ ! -x "$p" ] && [ -w "$p" ]; then run=1; else deny=1; fi ;;
+          *) if own_place "$p"; then deny=1; else out=1; fi ;;
+        esac ;;
       # A write it was refused, judged by where: in one of this install's own
       # places the machine's, anywhere else (/usr/local) the release's own
       # write (fourteenth review). A line that names no place ("npm error
@@ -148,10 +160,15 @@ said_path() {
 # relative PATH is the step's, from here.
 own_place() {
   local p="$1" q
-  case "$p" in /*) ;; *) p="$PWD/$p" ;; esac
+  case "$p" in
+    /*) ;;
+    *) p="$PWD/$p" ;;
+  esac
   for q in "${DIR:-$PWD}" "${XDG_STATE_HOME:-$HOME/.local/state}/hatchabot" "$HOME/.npm" "$HOME/.cache/node-gyp" "$HOME/.node-gyp" "${TMPDIR:-/tmp}"; do
     q="${q%/}"
-    case "$p" in "$q"|"$q"/*) return 0 ;; esac
+    case "$p" in
+      "$q"|"$q"/*) return 0 ;;
+    esac
   done
   return 1
 }
@@ -184,7 +201,11 @@ step_tee() {
   local kept
   kept="$( { if [ -n "$STEP_LOG" ]; then tee -a "$STEP_LOG" 2>/dev/null; else cat; fi; } \
     | awk '{ print > "/dev/stderr"; fflush("/dev/stderr"); print }' | step_tail )" || true
-  case "$(said_kind "$kept")" in disk) return 20 ;; own) return 21 ;; denied) return 22 ;; esac
+  case "$(said_kind "$kept")" in
+    disk) return 20 ;;
+    own) return 21 ;;
+    denied) return 22 ;;
+  esac
   return 0
 }
 step_tail() { tail -n 20 | tail -c 2048; }
@@ -203,10 +224,16 @@ run_step() {
   # Read with errexit off: under set -euo pipefail a step that succeeded and
   # said something (step_tee's verdict, 20 to 22) failed the pipeline, and a
   # run_step not in a condition ended the script (fourteenth review).
-  case "$-" in *e*) e=1; set +e ;; esac
+  case "$-" in
+    *e*) e=1; set +e ;;
+  esac
   { "$@" 2>&1 1>&3 | step_tee; st="${PIPESTATUS[0]} ${PIPESTATUS[1]}"; } 3>&1
   [ "$e" = 0 ] || set -e
-  case "${st#* }" in 20) STEP_SAID=disk ;; 21) STEP_SAID=own ;; 22) STEP_SAID=denied ;; esac
+  case "${st#* }" in
+    20) STEP_SAID=disk ;;
+    21) STEP_SAID=own ;;
+    22) STEP_SAID=denied ;;
+  esac
   # 126: a file it found and could not run, the release's own, 3 (eleventh
   # review), unless its words named the disk or a permission of the
   # machine's: bash's own "Permission denied" names a path, and said_kind
@@ -254,6 +281,7 @@ change_failed() {
   shift 2
   step_short "$DIR" && short=1
   free="$(free_mb "$DIR")"
+  [ -z "$free" ] || free=" ($free MB free)"
   [ "$#" = 0 ] || printf '%s\n' "$@"
   CHANGING=0
   # Not put back: the tree may be part-way between the two, which no wait
@@ -261,7 +289,7 @@ change_failed() {
   if ! "$undo_with"; then
     echo "Putting ${CUR:-the previous release} back did not work either (above), so $DIR may be part-way between ${CUR:-the previous release} and $TARGET."
     if [ "$short" = 1 ] && [ "$SHORT_WHY" = denied ]; then echo "This user could not write ${SHORT_PATH:-what it needed} (above: no permission there, or a read-only disk): fix that first."
-    elif [ "$short" = 1 ]; then echo "The disk holding $DIR is full${free:+ ($free MB free)}: free about 1 GB first."; fi
+    elif [ "$short" = 1 ]; then echo "The disk holding $DIR is full$free: free about 1 GB first."; fi
     echo "Then run $REDO: it puts ${CUR:-the previous release} back first, from its record."
     exit 3
   fi
@@ -269,7 +297,7 @@ change_failed() {
     echo "This user could not write ${SHORT_PATH:-what it needed} (above: no permission there, or a read-only disk), so $TARGET could not be $what. Fix that, then try again."
     machine_short
   elif [ "$short" = 1 ]; then
-    echo "The disk holding $DIR is full${free:+ ($free MB free)}, so $TARGET could not be $what. Free about 1 GB, then try again."
+    echo "The disk holding $DIR is full$free, so $TARGET could not be $what. Free about 1 GB, then try again."
     machine_short
   fi
   exit 3
@@ -283,7 +311,10 @@ link_end() {
   while [ -L "$p" ]; do
     [ "$n" -lt 40 ] || return 1
     l="$(readlink "$p")" || return 1
-    case "$l" in /*) p="$l" ;; *) p="$(dirname "$p")/$l" ;; esac
+    case "$l" in
+      /*) p="$l" ;;
+      *) p="$(dirname "$p")/$l" ;;
+    esac
     n=$((n + 1))
   done
   printf '%s\n' "$p"
@@ -369,10 +400,15 @@ lock_left_over() {
   owner="$(cat "$LOCK_PATH/owner" 2>/dev/null)" || owner=""
   if [ -z "$owner" ]; then [ -n "$(find "$LOCK_PATH" -maxdepth 0 -mmin +60 2>/dev/null)" ]; return; fi
   pid="${owner%% *}"
-  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  case "$pid" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
   if [ "$owner" = "$pid" ]; then ! kill -0 "$pid" 2>/dev/null; return; fi
   utc="$(cat "$LOCK_PATH/owner.utc" 2>/dev/null)" || utc=""
-  case "$utc" in "$pid "?*) [ "$utc" != "$pid $(proc_start_utc "$pid")" ] ;; *) ! started_as "$pid" "${owner#* }" ;; esac
+  case "$utc" in
+    "$pid "?*) [ "$utc" != "$pid $(proc_start_utc "$pid")" ] ;;
+    *) ! started_as "$pid" "${owner#* }" ;;
+  esac
 }
 # take_lock: 0 taken; 1 another run holds it (or a file is in its way); 2 the
 # machine could not make it or write its holder (a full disk, no permission).
@@ -418,28 +454,36 @@ lock_in_way() {
 
 # ---- The dependencies' lock ----
 # ensure-deps.sh's (its DEPS_LOCK: the same folder, name and holder line, a
-# pid and its start in UTC), held while node_modules is moved aside or put
-# back (HB-1212); each script says when. deps_lock: 0 held (DEPS_HELD=1), or
+# pid and its start in UTC; one with no holder a minute after it was made is
+# a leftover, HB-1377), held while node_modules is moved aside or put back
+# (HB-1212); each script says when. deps_lock: 0 held (DEPS_HELD=1), or
 # none to be had at all (no room, no permission), and the move goes on
 # without it, as an install does; 1 another install has held it for DEPS_WAIT
-# seconds. deps_unlock lets go of it, only as its holder.
+# seconds. deps_unlock lets go of it, only as its holder. Reached through a
+# link, DEPS_LOCK_OLD too, the lock keyed on the path as given that the
+# scripts of releases before 2.193.0 take, after DEPS_LOCK, as ensure-deps.sh
+# takes it (review of HB-1377); empty when the path has no link.
+# deps_holder_gone LOCK: the run that made LOCK is gone.
 deps_holder_gone() {
   local owner pid
-  owner="$(cat "$DEPS_LOCK/owner" 2>/dev/null)" || owner=""
-  if [ -z "$owner" ]; then [ -n "$(find "$DEPS_LOCK" -maxdepth 0 -mmin +10 2>/dev/null)" ]; return; fi
+  owner="$(cat "$1/owner" 2>/dev/null)" || owner=""
+  if [ -z "$owner" ]; then [ -n "$(find "$1" -maxdepth 0 -mmin +1 2>/dev/null)" ]; return; fi
   pid="${owner%% *}"
-  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  case "$pid" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
   if [ "$owner" = "$pid" ]; then ! kill -0 "$pid" 2>/dev/null; else [ "$owner" != "$pid $(proc_start_utc "$pid")" ]; fi
 }
-deps_lock() {
+# deps_take LOCK: 0 held, its holder written; 2 none to be had; 1 another
+# install has held it for DEPS_WAIT seconds.
+deps_take() {
   local waited=0
-  [ "$DEPS_HELD" != 1 ] || return 0
-  until mkdir "$DEPS_LOCK" 2>/dev/null; do
-    [ -d "$DEPS_LOCK" ] || return 0
-    find "$DEPS_LOCK.takeover" -maxdepth 0 -mmin +1 -exec rmdir {} \; 2>/dev/null || true
-    if deps_holder_gone && mkdir "$DEPS_LOCK.takeover" 2>/dev/null; then
-      if deps_holder_gone; then rm -rf "$DEPS_LOCK"; fi
-      rmdir "$DEPS_LOCK.takeover"
+  until mkdir "$1" 2>/dev/null; do
+    [ -d "$1" ] || return 2
+    find "$1.takeover" -maxdepth 0 -mmin +1 -exec rmdir {} \; 2>/dev/null || true
+    if deps_holder_gone "$1" && mkdir "$1.takeover" 2>/dev/null; then
+      if deps_holder_gone "$1"; then rm -rf "$1"; fi
+      rmdir "$1.takeover"
       continue
     fi
     [ "$waited" != 0 ] || echo "Waiting for an install of the dependencies in $DIR to finish before moving them…"
@@ -448,21 +492,67 @@ deps_lock() {
     sleep 1
   done
   # A holder it could not write would read as a run just begun: let go, and on without it.
-  if { printf '%s\n' "$DEPS_ME" > "$DEPS_LOCK/owner.$$" && mv -f "$DEPS_LOCK/owner.$$" "$DEPS_LOCK/owner"; } 2>/dev/null; then DEPS_HELD=1
-  else rm -rf "$DEPS_LOCK"; fi
-  return 0
+  { printf '%s\n' "$DEPS_ME" > "$1/owner.$$" && mv -f "$1/owner.$$" "$1/owner"; } 2>/dev/null && return 0
+  rm -rf "$1"
+  return 2
+}
+deps_lock() {
+  local rc=0
+  [ "$DEPS_HELD" != 1 ] || return 0
+  deps_take "$DEPS_LOCK" || rc=$?
+  [ "$rc" != 1 ] || return 1
+  [ "$rc" = 0 ] || return 0
+  DEPS_HELD=1
+  [ -n "$DEPS_LOCK_OLD" ] || return 0
+  rc=0; deps_take "$DEPS_LOCK_OLD" || rc=$?
+  [ "$rc" = 1 ] || return 0
+  echo "The install that holds it is by a release before 2.193.0, under the lock it keys on $DIR as given: $DEPS_LOCK_OLD. If no npm is running there, that is the one to remove: rm -r \"$DEPS_LOCK_OLD\""
+  deps_unlock
+  return 1
 }
 deps_unlock() {
+  local l
   [ "$DEPS_HELD" = 1 ] || return 0
   DEPS_HELD=0
-  [ "$(cat "$DEPS_LOCK/owner" 2>/dev/null)" != "$DEPS_ME" ] || rm -rf "$DEPS_LOCK"
+  for l in "$DEPS_LOCK" "$DEPS_LOCK_OLD"; do
+    [ -z "$l" ] || [ "$(cat "$l/owner" 2>/dev/null)" != "$DEPS_ME" ] || rm -rf "$l"
+  done
+  return 0
+}
+
+# restore_deps: the dependencies a run moved aside (node_modules.prev, or
+# with ASIDE=1 the working ones moved and none there now) put back, CUR's.
+# Under the dependencies' lock (deps_lock), let go before the restart that
+# follows, whose ensure-deps.sh takes it. One this run cannot have within half
+# an hour leaves them where they are and fails (1): the record stays, and the
+# next run's repair puts them back under the lock. Taken for done, the record
+# went, the next run deleted node_modules.prev as a leftover, and the old
+# release was left on the failed install's partial tree (review of HB-1212).
+# Not moved without the lock either: what holds it that long is most likely
+# an npm at work in that very tree.
+restore_deps() {
+  [ -d node_modules.prev ] || [ "$ASIDE" = 1 ] || return 0
+  if ! deps_lock; then
+    echo "Another install of the dependencies in $DIR has held $DEPS_LOCK for half an hour, so ${CUR:-the previous release}'s were left in node_modules.prev, not put back. If no npm is running there, remove it: rm -r \"$DEPS_LOCK\""
+    return 1
+  fi
+  if [ -d node_modules.prev ]; then rm -rf node_modules; mv node_modules.prev node_modules
+  elif [ "$ASIDE" = 1 ]; then rm -rf node_modules; fi
+  deps_unlock
   return 0
 }
 
 # ---- A release put back that did not come up ----
 # kept_tries RECORD: the tries to restart it that RECORD counts (its `tries`
 # lines: each script's back_down writes them, HB-1456).
-kept_tries() { local n; n="$(sed -n 's/^tries //p' "$1" 2>/dev/null | tail -n 1)"; case "$n" in ''|*[!0-9]*) n=0 ;; esac; echo "$n"; }
+kept_tries() {
+  local n
+  n="$(sed -n 's/^tries //p' "$1" 2>/dev/null | tail -n 1)"
+  case "$n" in
+    ''|*[!0-9]*) n=0 ;;
+  esac
+  echo "$n"
+}
 # kept_record RECORD: a restart back from it was tried already.
 kept_record() { grep -qx back "$1" 2>/dev/null || grep -q '^tries ' "$1" 2>/dev/null; }
 
@@ -479,11 +569,116 @@ checkout_recorded() {
   sh -c '[ -e .git/index.lock ] || printf "git %s %s\n" "$$" "$(LC_ALL=C ps -o lstart= -p $$ 2>/dev/null | tr -s " " | sed "s/^ //;s/ $//")" >> "$1"; shift; exec git checkout "$@"' _ "$FROM_FILE" "$@"
 }
 
+# ---- A run cut off part-way, in a git checkout ----
+# Each read its record (FROM_FILE) into FROM and TO, and names itself in what
+# it says (RUN_NOUN: upgrade, deploy). A copy in each script before, with no
+# test holding the two the same (HB-1483).
+# git_running_here: a git running in this checkout, whoever started it: its
+# pid, or "unknown" when this machine has no way to tell. A commit waiting in
+# its editor holds the lock for as long as the person takes, however old the
+# lock looks.
+git_running_here() {
+  local here p comm cwd line pid=""
+  here="$(pwd -P)"
+  if [ -d "/proc/$$" ]; then
+    # Read with the builtin, not $(cat): one cat per process on the machine
+    # took 1.7 s with 900 running, and longer the busier it was (HB-0505).
+    for p in /proc/[0-9]*; do
+      { read -r comm < "$p/comm"; } 2>/dev/null || continue
+      case "$comm" in
+        git|git-*) ;;
+        *) continue ;;
+      esac
+      cwd="$(readlink "$p/cwd" 2>/dev/null)" || continue
+      case "$cwd/" in
+        "$here/"*) echo "${p#/proc/}"; return 0 ;;
+      esac
+    done
+    return 1
+  fi
+  command -v lsof >/dev/null 2>&1 || { echo unknown; return 0; }
+  while IFS= read -r line; do
+    case "$line" in
+      p*) pid="${line#p}" ;;
+      n*)
+        case "${line#n}/" in
+          "$here/"*) echo "$pid"; return 0 ;;
+        esac ;;
+    esac
+  done < <(lsof -a -c git -d cwd -Fpn 2>/dev/null)
+  return 1
+}
+# clear_own_index_lock: .git/index.lock goes only when it is shown to be that
+# checkout's own: the record names a git, that git is gone, the lock is no
+# older than the record (the record is written first), it is not fresh, and no
+# other git is running here. Anything else stays and is said.
+# 0 clear to go on; 1 a git of this record's is running, or the lock is not its own.
+clear_own_index_lock() {
+  local word pid start named=0
+  while read -r word pid start; do
+    [ "$word" = git ] || continue
+    named=1
+    if [ -n "$start" ]; then ! started_as "$pid" "$start" || { echo "The checkout that $RUN_NOUN started is still running (pid $pid) — try again once it ends."; return 1; }
+    elif kill -0 "$pid" 2>/dev/null; then echo "The checkout that $RUN_NOUN started is still running (pid $pid) — try again once it ends."; return 1; fi
+  done < "$FROM_FILE"
+  [ -e .git/index.lock ] || return 0
+  local live
+  if live="$(git_running_here)"; then
+    if [ "$live" != unknown ]; then echo "$DIR/.git/index.lock is held by a git running there (pid $live), which this $RUN_NOUN did not start — try again once it ends."; return 1; fi
+    named=0
+  fi
+  if [ "$named" = 1 ] && [ ! "$FROM_FILE" -nt .git/index.lock ] && [ -n "$(find .git/index.lock -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
+    echo "Removing the .git/index.lock the $RUN_NOUN that was cut off left behind."
+    rm -f .git/index.lock; return 0
+  fi
+  echo "$DIR/.git/index.lock is in the way, and nothing shows it is that $RUN_NOUN's own (one a few minutes old may be: try again then). If no git is running there, remove it: rm $DIR/.git/index.lock"
+  return 1
+}
+# save_other_edits, then repair_tree: back to the release the record names
+# (FROM; the one it went to, TO). Forced, and through the new one first
+# when the tree is part-way: a checkout cut off leaves HEAD and the index on the
+# old one with files rewritten, which a plain checkout kept (mixed code, then
+# refused as local changes for good). The run started from a clean tree, and
+# tracked files are all this touches, so .env and data/ stay. A tracked file
+# that matches neither release may be someone's edit since the kill (or a file
+# the kill cut short, which cannot be told apart): a copy is kept, and named.
+save_other_edits() {
+  local f got kept=""
+  while IFS= read -r -d '' f; do
+    [ -f "$f" ] || [ -L "$f" ] || continue
+    got="$(git hash-object -- "$f" 2>/dev/null)" || got=""
+    [ "$got" != "$(git rev-parse -q --verify "$FROM:$f" 2>/dev/null)" ] || continue
+    [ -z "$TO" ] || [ "$got" != "$(git rev-parse -q --verify "$TO:$f" 2>/dev/null)" ] || continue
+    if [ -z "$kept" ]; then
+      kept="${FROM_FILE%.from}.kept-$(date +%Y%m%d-%H%M%S)"
+      ( umask 077; mkdir -p "$kept" ) || { echo "Could not keep a copy of the edit to $f, so it was not overwritten."; return 1; }
+      echo "These tracked files match neither $FROM nor ${TO:-the new release}, so they may be someone's edits. Putting $FROM back overwrites them; a copy of each is kept in $kept:"
+    fi
+    mkdir -p "$kept/$(dirname "$f")" && cp -pP "$f" "$kept/$f" || { echo "Could not keep a copy of the edit to $f, so it was not overwritten."; return 1; }
+    echo "    $f"
+  done < <(git --no-optional-locks diff --name-only -z HEAD 2>/dev/null)
+  return 0
+}
+repair_tree() {
+  [ -n "$FROM" ] || return 1
+  save_other_edits || return 1
+  if [ -n "$TO" ] && [ "$(git rev-parse HEAD)" != "$(git rev-parse "$TO^{commit}" 2>/dev/null)" ] && [ -n "$(git status --porcelain)" ]; then
+    checkout_recorded --quiet --force "$TO" || return 1
+  fi
+  checkout_recorded --quiet --force "$FROM"
+}
+
 # ---- A rollback, written down for the next start ----
 # older_release A B: A and B are releases (tags), and A is the older one.
 older_release() {
-  case "$1" in v[0-9]*) ;; *) return 1 ;; esac
-  case "$2" in v[0-9]*) ;; *) return 1 ;; esac
+  case "$1" in
+    v[0-9]*) ;;
+    *) return 1 ;;
+  esac
+  case "$2" in
+    v[0-9]*) ;;
+    *) return 1 ;;
+  esac
   [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sed 's/-/~/' | sort -V | tail -1 | sed 's/~/-/')" = "$2" ]
 }
 # A rollback, written down for the next start (HB-0840). What Hatchabot keeps
@@ -511,7 +706,7 @@ mark_rolled_back() {
   systemd_major "$1/.env"   # here, so that it is asked once a run, not in each reading
   note="$(rolled_back_note "$1")"; mark="${note#*:}"
   [ -n "$mark" ] || return 0
-  [ "${note%%:*}" != unread ] || echo "Could not read $1/.env to find the database (no node to read it with, or it failed), so this rollback is written down beside the one the service opens when .env names none, ${mark%.rolled-back}. If .env names another (HATCHABOT_DB), the next start may take up what the release left had still to do for its agents."
+  [ "${note%%:*}" != unread ] || echo "Could not read $1/.env to find the database (node failed, or with none to read it with, it has a line bash cannot read as systemd does), so this rollback is written down beside the one the service opens when .env names none, ${mark%.rolled-back}. If .env names another (HATCHABOT_DB), the next start may take up what the release left had still to do for its agents."
   if [ ! -d "$(dirname "$mark")" ]; then
     [ "${note%%:*}" != named ] || echo "The folder of the database .env names (${mark%.rolled-back}) is not there, so this rollback was not written down beside it: the next start may take up what the release left had still to do for its agents."
     return 0
@@ -527,10 +722,10 @@ mark_rolled_back() {
   if [ -n "${2:-}" ] && [ -f "$mark" ]; then cp -p "$mark" "$mark.prev" 2>/dev/null || rm -f "$mark.prev" 2>/dev/null || true
   else rm -f "$mark.prev" 2>/dev/null || true; fi
   [ -z "${2:-}" ] || printf 'noted %s\n' "$at" >> "$2" 2>/dev/null || true
-  if ! { printf '%s\n' "$at" > "$mark.tmp" && mv -f "$mark.tmp" "$mark"; } 2>/dev/null; then
+  { printf '%s\n' "$at" > "$mark.tmp" && mv -f "$mark.tmp" "$mark"; } 2>/dev/null || {
     rm -f "$mark.tmp" 2>/dev/null || true
     echo "Could not write $mark (a full disk?), so the next start may take up what the release left had still to do for its agents. Once there is room: printf '%s\n' $at > \"$mark\""
-  fi
+  }
   return 0
 }
 # systemd_major FILE: the first number of `systemctl --version`, in
@@ -545,7 +740,7 @@ mark_rolled_back() {
 # line too), and that is the rule of every systemd since 2023 and of
 # Hatchabot's own readers. Never taken from the environment: one a caller
 # exported chose the rule, so it is unset here, before any reading. The same
-# in the seven scripts that read .env so (test/backupKeyLine.test.ts).
+# in every script that reads .env so (test/backupKeyLine.test.ts, READERS).
 unset SYSTEMD_MAJOR
 systemd_major() {
   [ -z "${SYSTEMD_MAJOR+x}" ] || return 0
@@ -553,11 +748,43 @@ systemd_major() {
   SYSTEMD_MAJOR="$( { systemctl --version 2>/dev/null || true; } | sed -n '1s/^[^0-9]*\([0-9][0-9]*\).*/\1/p')"
 }
 env_named() {
-  # ENV_READ: 1 once .env was read through (no node, or one that failed, reads nothing).
+  # ENV_READ: 1 once .env was read through (a node that failed reads nothing;
+  # with no node on Linux, only what bash reads as systemd does, below).
+  # A HATCHABOT_ name is read under its name from before the rename too
+  # (AGENTCLAW_), which the service takes when the new one is not set
+  # (applyLegacyEnv): a pre-rename AGENTCLAW_IMAGE was the service's image,
+  # and the upgrade's and setup's was the default (HB-1379).
   local kv k
+  local -a names=()
+  for k in "$@"; do
+    names+=("$k")
+    case "$k" in
+      HATCHABOT_*) names+=("AGENTCLAW_${k#HATCHABOT_}") ;;
+    esac
+  done
   ENV_READ=''
   systemd_major .env
-  for k in "$@"; do printf -v "ENV_$k" '%s' ''; printf -v "ENVSET_$k" '%s' ''; done
+  for k in "${names[@]}"; do printf -v "ENV_$k" '%s' ''; printf -v "ENVSET_$k" '%s' ''; done
+  # The reading, in the < <( ... ) below, says what it is here: bash 3.2
+  # finds where one ends by its quotes and parentheses, comments in it too
+  # (review of HB-1529).
+  # - On a Mac, as the launchd job sources it (launchd-plist.sh): by
+  #   /bin/bash, with launchd's few settings and nothing on its input; the
+  #   PATH is this shell's, not the job's own (the plist's). In a subshell of
+  #   this one it had the caller's whole environment, its shell's variables
+  #   and its input (HB-1381).
+  # - With no node to ask (a restart from cron or a bare ssh, with an nvm
+  #   node off its PATH): what bash reads as systemd does, NAME=value with
+  #   spaces or tabs around the = (only those: systemd keeps a form feed or a
+  #   vertical tab) and the value whole, or quoted whole, on its line. A file
+  #   with a carriage return or a backslash at a line's end, or with a value
+  #   on any line that opens a quote it does not close on that line (systemd
+  #   reads on into the lines after it, and they are no settings of their
+  #   own), is left unread, and so is a value asked for that is quoted any
+  #   other way or has a backslash in it. Unread whenever node was not
+  #   there, a restart asked plain http on port 8080, and failed a listener
+  #   the sed it replaced had found (review of HB-1529).
+  # - Otherwise by systemd's rules, in node.
   while IFS= read -r -d '' kv; do
     k="${kv%%=*}"
     [ "$k" != . ] || { ENV_READ=1; continue; }
@@ -565,9 +792,32 @@ env_named() {
   done < <(
     if [ "$(uname -s)" = Darwin ]; then
       set +eu
-      for k in "$@"; do unset "$k"; done
-      set -a; . ./.env >/dev/null 2>&1; set +a
-      for k in "$@"; do [ -z "${!k+x}" ] || printf '%s=%s\0' "$k" "${!k}"; done
+      lj=(HOME="$HOME" PATH="$PATH")
+      for k in USER LOGNAME SHELL TMPDIR; do [ -z "${!k:-}" ] || lj+=("$k=${!k}"); done
+      env -i "${lj[@]}" /bin/bash -c 'for k in "$@"; do unset "$k"; done; set -a; . ./.env >/dev/null 2>&1; set +a
+        for k in "$@"; do [ -z "${!k+x}" ] || printf "%s=%s\0" "$k" "${!k}"; done; printf ".=\0"' launchd-job "${names[@]}" </dev/null
+    elif ! command -v node >/dev/null 2>&1; then
+      set +e
+      sp=$' \t'
+      [ -r .env ] || exit 0
+      LC_ALL=C grep -q -e $'\r' -e '\\$' .env 2>/dev/null && exit 0
+      while IFS= read -r kv || [ -n "$kv" ]; do
+        kv="${kv#"${kv%%[!$sp]*}"}"
+        [ -n "$kv" ] && [ "${kv:0:1}" != "#" ] && [ "${kv:0:1}" != ";" ] && [[ "${kv:1}" == *=* ]] || continue
+        kv="${kv:1}"; kv="${kv#*=}"; kv="${kv#"${kv%%[!$sp]*}"}"; kv="${kv%"${kv##*[!$sp]}"}"
+        [[ "$kv" == [\'\"]* ]] || continue
+        [[ "$kv" == \'*\' && "${kv:1:${#kv}-2}" != *\'* ]] || [[ "$kv" == \"*\" && "${kv:1:${#kv}-2}" != *[\"\\]* ]] || exit 0
+      done < .env
+      for k in "${names[@]}"; do
+        kv="$(LC_ALL=C grep -E "^[$sp]*$k[$sp]*=" .env 2>/dev/null | tail -n 1)"
+        [ -n "$kv" ] || continue
+        kv="${kv#*=}"; kv="${kv#"${kv%%[!$sp]*}"}"; kv="${kv%"${kv##*[!$sp]}"}"
+        if [[ "$kv" == \'*\' && "${kv:1:${#kv}-2}" != *\'* ]]; then kv="${kv:1:${#kv}-2}"
+        elif [[ "$kv" == \"*\" && "${kv:1:${#kv}-2}" != *[\"\\]* ]]; then kv="${kv:1:${#kv}-2}"
+        elif [[ "$kv" == [\'\"]* || "$kv" == *\\* ]]; then exit 0
+        fi
+        printf '%s=%s\0' "$k" "$kv"
+      done
       printf '.=\0'
     else
       node -e '
@@ -599,9 +849,39 @@ env_named() {
     };
     const out = systemd(require("node:fs").readFileSync(".env", "utf8"), process.argv[1]);
     for (const k of process.argv.slice(2)) if (Object.prototype.hasOwnProperty.call(out, k)) process.stdout.write(k + "=" + out[k] + "\0");
-    process.stdout.write(".=\0");' "${SYSTEMD_MAJOR:-}" "$@" 2>/dev/null || true
+    process.stdout.write(".=\0");' "${SYSTEMD_MAJOR:-}" "${names[@]}" 2>/dev/null || true
     fi
   )
+  for k in "$@"; do
+    case "$k" in
+      HATCHABOT_*) ;;
+      *) continue ;;
+    esac
+    kv="ENVSET_$k"; [ -z "${!kv}" ] || continue
+    kv="ENVSET_AGENTCLAW_${k#HATCHABOT_}"; [ -n "${!kv}" ] || continue
+    kv="ENV_AGENTCLAW_${k#HATCHABOT_}"
+    printf -v "ENV_$k" '%s' "${!kv}"; printf -v "ENVSET_$k" '%s' 1
+  done
+}
+# service_port VALUE: the port the service listens on with VALUE as its PORT,
+# read as the service reads it (Number(), as doctor's servicePort): 8080 when
+# it is unset, empty or no number. On Linux a " # note" after the value is
+# part of it, as systemd keeps it: the service then listens on 8080, as for
+# no PORT (before 2.193.0 it did not start), and a URL with that value in it
+# is none at all (HB-1529). With no node to ask, digits alone are a port,
+# with the ASCII white space Number takes off around them taken off too (a
+# form feed systemd keeps; review of HB-1529). The same in each script that
+# asks the listener (test/doctorServiceTargets.test.ts).
+service_port() {
+  local n ws=$' \t\n\v\f\r'
+  node -e 'process.stdout.write(String(Number(process.argv[1]) || 8080))' -- "$1" 2>/dev/null && return 0
+  n="${1#"${1%%[!$ws]*}"}"; n="${n%"${n##*[!$ws]}"}"
+  case "$n" in
+    ''|*[!0-9]*) echo 8080 ;;
+    *)
+      n="${n#"${n%%[!0]*}"}"   # the zeros it starts with dropped, as Number reads them
+      echo "${n:-8080}" ;;
+  esac
 }
 # rolled_back_note DIR: where mark_rolled_back writes, for the service in
 # DIR: beside the database it opens, `named:<note>` when .env names it,
@@ -629,7 +909,10 @@ rolled_back_note() {
       [ -e "$db" ] || [ ! -e data/agentclaw.sqlite ] || db=data/agentclaw.sqlite
     fi
     [ -n "$db" ] || { printf 'none:\n'; exit 0; }
-    case "$db" in /*) ;; *) db="$1/$db" ;; esac
+    case "$db" in
+      /*) ;;
+      *) db="$1/$db" ;;
+    esac
     printf '%s:%s\n' "$how" "$db.rolled-back" )
 }
 # The note is written only when a release was really left (review of HB-0840).

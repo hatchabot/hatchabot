@@ -1,9 +1,9 @@
 import type { Agent, Channel } from '../../domain/types.js';
 import { CHANNEL_ACCOUNT } from '../../openclaw/configWriter.js';
-import { Store } from '../../store/store.js';
+import { NAMES_NOBODY, normalizeHandle, Store } from '../../store/store.js';
 import { ID_SHAPE } from '../channels/channelIds.js';
 import { claimFirstContact, holdDoorForKnocks, KnockWindowError, watchTimeLeft, windowRanOut, type WatchTime } from './claim.js';
-import { AdmitError, grantChannelAccess, removeUnboundChannelAccess } from './members.js';
+import { AdmitError, grantChannelAccess, PRESS_WAIT_MS, removeUnboundChannelAccess } from './members.js';
 import { checkInvite, createInvite, InviteInvalidError, redeemInvite, type InviteCheck } from './invite.js';
 import type { MemberRefusal, MembersDeps } from './membersAndInvites.js';
 
@@ -29,9 +29,10 @@ export interface Invitations {
   /**
    * A new invite, after the request's body was read: web chat only where
    * people sign in here, and never to the management agent. Undefined
-   * `forHandle`: anyone with the link.
+   * `forHandle`: anyone with the link. `for`: the handle it is kept for, as
+   * it is matched (none: anyone).
    */
-  invite(agent: Agent, createdBy: string, opts: { forHandle?: string | undefined; webChat?: boolean | undefined }): MemberRefusal | { code: string; expiresAt: string };
+  invite(agent: Agent, createdBy: string, opts: { forHandle?: string | undefined; webChat?: boolean | undefined }): MemberRefusal | { code: string; expiresAt: string; for?: string };
   /** A Telegram invite copied or shared: the door held open for its knock for 30 minutes. */
   holdKnockWindow(agent: Agent, code: string): Promise<MemberRefusal | KnockWindow>;
   /**
@@ -100,13 +101,17 @@ const WAITING_PAGE = 100;
  * as ids of the shape Telegram issues. Only a message in a private chat with
  * the bot asks to pair: a group message, a button pressed or the bot started
  * is none, and taking those passed over a joiner who had only spoken to the
- * bot in a group (HB-1221 review).
+ * bot in a group (HB-1221 review). A message to a Telegram Business account
+ * the bot is connected to is one too (`business_message`, a private chat):
+ * whether OpenClaw makes a pairing request of it cannot be checked here, and
+ * one it does make would come in first and take the seat, so its sender is
+ * passed over as any other who wrote before the join (HB-1441).
  */
 const sendersOf = (updates: unknown[]): string[] => {
   const ids = new Set<string>();
   for (const u of updates) {
     if (!u || typeof u !== 'object') continue;
-    for (const kind of ['message', 'edited_message'] as const) {
+    for (const kind of ['message', 'edited_message', 'business_message', 'edited_business_message'] as const) {
       const msg = (u as Record<string, unknown>)[kind] as { chat?: { type?: unknown }; from?: { id?: unknown } } | undefined;
       if (!msg || typeof msg !== 'object' || msg.chat?.type !== 'private') continue;
       const id = msg.from?.id;
@@ -128,7 +133,7 @@ const waitsForItsOwner = (a: Agent): boolean =>
 
 export type KnockWindow =
   | { open: true; minutes: 0; alreadyOpen: true }
-  | { open: true; minutes: 30; until: string | undefined; for: string | undefined };
+  | { open: true; minutes: 30; until: string | undefined; for?: string };
 
 /** What the join page is told: every way in, so it can offer a button per app. */
 export interface JoinedOnApp {
@@ -158,7 +163,9 @@ export function createInvitations(deps: MembersDeps): Invitations {
     if (agent.ops) return { refused: 'ops-alone' };
     const { code, expiresAt } = createInvite(store, agent.id, ownerId, opts.forHandle, { webChat: opts.webChat });
     if (opts.webChat) trace(agent.id)('invite.web_chat', {});
-    return { code, expiresAt };
+    // The handle it was kept for, as it is matched: what the dialog says it is for (HB-1439 review).
+    const kept = store.getInviteByCode(code)?.expectHandle;
+    return { code, expiresAt, ...(kept && kept !== NAMES_NOBODY ? { for: kept } : {}) };
   };
 
   /**
@@ -183,18 +190,20 @@ export function createInvitations(deps: MembersDeps): Invitations {
     let until: string;
     try {
       ({ until } = await holdDoorForKnocks(
-        { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
-        { agentId: agent.id, runtimeRef: agent.runtimeRef, accountId: channel.accountId, key: inv.id, expect: inv.expectHandle },
+        { store, provider: providerFor(agent.hostId), providerFor, log: trace(agent.id) },
+        { agentId: agent.id, runtimeRef: agent.runtimeRef, accountId: channel.accountId, key: inv.id, expect: inv.expectHandle, waitMs: PRESS_WAIT_MS },
       ));
     } catch (e) {
       // The door did not open, so no knock can come: say so (HB-0953).
       if (!(e instanceof KnockWindowError)) throw e;
+      // Behind a slow write of its chat apps longer than a press waits (HB-1554).
+      if (e.outcome === 'busy') return conflict(e.message);
       return e.outcome === 'failed'
         ? { refused: 'failed', error: "Couldn't open the agent's door for their message just now — copy the invite again in a moment." }
         : conflict("The agent's container has no Telegram set up, so its door can't open for them — rebuild the agent, then copy the invite again.");
     }
     forgetKnocks(agent.id);
-    return { open: true, minutes: 30, until, for: inv.expectHandle };
+    return { open: true, minutes: 30, until, ...(inv.expectHandle && inv.expectHandle !== NAMES_NOBODY ? { for: inv.expectHandle } : {}) };
   };
 
   /**
@@ -281,7 +290,8 @@ export function createInvitations(deps: MembersDeps): Invitations {
     // An invite made for an @handle admits only that person: a known id is
     // used outright only when the invite named that very id; otherwise the
     // claim below checks the handle (night review, 2026-09-27).
-    const expected = joined.expectHandle?.replace(/^@/, '');
+    // As read back (expectedHandle): its name, or NAMES_NOBODY, which no id or name compared as one can be.
+    const expected = joined.expectHandle;
     const knownIdRaw = knownOn(accountId, joinKind);
     // The handle behind a known Telegram id, asked of a bot of the owner's
     // that already talks to them: a known member invited for their own
@@ -325,8 +335,8 @@ export function createInvitations(deps: MembersDeps): Invitations {
       if (deadline.aborted) trace(agent.id)('invite.handle_unchecked', { asked, outOfTime: true });
       return undefined;
     };
-    const matchesExpected = !expected || knownIdRaw === expected
-      || (!!knownIdRaw && joinKind === 'telegram' && (await handleOf(knownIdRaw))?.toLowerCase() === expected.toLowerCase());
+    const matchesExpected = !expected || normalizeHandle(knownIdRaw) === expected
+      || (!!knownIdRaw && joinKind === 'telegram' && normalizeHandle(await handleOf(knownIdRaw)) === expected);
     const knownId = matchesExpected ? knownIdRaw : undefined;
     // Asleep, and open to anyone: who has written to the bot meanwhile wrote
     // before this join, and is never let in by its window (HB-1221).
@@ -337,20 +347,26 @@ export function createInvitations(deps: MembersDeps): Invitations {
       const grantOpts = { agentId: agent.id, runtimeRef: agent.runtimeRef, kind: joinKind, accountId: joinKind === 'telegram' ? channelRow.accountId : CHANNEL_ACCOUNT, channelUserId: knownId };
       const grantDeps = { store, provider: admissionProvider, log: trace(agent.id) };
       let granted = false;
+      let skipped = false;
+      const identityNow = () => (!accountId ? undefined : joinKind === 'telegram'
+        ? store.knownChannelUserId(accountId) : store.identityOfUserAnywhere(accountId, joinKind));
       try {
-        await grantChannelAccess(grantDeps, grantOpts);
-        granted = true;
+        // The join, and the id they are known by, looked at again in the
+        // grant's turn: removed while it waited for their removal's scrub, it
+        // wrote them back after the flip (HB-1554); an id unlinked meanwhile
+        // is not let in either. Not still so, nothing is written.
+        skipped = (await grantChannelAccess(grantDeps, { ...grantOpts, onlyIf: () => joinStillCurrent() && identityNow() === knownId })) === 'skipped';
+        granted = !skipped;
       } catch (err) {
         logError({ err }, 'known-invitee grant failed'); // fall through to pairing after cleanup
       }
-      const identityNow = !accountId ? undefined : joinKind === 'telegram'
-        ? store.knownChannelUserId(accountId) : store.identityOfUserAnywhere(accountId, joinKind);
-      const current = joinStillCurrent() && identityNow === knownId;
+      const current = joinStillCurrent() && identityNow() === knownId;
       const bound = granted && current && (joinKind === 'telegram'
         ? store.bindMembershipChannelUser(agent.id, joined.membershipUserId, knownId)
         : store.bindMemberIdentity(agent.id, joined.membershipUserId, joinKind, knownId));
       if (!bound) {
-        if (!(await removeUnboundChannelAccess(grantDeps, grantOpts, knownId))) {
+        // Skipped, nothing was written: nothing to take back.
+        if (!skipped && !(await removeUnboundChannelAccess(grantDeps, grantOpts, knownId))) {
           throw new AdmitError('The chat approval could not be removed after joining failed. Ask the owner to check the agent\'s channel access.');
         }
         if (!current || granted) throw new AdmitError('Your membership or chat identity changed while joining. Ask the owner for a new invitation.');
@@ -434,22 +450,49 @@ export function createInvitations(deps: MembersDeps): Invitations {
   };
 
   // ---- a join waiting for its agent to run (HB-0992) -----------------------
-  const pendingJoins = (agentId: string): PendingJoin[] => {
+  const pendingJoins = (agentId: string, raw = store.agentHold(agentId, 'pending-joins')): PendingJoin[] => {
     try {
-      const list: unknown = JSON.parse(store.agentHold(agentId, 'pending-joins') ?? '[]');
+      const list: unknown = JSON.parse(raw ?? '[]');
       return Array.isArray(list) ? list.filter((j): j is PendingJoin => typeof j?.userId === 'string' && typeof j?.kind === 'string' && typeof j?.at === 'number') : [];
     } catch { return []; }
   };
+  /** The join's person is still a member, and not linked on its app yet: someone its window is still for. */
+  const unlinkedMember = (agentId: string, join: PendingJoin): boolean =>
+    store.getMembership(agentId, join.userId)?.status === 'active' && !store.memberIdentities(agentId, join.userId)[join.kind];
   const sameJoin = (a: PendingJoin, b: PendingJoin) => a.userId === b.userId && a.kind === b.kind;
   /** This very join, not a later one of the same seat (joined again after a removal). */
   const thisJoin = (a: PendingJoin, b: PendingJoin) => sameJoin(a, b) && a.at === b.at;
   const keepJoin = (agentId: string, join: PendingJoin): void => {
     store.setAgentHold(agentId, 'pending-joins', JSON.stringify([...pendingJoins(agentId).filter((j) => !sameJoin(j, join)), join]));
   };
-  const letJoinGo = (agentId: string, join: PendingJoin): void => {
-    const rest = pendingJoins(agentId).filter((j) => !thisJoin(j, join));
-    if (rest.length) store.setAgentHold(agentId, 'pending-joins', JSON.stringify(rest));
-    else store.clearAgentHold(agentId, 'pending-joins');
+  /**
+   * This join goes from the store. `generation`: only while its watch is
+   * that one, as the store says (noteWatch): in a deploy's overlap the newer
+   * process takes a kept join up with a window of its own, and the older
+   * one's watch, taken over, let go of the join the newer one now watches,
+   * so a later restart never watched it again (HB-1224). A watch the
+   * owner's Reopen took over is still its own in the store, and goes.
+   * True when this call took it out: only that one tells the owner how the
+   * join ended. In a deploy's overlap both processes could, each having
+   * seen it end (its time run out, a window the other closed, an agent
+   * that failed), and the owner was told twice (HB-1520). Taken out only
+   * while the list is as it was read (replaceAgentHold), so of two
+   * processes at once only one does; the other reads it again.
+   */
+  const letJoinGo = (agentId: string, join: PendingJoin, generation?: string): boolean => {
+    for (let tries = 0; tries < 5; tries++) {
+      const raw = store.agentHold(agentId, 'pending-joins');
+      if (raw === undefined) return false;
+      const all = pendingJoins(agentId, raw);
+      const rest = all.filter((j) => !thisJoin(j, join) || (!!generation && !!j.generation && j.generation !== generation));
+      if (rest.length === all.length) {
+        // Nothing of it: a hold that names nobody is cleared, as before.
+        if (!all.length) store.clearAgentHold(agentId, 'pending-joins', raw);
+        return false;
+      }
+      if (rest.length ? store.replaceAgentHold(agentId, 'pending-joins', raw, JSON.stringify(rest)) : store.clearAgentHold(agentId, 'pending-joins', raw)) return true;
+    }
+    return false;
   };
   /** Where this join's watch stands, with the join: what the next start resumes it with (HB-0838). */
   const noteWatch = (agentId: string, join: PendingJoin, t: WatchTime): void => {
@@ -470,6 +513,8 @@ export function createInvitations(deps: MembersDeps): Invitations {
    */
   const watchJoin = (agent: Agent, join: PendingJoin, channelRow: Channel, timeoutMs = 30 * 60_000): void => {
     let takenOver = false;
+    /** This watch's window, as it told the store (onKept). */
+    let mine: string | undefined;
     void claimFirstContact(
       { store, provider: providerFor(agent.hostId), providerFor, log: trace(agent.id), ...(deps.sleep ? { sleep: deps.sleep } : {}) },
       {
@@ -484,14 +529,17 @@ export function createInvitations(deps: MembersDeps): Invitations {
         openedAt: join.at,
         excludeKnocks: true, // nor shown as the one it waits for: they might have got in first
         kept: true, // as a join (pending-joins), not as a watch: its end is said from here
-        onKept: (t) => noteWatch(agent.id, join, t),
+        onKept: (t) => { mine = t.generation; noteWatch(agent.id, join, t); },
         onSuperseded: () => { takenOver = true; },
       },
     ).then(
       (bound) => {
-        letJoinGo(agent.id, join);
+        const went = letJoinGo(agent.id, join, mine);
         if (takenOver) return;
-        if (!bound) neverMessaged(agent, false, !!join.excludeIds?.length);
+        // Removed meanwhile: nobody is waiting to be told about (HB-1223).
+        // Let go by another process already (a deploy's overlap), it was
+        // that one's to tell (HB-1520).
+        if (!bound && went && unlinkedMember(agent.id, join)) neverMessaged(agent, false, !!join.excludeIds?.length);
       },
       // Kept, if it was: the next start of Hatchabot watches for it again.
       (err) => logError({ err }, 'invitee claim failed'),
@@ -501,28 +549,42 @@ export function createInvitations(deps: MembersDeps): Invitations {
   /**
    * Redeemed, then never messaged. Under `allowlist` their late message is
    * dropped in silence — they see nothing and neither would you, so say it
-   * now while the invite is fresh.
-   * `whileDown`: its time ran out while Hatchabot was not running, so they
-   * may have written then, and not been let in: a window is never opened
-   * again once its time is up (HB-0838 review). Their message waits under
+   * now while the invite is fresh. Members are under the agent's Sharing tab
+   * for every app (web/app/sheet.js): it said "→ Telegram → Members" for a
+   * join on Discord or Slack too, and that tab has no Members (HB-1219).
+   * `whileDown`: its time ran out with nothing watching it (its window still
+   * stored at the boot: Hatchabot was stopped, for a restart or for days, or
+   * its watch had failed), so they may have written then, and not been let
+   * in: a window is never opened again once its time is up (HB-0838 review).
+   * It said "while Hatchabot was restarting" after an outage of days too
+   * (HB-1412). Their message waits under
    * Alerts only where the agent would show it there (anyone may knock, or
    * they are known from another agent); otherwise it was turned away.
    */
-  const neverMessaged = (agent: Agent, whileDown = false, passedOver = false): void => {
+  /**
+   * The owner told a join ended unused. `failedUnwatched`: its window was
+   * still stored at the start, its agent failed meanwhile, so no watch saw
+   * either; "never messaged" was not known to be true (HB-1523 review).
+   */
+  const neverMessaged = (agent: Agent, whileDown = false, passedOver = false, failedUnwatched = false): void => {
     void opsPush.waiting(
       agent.ownerId,
-      whileDown
-        ? `⏳ Someone opened your invite to "${agent.name}", but its time to message it ran out while Hatchabot was restarting.`
+      failedUnwatched
+        ? `⏳ Someone opened your invite to "${agent.name}", but it was not watched while the agent had failed, so it was closed unused.`
+        : whileDown
+        ? `⏳ Someone opened your invite to "${agent.name}", but its time to message it ran out while Hatchabot was not watching for their message.`
         : passedOver
           // Its window passed over who had written to the bot before the join
           // (HB-1221): that may have been the invitee, so "never messaged" may be untrue.
           ? `⏳ Someone opened your invite to "${agent.name}", but no message from them was let in.`
           : `⏳ Someone opened your invite to "${agent.name}" but never messaged it.`,
-      whileDown
-        ? 'They may have written meanwhile; if so, their message was not let in. If it is waiting under "Alerts", let them in there; if not, open that agent → Telegram → Members, press "Let them in again" and ask them to write again.'
+      failedUnwatched
+        ? 'They may have written meanwhile; if so, their message was not let in. Once the agent runs again, open it → Sharing → Members, press "Let them in again" and ask them to write again.'
+        : whileDown
+        ? 'They may have written meanwhile; if so, their message was not let in. If it is waiting under "Alerts", let them in there; if not, open that agent → Sharing → Members, press "Let them in again" and ask them to write again.'
         : passedOver
-          ? 'Anyone who had already written to its bot when the invite was opened was passed over, as they might have got in first. If that was the person you invited, open that agent → Telegram → Members, press "Let them in again" and ask them to write again. To be sure only they get in, invite them by their @handle.'
-          : 'Open that agent → Telegram → Members and press "Let them in again" when they are ready.',
+          ? 'Anyone who had already written to its bot when the invite was opened was passed over, as they might have got in first. If that was the person you invited, open that agent → Sharing → Members, press "Let them in again" and ask them to write again. To be sure only they get in, invite them by their @handle.'
+          : 'Open that agent → Sharing → Members and press "Let them in again" when they are ready.',
     );
   };
 
@@ -534,8 +596,7 @@ export function createInvitations(deps: MembersDeps): Invitations {
 
   /** Something to wait for still: an agent that runs or will, the app, a member not linked on it yet. */
   const stillWaits = (agent: Agent, join: PendingJoin): boolean =>
-    !!agent.runtimeRef && (agent.state === 'RUNNING' || WAITS_TO_RUN.has(agent.state))
-    && store.getMembership(agent.id, join.userId)?.status === 'active' && !store.memberIdentities(agent.id, join.userId)[join.kind];
+    !!agent.runtimeRef && (agent.state === 'RUNNING' || WAITS_TO_RUN.has(agent.state)) && unlinkedMember(agent.id, join);
   const resumePendingJoins: Invitations['resumePendingJoins'] = () => {
     for (const { agentId } of store.agentHolds('pending-joins')) {
       const agent = store.getAgent(agentId);
@@ -543,7 +604,33 @@ export function createInvitations(deps: MembersDeps): Invitations {
       if (!joins.length) store.clearAgentHold(agentId, 'pending-joins');
       for (const join of joins) {
         const channelRow = agent ? store.getChannelForAgent(agent.id, join.kind) : undefined;
-        if (!agent || !channelRow || !stillWaits(agent, join)) { letJoinGo(agentId, join); continue; }
+        const seat = Store.pairingSeat(join.kind, join.userId);
+        const row = store.pairingWindows(agentId, new Date(0)).find((w) => w.seat === seat);
+        const passedOver = !!join.excludeIds?.length;
+        if (!agent || !channelRow || !stillWaits(agent, join)) {
+          const went = letJoinGo(agentId, join);
+          // Its window given up for an agent that failed, by its live watch,
+          // which closed it and was cut off by the restart before it let the
+          // join go and told the owner: told here, as it would have (HB-1412).
+          // It was let go in silence. Said only by the one that let it go, so
+          // a later restart, or the other process in a deploy's overlap, does
+          // not say it again (HB-1520). Its window still stored, its own (or kept before its watch said
+          // which it was), the watch was cut off before it saw the failure:
+          // given up here as that watch would have, the window closed and the
+          // owner told, once. It was let go in silence, and the row stayed
+          // until its time ran out (HB-1523). Another watch's (the owner's
+          // Reopen) is that watch's.
+          // Only by the call that let it go: another's (the other process
+          // in a deploy's overlap) is that one's to close and say.
+          const own = !!row && (!join.generation || row.generation === join.generation);
+          const unwatched = went && agent?.state === 'FAILED' && own;
+          if (unwatched) {
+            store.closePairingWindow(agentId, seat);
+            trace(agentId)('claim.window_abandoned', { agentId, state: agent.state, afterRestart: true });
+          }
+          if (went && agent?.state === 'FAILED' && channelRow && (own || (!!join.generation && !row)) && unlinkedMember(agentId, join)) neverMessaged(agent, false, passedOver, unwatched);
+          continue;
+        }
         // Its seat's window another watch's since (the owner's Reopen, which
         // may name the person; the seat joined again): not this join's to open
         // again, and nothing is said, as the live watch, taken over, says
@@ -551,8 +638,6 @@ export function createInvitations(deps: MembersDeps): Invitations {
         // with its own older one, perhaps open to anyone (HB-0838 review). A
         // join kept before its watch said its window's generation is taken as
         // its own, as before.
-        const seat = Store.pairingSeat(join.kind, join.userId);
-        const row = store.pairingWindows(agentId, new Date(0)).find((w) => w.seat === seat);
         if (join.generation && row && row.generation !== join.generation) { letJoinGo(agentId, join); continue; }
         // The up-time its window had left (HB-0838): at its last look, less the
         // time since unless the agent was down then. A join kept before its
@@ -562,17 +647,25 @@ export function createInvitations(deps: MembersDeps): Invitations {
         // ended unclaimed, as the watch would have, its window closed, never
         // opened again, and its owner told, once. Its window closed already
         // is the live watch's end, cut off by the restart before it let the
-        // join go and said so: said here (HB-0838 review). It lets the join
-        // go before it says so, so it is never said twice. Its window still
+        // join go and said so: said here (HB-0838 review). Said only if it
+        // let the join go itself, so it is never said twice, nor by both
+        // processes in a deploy's overlap (HB-1520). Its window still
         // there, its time ran out while Hatchabot was not running: they may
         // have written then, and the owner is told so.
         if (left <= 0 || windowRanOut(join.at, !!join.expect)) {
           if (row) store.closePairingWindow(agentId, seat);
-          letJoinGo(agentId, join); neverMessaged(agent, !!row); continue;
+          if (letJoinGo(agentId, join)) neverMessaged(agent, !!row, passedOver);
+          continue;
         }
-        // Closed with time still left (its member taken off, the door shut by
-        // its owner): not its to open again.
-        if (join.generation && !row) { letJoinGo(agentId, join); continue; }
+        // Closed with time still left, its person still to come: the live
+        // watch's end for another reason (the agent moved to another
+        // machine), which the restart cut off before it let the join go and
+        // told the owner. Not its to open again, and told here, as the watch
+        // would have (HB-1412): it was let go in silence. Said only by the one
+        // that let it go, so a later restart, or the other process in a
+        // deploy's overlap, does not say it again (HB-1520). A member taken
+        // off, or linked on that app since, is no longer waited for: let go above.
+        if (join.generation && !row) { if (letJoinGo(agentId, join)) neverMessaged(agent, false, passedOver); continue; }
         watchJoin(agent, join, channelRow, left);
       }
     }

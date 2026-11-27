@@ -1,10 +1,13 @@
+import { randomUUID } from 'node:crypto';
 import type { Agent, Channel } from '../../domain/types.js';
 import { CHANNEL_ACCOUNT } from '../../openclaw/configWriter.js';
 import { unannounced, type OpsPush } from '../../ops/push.js';
 import type { RuntimeProvider } from '../../providers/provider.js';
 import { normalizeHandle, type Store } from '../../store/store.js';
-import { listPairingRequests } from '../members/claim.js';
-import { AdmitError, denyPairing, REQUESTS_UNREAD, setDmPolicy } from '../members/members.js';
+import { doorAsItIs, listPairingRequests } from '../members/claim.js';
+import { AdmitError, ChannelConfigBusyError, denyPairing, REQUESTS_UNREAD, setDmPolicy, writeDmPolicy } from '../members/members.js';
+import { busyDone } from '../lifecycle/busy.js';
+import { containerUp, type UpWait } from '../lifecycle/afterRestart.js';
 
 /**
  * Knocks (HB-0808): the people asking
@@ -19,11 +22,19 @@ import { AdmitError, denyPairing, REQUESTS_UNREAD, setDmPolicy } from '../member
  *  - `knockReads`: an in-process lock (the read of an agent's knocks under
  *    way, which callers that miss the cache meanwhile share).
  *  - `announcedPairings`: the knocks already told on an owner's phone, so a
- *    sweep tells each once. Gone after a restart: a knock still waiting is
- *    told once more. Nothing is left wrong; the owner gets a second push.
+ *    sweep tells each once, kept while their agent is not read (down, or an
+ *    app that could not be read) or their owner's manager cannot be pushed
+ *    to, and dropped with a deleted agent. Gone after a restart: a knock
+ *    still waiting is told once more. Nothing is left wrong; the owner gets
+ *    a second push.
  *  - `pairingSweeping`: an in-process lock (one sweep at a time).
  *  - the sweep's two timers (the first a minute after start, then every
  *    `sweepEveryMs`). `stop()` ends them.
+ *  - the waits of doors to open once their agent is free (`openDoorWhenFree`),
+ *    each kept in the store meanwhile (the agent's `knock-door` hold, so the
+ *    next start opens it: `resumeKnockDoors`, HB-1264), and after a write
+ *    that failed. `stop()` ends them, and leaves their holds for the next
+ *    start.
  *
  * Nothing here knows about HTTP: a route reads its request, asks this, and
  * words the answer.
@@ -47,11 +58,43 @@ export interface Knocks {
   cachedKnocks(agent: Agent): Promise<Knock[]>;
   /** An approve, a deny or a new window: the next look reads the container again. */
   forgetKnocks(agentId: string): void;
-  /** The door back to `allowlist` on every app with somebody on its list, unless someone is expected or anyone may knock. Best-effort. */
-  restDoor(agent: Agent): Promise<void>;
+  /**
+   * The door back to `allowlist` on every app with somebody on its list,
+   * unless someone is expected or anyone may knock. Best-effort. `waitMs`:
+   * an owner's press, each write's longest wait for the agent's turn at its
+   * chat apps; 'busy' when one waited that long, refused, and the apps after
+   * it were left as they are.
+   */
+  restDoor(agent: Agent, opts?: { waitMs?: number }): Promise<'busy' | undefined>;
   /** One pass over every live agent with a bot: strangers turned away, the rest told on the owner's phone once. One at a time. */
   sweepPendingPairings(): Promise<void>;
-  /** End the sweep's timers: at shutdown. */
+  /**
+   * Every app's door open (Allow knocks): the first app whose write failed,
+   * and why, or undefined when all took it. An app its running config does
+   * not have (`no-account`, `no-config`) has no door to open now, and is not
+   * a refusal: its next build writes the door from the setting (HB-0995).
+   * Each write looks again once it lands (`doorAsItIs`): turned off during
+   * it, the door is put back to rest. `waitMs`, as restDoor's: refused after
+   * it, `busy`, and `why` says so in words for the owner.
+   */
+  openDoor(agent: Agent, opts?: { waitMs?: number }): Promise<{ kind: string; why: string; busy?: true } | undefined>;
+  /**
+   * "Anyone can knock" turned on while a change holds the agent: its door
+   * opened on what runs once it is free (HB-1156), or, turned off or not
+   * running then, left to its next build; a refusal said on its timeline.
+   * Kept in the store until then (the `knock-door` hold): a restart during
+   * the wait left the door shut until the next build (HB-1264). A write that
+   * failed keeps it too: the next start tries again.
+   */
+  openDoorWhenFree(agentId: string): void;
+  /**
+   * At the start: each door a wait of the last process was to open, opened
+   * as it would have been, once the agent's own operations are settled
+   * (`settledFor`), it is free, and its container is up (`upWait`: after a
+   * restart of the whole machine Docker may not have started it again yet).
+   */
+  resumeKnockDoors(settledFor?: (agentId: string) => Promise<unknown>, upWait?: UpWait): void;
+  /** End the sweep's timers and the doors' waits (their holds stay, for the next start): at shutdown. */
   stop(): void;
 }
 
@@ -130,10 +173,10 @@ export function createKnocks(deps: KnocksDeps): Knocks {
   };
 
   /** One app's knocks on an agent. */
-  const pairingRequestsOn = async (agent: Agent, ch: Channel, includeStrangers = false, strict = false): Promise<Knock[]> => {
+  const pairingRequestsOn = async (agent: Agent, ch: Channel, includeStrangers = false, strict = false, needsStore = false): Promise<Knock[]> => {
     const acct = ch.kind === 'telegram' ? ch.accountId : CHANNEL_ACCOUNT;
     const out: Knock[] = [];
-    for (const r of await listPairingRequests(providerFor(agent.hostId), agent.runtimeRef!, acct, ch.kind, { strict })) {
+    for (const r of await listPairingRequests(providerFor(agent.hostId), agent.runtimeRef!, acct, ch.kind, { strict, needsStore })) {
       const one = { ...r, kind: ch.kind };
       if (includeStrangers || expectedKnock(agent, one)) out.push(one);
     }
@@ -158,10 +201,15 @@ export function createKnocks(deps: KnocksDeps): Knocks {
     // Each app read strictly, on its own: a read that failed made a Discord
     // code go to Telegram, where it was "no longer pending" (HB-1050). Found
     // on an app that was read, it is that app; found nowhere with an app
-    // unread, the caller is told the read failed (AdmitError, 502).
+    // unread, the caller is told the read failed (AdmitError, 502). Every
+    // request on it, the ones nobody expects too: this only finds the app,
+    // and the approve or the deny is the owner's, as it is for an agent on
+    // one app. Among the expected only, a stranger's code given by hand was
+    // not found: 502 with another app unread, or else sent to Telegram, where
+    // it was no longer pending (HB-1371).
     let unread = false;
     for (const ch of store.listChannelsForAgent(agent.id)) {
-      try { if ((await pairingRequestsOn(agent, ch, false, true)).some((r) => r.code === code)) return ch.kind; }
+      try { if ((await pairingRequestsOn(agent, ch, true, true)).some((r) => r.code === code)) return ch.kind; }
       catch { unread = true; }
     }
     if (unread) throw new AdmitError(REQUESTS_UNREAD, 502);
@@ -240,13 +288,27 @@ export function createKnocks(deps: KnocksDeps): Knocks {
     // read that ran but printed nothing is one too: strictly read, it is not
     // "nobody knocking" (HB-1050). Each app on its own, and only its own
     // knocks kept: one app's store that could not be read dropped the whole
-    // agent, so another app's new knock was never told.
+    // agent, so another app's new knock was never told. One that found no
+    // store at all is one too: a migration between its steps, its table
+    // gone for a moment at the gateway's start, read as nobody knocking, and
+    // the knocks told were told again at the next sweep (HB-1369). Where
+    // there is no store yet there is no knock, and nothing to keep.
     const carried: string[] = [];
     const told = (agentId: string, kind: string, code: string) => `${agentId}:${kind}:${code}`;
+    // An agent not read at all this time (stopped, rebuilding, asleep, its
+    // bot taken off for now) keeps its told knocks too, until it is deleted:
+    // only this sweep's live agents' were kept, so one sweep it missed made
+    // the next push a knock still waiting again once it was back (HB-1370).
+    const swept = new Set(live.map((a) => a.id));
+    for (const other of store.listAllActiveAgents()) {
+      if (swept.has(other.id)) continue;
+      const theirs = `${other.id}:`;
+      for (const key of announcedPairings) if (key.startsWith(theirs)) carried.push(key);
+    }
     for (const agent of live) {
       const reqs: Knock[] = [];
       for (const ch of store.listChannelsForAgent(agent.id)) {
-        try { reqs.push(...await pairingRequestsOn(agent, ch, true, true)); } catch {
+        try { reqs.push(...await pairingRequestsOn(agent, ch, true, true, true)); } catch {
           const mine = told(agent.id, ch.kind, '');
           for (const key of announcedPairings) if (key.startsWith(mine)) carried.push(key);
           // an unreachable app is not news
@@ -267,7 +329,14 @@ export function createKnocks(deps: KnocksDeps): Knocks {
           );
           continue;
         }
-        if (!pushable.has(agent.ownerId)) continue;
+        // Their manager not up to push to for a sweep: a knock told before is
+        // kept as told, or it was pushed again once the manager was back, as
+        // an agent the sweep missed was (HB-1370 review).
+        if (!pushable.has(agent.ownerId)) {
+          const key = told(agent.id, r.kind, r.code);
+          if (announcedPairings.has(key)) carried.push(key);
+          continue;
+        }
         const who = r.meta?.firstName || r.meta?.username || 'Someone';
         found.set(told(agent.id, r.kind, r.code), {
           ownerId: agent.ownerId,
@@ -299,10 +368,13 @@ export function createKnocks(deps: KnocksDeps): Knocks {
    * list — once there IS a list and nothing is waiting to be claimed. Called
    * after every path that adds somebody, so an agent never sits in `pairing`
    * (where a stranger gets "access not configured" and a code) for longer
-   * than it has to. Best-effort: a failure leaves today's behaviour.
+   * than it has to. Best-effort: a failure leaves today's behaviour. Who
+   * it admits is read here and again in the write's turn (writeDmPolicy):
+   * asked for while a removal scrubbed, it waits for that, and does not put
+   * the removed person back (HB-1554).
    */
-  const restDoor = async (agent: Agent): Promise<void> => {
-    if (agent.allowKnocks || !agent.runtimeRef || agent.state !== 'RUNNING') return;
+  const restDoor: Knocks['restDoor'] = async (agent, opts = {}) => {
+    if (agent.allowKnocks || !agent.runtimeRef || agent.state !== 'RUNNING') return undefined;
     // Somebody is expected right now, on an app: that door stays open, and
     // only that one. Any window kept every app's door as it was (HB-0952).
     const expected = new Set(store.pairingWindows(agent.id).map((w) => w.seat.split(':')[0]));
@@ -312,20 +384,114 @@ export function createKnocks(deps: KnocksDeps): Knocks {
       if (expected.has(ch.kind)) continue;
       const admit = store.listAllowedChannelUserIds(agent.id, ch.kind);
       if (!admit.length) continue; // nobody yet: stay reachable
-      await setDmPolicy(
-        { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
-        { agentId: agent.id, runtimeRef: agent.runtimeRef, kind: ch.kind, accountId: ch.kind === 'telegram' ? ch.accountId : CHANNEL_ACCOUNT, policy: 'allowlist', allowFrom: admit },
-      ).catch(() => false);
+      const doorDeps = { store, provider: providerFor(agent.hostId), log: trace(agent.id) };
+      const door = { agentId: agent.id, runtimeRef: agent.runtimeRef, kind: ch.kind, accountId: ch.kind === 'telegram' ? ch.accountId : CHANNEL_ACCOUNT };
+      let busy = false;
+      // Still to rest, asked in its turn: a rest asked for from what was so
+      // then (a sweep's pass, a press's rest left waiting behind a slow
+      // change), landing after Allow knocks was turned on again or a window
+      // opened on this app, shut that door, and only the look again below
+      // opened it again (HB-1554 review).
+      let stillToRest = true;
+      const toRest = () => (stillToRest = !store.getAgent(agent.id)?.allowKnocks
+        && !store.pairingWindows(agent.id).some((w) => w.seat.split(':')[0] === ch.kind));
+      await setDmPolicy(doorDeps, { ...door, policy: 'allowlist', allowFrom: admit, waitMs: opts.waitMs, onlyIf: toRest })
+        .catch((err: unknown) => { busy = err instanceof ChannelConfigBusyError; return false; });
+      if (busy) return 'busy';
+      // Open now: whoever opened it wrote it open.
+      if (!stillToRest) continue;
+      // A window opened, or the agent opened to anyone, during that write,
+      // and its write of the door open landed first: shut again by this one,
+      // the window stood open with its door shut for its half hour (HB-1521).
+      // The door as the store says it is now, as closeKnockWindow does.
+      await doorAsItIs(doorDeps, { ...door, hostId: agent.hostId }, 'allowlist', { waitMs: opts.waitMs });
+    }
+    return undefined;
+  };
+
+  const openDoor: Knocks['openDoor'] = async (a, opts = {}) => {
+    for (const ch of store.listChannelsForAgent(a.id)) {
+      let why = 'the write to its volume failed';
+      let busy = false;
+      const doorDeps = { store, provider: providerFor(a.hostId), log: trace(a.id) };
+      const door = { agentId: a.id, runtimeRef: a.runtimeRef!, kind: ch.kind, accountId: ch.kind === 'telegram' ? ch.accountId : CHANNEL_ACCOUNT };
+      const out = await writeDmPolicy(doorDeps, { ...door, policy: 'pairing', waitMs: opts.waitMs })
+        .catch((err: unknown) => {
+          busy = err instanceof ChannelConfigBusyError;
+          why = String(err instanceof Error ? err.message : err).slice(0, 160);
+          return 'failed' as const;
+        });
+      if (busy) return { kind: ch.kind, why, busy: true };
+      if (out === 'failed') return { kind: ch.kind, why };
+      // Turned off during that write, its rest written and landed first: the
+      // door stood in pairing with no window and Allow knocks off until the
+      // next sweep. Every write of the door looks again once it lands, as the
+      // rests do (HB-1521 review).
+      await doorAsItIs(doorDeps, { ...door, hostId: a.hostId }, 'pairing', { waitMs: opts.waitMs });
+    }
+    return undefined;
+  };
+
+  /** Ended by stop(): a wait for an agent to be free stops, its hold kept for the next start. */
+  const doorWaits = new AbortController();
+  /**
+   * The door opened once the agent is free, as the ask `ask` (the hold's
+   * value) wanted, and that ask let go of: only it, as a later one is
+   * another wait's. At the start (`at`): its own operations waited for
+   * first (`before`), then its container (`upWait`). A write that failed,
+   * or a container not up, keeps the hold, for the next start: after a
+   * restart of the whole machine Docker may not answer yet, and the door
+   * stayed shut until the next build (HB-1264 review). An agent whose
+   * machine is not known here any more is refused for good: said, and let go.
+   */
+  const openOnceFree = async (agentId: string, ask: string, at: { before?: Promise<unknown>; upWait?: UpWait } = {}): Promise<void> => {
+    await at.before?.catch(() => undefined);
+    await busyDone(agentId, doorWaits.signal);
+    if (doorWaits.signal.aborted) return; // the process is ending: the next start opens it
+    /** Still to open: on, and running. Turned off since, or not up: its next build writes the door from the setting. */
+    const wants = (a: Agent | undefined): a is Agent & { runtimeRef: string } => !!a?.allowKnocks && !!a.runtimeRef && a.state === 'RUNNING';
+    const now = store.getAgent(agentId);
+    if (wants(now)) {
+      let provider: RuntimeProvider;
+      try { provider = providerFor(now.hostId); } catch (err) {
+        failedOpening(agentId)(err);
+        store.clearAgentHold(agentId, 'knock-door', ask);
+        return;
+      }
+      if (at.upWait && !(await containerUp(provider, now.runtimeRef, at.upWait))) return;
+      // Read again after the looks (half a minute at most): turned off,
+      // stopped, or rebuilt or moved meanwhile (its new container's build
+      // wrote the door from the setting), there is nothing to open here.
+      const after = store.getAgent(agentId);
+      if (wants(after) && after.runtimeRef === now.runtimeRef && after.hostId === now.hostId) {
+        const refused = await openDoor(after);
+        if (refused) { trace(after.id)('agent.knock_door_failed', refused); return; }
+      }
+    }
+    store.clearAgentHold(agentId, 'knock-door', ask);
+  };
+  const failedOpening = (agentId: string) => (err: unknown) => {
+    trace(agentId)('agent.knock_door_failed', { why: String(err instanceof Error ? err.message : err).slice(0, 160) });
+  };
+  const openDoorWhenFree: Knocks['openDoorWhenFree'] = (agentId) => {
+    const ask = randomUUID();
+    store.setAgentHold(agentId, 'knock-door', ask);
+    void openOnceFree(agentId, ask).catch(failedOpening(agentId));
+  };
+  const resumeKnockDoors: Knocks['resumeKnockDoors'] = (settledFor, upWait) => {
+    for (const { agentId, value } of store.agentHolds('knock-door')) {
+      void openOnceFree(agentId, value, { before: settledFor?.(agentId), upWait }).catch(failedOpening(agentId));
     }
   };
 
   return {
     expectedKnock, pairingRequestsFor, kindForCode, cachedKnocks,
     forgetKnocks: (agentId) => { forgetKnocks(agentId); },
-    restDoor, sweepPendingPairings,
+    restDoor, sweepPendingPairings, openDoor, openDoorWhenFree, resumeKnockDoors,
     stop: () => {
       if (sweepFirst) clearTimeout(sweepFirst);
       if (sweepEvery) clearInterval(sweepEvery);
+      doorWaits.abort();
     },
   };
 }

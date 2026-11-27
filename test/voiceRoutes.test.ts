@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type Database from 'better-sqlite3';
 import type { AgentState } from '../src/domain/types.js';
-import { clearBusy, isBusy, markBusy } from '../src/orchestrator/lifecycle/busy.js';
+import { isBusy, markBusy } from '../src/orchestrator/lifecycle/busy.js';
 import { beginOperation } from '../src/orchestrator/lifecycle/operations.js';
 import { voiceNetworkReady } from '../src/orchestrator/voice/voiceNetwork.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
@@ -11,7 +11,6 @@ const opened: World[] = [];
 const releasePending: Array<() => void> = [];
 afterEach(async () => {
   while (releasePending.length) releasePending.pop()!();
-  clearBusy('a1');
   while (opened.length) await opened.pop()!.f.close();
 });
 

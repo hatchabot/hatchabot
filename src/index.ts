@@ -39,7 +39,11 @@ import type { RuntimeProvider } from './providers/provider.js';
 import { syncEnvFile } from './config/envFile.js';
 
 const DB_PATH = process.env.HATCHABOT_DB ?? defaultDbPath();
-const PORT = Number(process.env.PORT ?? 8080);
+// 8080 for a PORT that is empty, 0 or no number, as doctor (servicePort) and
+// the scripts (service_port) take it: an empty or 0 one bound a port at
+// random, which nothing then asked, and one with a " # note" after it, which
+// systemd keeps in the value, stopped the start (review of HB-1529).
+const PORT = Number(process.env.PORT) || 8080;
 
 mkdirSync(dirname(DB_PATH), { recursive: true });
 // The data dir holds the DB, CLI scratch homes, and build logs — no other

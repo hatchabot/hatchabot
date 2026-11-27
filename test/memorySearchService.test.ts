@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../src/store/store.js';
 import { createMemorySearch, type MemorySearch } from '../src/orchestrator/memorySearch/memorySearch.js';
-import { clearBusy, markBusy } from '../src/orchestrator/lifecycle/busy.js';
+import { markBusy } from '../src/orchestrator/lifecycle/busy.js';
 import type { Agent } from '../src/domain/types.js';
 
 /**
@@ -26,7 +26,6 @@ beforeEach(() => {
 afterEach(() => {
   for (const w of made.splice(0)) w.ms.stop();
   for (const k of ENV_KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
-  for (const id of ['a1', 'a2', 'a3']) clearBusy(id);
   rmSync(dir, { recursive: true, force: true });
   vi.useRealTimers();
 });

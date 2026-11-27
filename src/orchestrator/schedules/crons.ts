@@ -602,7 +602,7 @@ export async function addCron(
   runtimeRef: string,
   slug: string,
   opts: AddCronOptions,
-): Promise<{ ok: true; id?: string; quieted?: true } | { ok: false; error: string }> {
+): Promise<{ ok: true; id?: string; quieted?: true } | { ok: false; error: string; cutOff?: true }> {
   const argv = ['cron', 'add', '--json', '--agent', slug, '--name', opts.name, '--message', opts.message];
   if (opts.cron) argv.push('--cron', opts.cron);
   else if (opts.everyMs) argv.push('--every', msToEvery(opts.everyMs));
@@ -617,7 +617,9 @@ export async function addCron(
   argv.push(...deliveryArgs(to));
   const res = await provider.exec(runtimeRef, argv);
   if (res.code !== 0) {
-    return { ok: false, error: (res.stderr || res.stdout || 'cron add failed').slice(0, 300) };
+    // `cutOff`: not run, or no answer (a timeout, a machine that did not
+    // answer): the agent did not refuse it, and may have it (HB-1409 review).
+    return { ok: false, error: (res.stderr || res.stdout || 'cron add failed').slice(0, 300), ...(res.unreachable || res.timedOut || res.signalled ? { cutOff: true as const } : {}) };
   }
   // Meant to announce but no one to post to yet (the owner's id not known):
   // made quiet, and `quieted` tells the caller to remember it, so the repair

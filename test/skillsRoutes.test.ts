@@ -1,14 +1,13 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type Database from 'better-sqlite3';
 import type { AgentState } from '../src/domain/types.js';
-import { clearBusy, markBusy } from '../src/orchestrator/lifecycle/busy.js';
+import { markBusy } from '../src/orchestrator/lifecycle/busy.js';
 import { beginOperation } from '../src/orchestrator/lifecycle/operations.js';
 import { CURATED_SKILLS } from '../src/openclaw/skills.js';
 import { as, makeWorld, seedRunningAgent, type World } from './support/world.js';
 
 const worlds: World[] = [];
 afterEach(async () => {
-  clearBusy('a1');
   while (worlds.length) await worlds.pop()!.f.close();
 });
 const db = (w: World) => (w.store as unknown as { db: Database.Database }).db;

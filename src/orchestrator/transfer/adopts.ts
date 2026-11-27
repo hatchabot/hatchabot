@@ -6,7 +6,7 @@ import type { Store } from '../../store/store.js';
 import { applyWorkspace, botPollState, findExistingBot, inspectWorkspace } from './adopt.js';
 import { AgentBusyError, isBusy, whileBusy } from '../lifecycle/busy.js';
 import { listCrons } from '../schedules/crons.js';
-import { discoverOpenclawAgents, quiesceOpenclawBots } from './openclawImport.js';
+import { discoverOpenclawAgents, quiesceOpenclawBots, restartByHand } from './openclawImport.js';
 import { autoSnapshot } from '../files/snapshots.js';
 import {
   migrateCrons,
@@ -17,8 +17,11 @@ import {
 } from './cronImport.js';
 import { scanWorkspacePaths } from './dataPaths.js';
 
-/** What an adopt says about the source's scheduled tasks. */
-export type AdoptCrons = { total: number; carried: number; failed: number; deferred?: number; error?: string; notReady?: boolean };
+/**
+ * What an adopt says about the source's scheduled tasks. `changed`: carried
+ * before, and edited in the old workspace since, so not brought (HB-1200).
+ */
+export type AdoptCrons = { total: number; carried: number; failed: number; deferred?: number; changed?: number; error?: string; notReady?: boolean };
 /** How long a deferred adopt waits for its agent's gateway to answer, from the first pass that
  *  found the agent running, before its tasks count as failed. */
 const ADOPT_WAIT_MS = 24 * 3600_000;
@@ -115,6 +118,12 @@ export function createAdopts(deps: AdoptsDeps): Adopts {
    * (HB-1466).
    */
   const adoptRefused = new Set<string>();
+  /**
+   * Deferred adopts whose re-point failed (not refused), said once for a run
+   * of failures: tried hourly, every one said filled the 200 events an agent
+   * keeps in about eight days (HB-1476). Let go once one runs.
+   */
+  const adoptFailSaid = new Set<string>();
 
   /**
    * Point an adopted workspace's OWN absolute paths (its old workspace and
@@ -214,14 +223,17 @@ export function createAdopts(deps: AdoptsDeps): Adopts {
       // them. Anything else failed it: said each time, and its record waits
       // for the hourly try (HB-1466). Neither is fatal.
       refused = err instanceof AgentBusyError;
-      if (!refused) trace(agent.id)('adopt.repoint_failed', { error: String(err).slice(0, 200) });
-      else if (!adoptRefused.has(`${agent.id}\n${path}`)) {
+      if (!refused) {
+        if (!deferred || !adoptFailSaid.has(`${agent.id}\n${path}`)) trace(agent.id)('adopt.repoint_failed', { error: String(err).slice(0, 200) });
+        if (deferred) adoptFailSaid.add(`${agent.id}\n${path}`);
+      } else if (!adoptRefused.has(`${agent.id}\n${path}`)) {
         adoptRefused.add(`${agent.id}\n${path}`);
         trace(agent.id)('adopt.repoint_busy', { error: String(err).slice(0, 120) });
       }
       return false;
     });
     if (!refused) adoptRefused.delete(`${agent.id}\n${path}`);
+    if (ran) adoptFailSaid.delete(`${agent.id}\n${path}`);
     return { crons: ran && !stale ? crons : undefined, refused };
   };
   const repointAdopted = async (agent: Agent, path: string, deferred = false, wait = false): Promise<AdoptCrons | undefined> =>
@@ -229,25 +241,31 @@ export function createAdopts(deps: AdoptsDeps): Adopts {
   /** Per deferred adopt (agent + path): how long its agent has been found running (ms, and when
    *  last seen running), and when it was last tried: a look at its gateway, or a re-point that
    *  ran or failed. A refused re-point is not counted, so the next pass tries again (HB-1466).
-   *  In memory: a restart costs one early try and starts its day again. */
-  const adoptRan = new Map<string, { ms: number; seen?: number }>();
+   *  In memory: a restart costs one early try and starts its day again. `at`: the adopt's own
+   *  time (its record's), so the same folder adopted again gets its own day and first look (HB-1476). */
+  const adoptRan = new Map<string, { ms: number; seen?: number; at?: string }>();
   const adoptLastTry = new Map<string, number>();
   /** Adopts that could not re-point yet (stopped, or busy then): each runs once its agent is running. */
   const finishDeferredAdopts = async () => {
     const now = Date.now();
     const live = new Set<string>();
-    for (const { agentId, path } of store.listAdoptPending()) {
+    for (const { agentId, path, at } of store.listAdoptPending()) {
       const key = `${agentId}\n${path}`;
       live.add(key);
       const a = store.getAgent(agentId);
       if (!a || a.state === 'DELETED' || a.state === 'ARCHIVED') { store.clearAdoptPending(agentId, path); continue; }
+      // The same folder adopted again since: a new adopt, with its own first
+      // look, its own day and its own words, not the older one's (HB-1476).
+      if (adoptRan.has(key) && adoptRan.get(key)!.at !== at) {
+        adoptRan.delete(key); adoptLastTry.delete(key); adoptWaitSaid.delete(key); adoptFailSaid.delete(key);
+      }
       // Its day counts only while the agent runs: stopped, the clock stops
       // (counted on, a start after a day gave up at once while the gateway
       // booted; started afresh, sleeping and waking meant it never gave up).
       // Review of the final-audit fixes, 2026-10-22.
       const ran = adoptRan.get(key) ?? { ms: 0 };
-      if (a.state !== 'RUNNING' || !a.runtimeRef) { adoptRan.set(key, { ms: ran.ms }); adoptLastTry.delete(key); adoptRefused.delete(key); continue; }
-      adoptRan.set(key, { ms: ran.ms + (ran.seen === undefined ? 0 : now - ran.seen), seen: now });
+      if (a.state !== 'RUNNING' || !a.runtimeRef) { adoptRan.set(key, { ms: ran.ms, at }); adoptLastTry.delete(key); adoptRefused.delete(key); continue; }
+      adoptRan.set(key, { ms: ran.ms + (ran.seen === undefined ? 0 : now - ran.seen), seen: now, at });
       if (isBusy(a.id)) continue;
       // Its day starts when it is first found running, not at the adopt
       // (one started two days later got a single try), and a gateway that did
@@ -266,7 +284,11 @@ export function createAdopts(deps: AdoptsDeps): Adopts {
       // if both time out; then the adopt is back to the hourly look.
       if (wait && !adoptRefused.has(key)) {
         // One look at its gateway, outside the busy guard: not up yet, the agent stays free.
-        const up = await listCrons(providerFor(a.hostId), a.runtimeRef, a.slug).then(() => true, () => false);
+        // On a machine this server does not know (a runner removed), not up
+        // either: it threw out of the whole pass, every pass, and the adopts
+        // after it never ran (HB-1476).
+        const ref = a.runtimeRef;
+        const up = await Promise.resolve().then(() => listCrons(providerFor(a.hostId), ref, a.slug)).then(() => true, () => false);
         if (!up) {
           if (!adoptWaitSaid.has(key)) { adoptWaitSaid.add(key); trace(a.id)('adopt.deferred_waiting', {}); }
           continue;
@@ -279,11 +301,14 @@ export function createAdopts(deps: AdoptsDeps): Adopts {
       // (HB-1466).
       if (refused) adoptLastTry.delete(key);
       if (crons && !store.listAdoptPending().some((r) => r.agentId === agentId && r.path === path)) {
-        trace(a.id)('adopt.deferred_done', { total: crons.total, carried: crons.carried, failed: crons.failed, ...(crons.error ? { error: crons.error } : {}) });
+        trace(a.id)('adopt.deferred_done', { total: crons.total, carried: crons.carried, failed: crons.failed, ...(crons.changed ? { changed: crons.changed } : {}), ...(crons.error ? { error: crons.error } : {}) });
       }
     }
     for (const k of [...adoptRan.keys()]) if (!live.has(k)) { adoptRan.delete(k); adoptLastTry.delete(k); }
-    for (const k of [...adoptRefused]) if (!live.has(k)) adoptRefused.delete(k);
+    // And what was said of an adopt whose record went another way (its agent
+    // deleted or archived, a newer adopt): kept, the same folder adopted
+    // again later was never said to wait (HB-1476).
+    for (const set of [adoptRefused, adoptWaitSaid, adoptFailSaid]) for (const k of [...set]) if (!live.has(k)) set.delete(k);
   };
 
   return {
@@ -307,6 +332,8 @@ export function createAdopts(deps: AdoptsDeps): Adopts {
               enabledInSource: bot.enabledInSource,
               channelOffInSource: bot.channelOffInSource,
               polling: await botPollState(bot.botToken),
+              // How the owner restarts this machine's gateway once the account is off, as the hand-over does (HB-1282).
+              restartCommand: restartByHand(),
             }
           : undefined,
       };
@@ -351,11 +378,20 @@ export function createAdopts(deps: AdoptsDeps): Adopts {
       // 2026-10-22, A39).
       if (selfEntry) store.setAdoptPending(agent.id, path, new Date().toISOString());
       else store.dropAdoptPending(agent.id);
-      /** The tasks its record carries later, as the answer says them. */
+      /**
+       * The tasks its record carries later, as the answer says them: those it
+       * will add, not every task read (HB-1475 review). One carried here
+       * before is not: its copy cannot be looked for while the agent's
+       * gateway is down, and is taken as there (deleted since, it is added
+       * once the agent runs, and its timeline says how many came). A task
+       * with no record (one from a store with no ids has none), or whose
+       * record names no copy, is.
+       */
       const putOff = (entry: NonNullable<typeof selfEntry>): AdoptCrons => {
         const read = readOpenclawCronStore(entry.id);
-        const pending = read.crons.length;
-        let later: AdoptCrons = pending > 0 ? { total: pending, carried: 0, failed: 0, deferred: pending } : { total: 0, carried: 0, failed: 0 };
+        const kept = new Map(store.carriedTasks(agent.id).filter((k) => k.sourceAgent === entry.id).map((k) => [k.sourceId, k]));
+        const pending = read.crons.filter((c) => !c.sourceId || !kept.get(c.sourceId)?.copyId).length;
+        let later: AdoptCrons = { total: read.crons.length, carried: 0, failed: 0, ...(pending > 0 ? { deferred: pending } : {}) };
         if (read.error) later = { ...later, error: read.error };
         return later;
       };

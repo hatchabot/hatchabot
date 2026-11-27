@@ -28,13 +28,15 @@ async function world(ownerKnownOnAnotherAgent: boolean) {
   // The Hatchabot agent: web-only, then given a bot.
   await mk(ops, { ops: true, webOnly: true });
   const f = Fastify();
+  // The spare's lease, as the pool lists it once leased: the attach checks it before connecting the bot (HB-1263).
+  let leasedTo: string | undefined;
   await registerRoutes(f, {
     store, secrets: { put: async () => {}, get: async () => 'x', delete: async () => {} } as never,
     providers: new Map([['mock', provider]]),
     channel: {
       kind: 'telegram',
-      pool: { owns: () => true, availableCount: () => 1, list: () => [] },
-      provision: async () => ({ accountId: 'managerbot', secretRef: 'pool/managerbot', deepLink: 'https://t.me/managerbot' }),
+      pool: { owns: () => true, availableCount: () => 1, list: () => [{ username: 'managerbot', leasedTo }] },
+      provision: async (req: { agentId: string }) => { leasedTo = req.agentId; return { accountId: 'managerbot', secretRef: 'pool/managerbot', deepLink: 'https://t.me/managerbot' }; },
       syncDisplayName: async () => {},
       release: async () => {},
     } as never,

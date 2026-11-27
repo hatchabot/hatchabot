@@ -13,7 +13,7 @@ import { clearBusy } from '../src/orchestrator/lifecycle/busy.js';
 import { filesReplacingCount, newBootForTests, setStepHookForTests, SimulatedCrash } from '../src/orchestrator/lifecycle/operations.js';
 import { resolvePendingValues, stashPendingSecrets } from '../src/orchestrator/apps/appPending.js';
 import {
-  AppError, checkCodeSize, codeSizeBound, fieldsToAsk, gitOnHost, hostGit, installRelease, manifestAt, mergeConfig, mirrorDir, parseManifest, parseSource, releaseTar, removeTasks, repoFor, resolveRelease, switchTo, syncTasks, taskTransitionPending, type AgentFacts,
+  AppError, checkCodeSize, codeSizeBound, fieldsToAsk, gitOnHost, hostGit, installRelease, manifestAt, mergeConfig, mirrorDir, parseManifest, parseSource, releaseTar, removeTasks, repoFor, resolveRelease, staleFilledFields, switchTo, syncTasks, taskTransitionPending, type AgentFacts,
 } from '../src/orchestrator/apps/apps.js';
 
 /**
@@ -1945,7 +1945,7 @@ describe('an app change cut off by a restart (kill at every step)', { timeout: I
 describe('apps: what the 2026-10-27 audit found (waiting installs, replacing, rolling back)', { timeout: INTEGRATION_TIMEOUT }, () => {
   const OWNER = 'owner-1';
   const hdr = { 'x-hatchabot-owner': OWNER };
-  afterEach(() => { setStepHookForTests(undefined); clearBusy('a1'); });
+  afterEach(() => { setStepHookForTests(undefined); });
   /** A fetch that waits at a gate once armed (`only`: just the fetch whose arguments name it). */
   const gated = () => {
     let armed: string | undefined;
@@ -2726,7 +2726,7 @@ describe('apps: what the 2026-10-29 audit found', () => {
 describe('apps: what the 2026-11-23 audit found', { timeout: INTEGRATION_TIMEOUT }, () => {
   const OWNER = 'owner-1';
   const hdr = { 'x-hatchabot-owner': OWNER };
-  afterEach(() => { setStepHookForTests(undefined); clearBusy('a1'); });
+  afterEach(() => { setStepHookForTests(undefined); });
   const until = async (ok: () => boolean) => {
     for (let n = 0; n < 500; n++) { if (ok()) return; await new Promise((r) => setTimeout(r, 10)); }
     throw new Error('did not settle');
@@ -3005,6 +3005,44 @@ describe('apps: what the 2026-11-23 audit found', { timeout: INTEGRATION_TIMEOUT
     await w.f.close();
   });
 
+  it('"Put its scheduled tasks back" with the new release\'s folder gone for good is not held over it: its kept task record names what is on (HB-1199)', async () => {
+    const OTHER = { ...MANIFEST, app: 'otherapp', tasks: [MANIFEST.tasks[0]!, { name: 'digest', every: '1h', command: ['python3', '-m', 'demo', 'digest'] }] };
+    const heldForTasksBack = async () => {
+      const w = await world();
+      expect((await w.post('', { source: repo(TWO_TASKS), values: { mailbox: 'demo@example.org' } })).statusCode).toBe(200);
+      // Its tasks go on and come off again (one is refused), it is switched back; the old App's will not go back on.
+      w.provider.failAdd = (name) => name === 'otherapp-digest' || name.startsWith('demoapp-');
+      await w.post('', { source: repo(OTHER), values: { mailbox: 'demo@example.org' } });
+      const op = w.store.listOperations(['a1'])[0]!;
+      expect(op.recovery!.actions.map((a) => a.action)).toEqual(['put-tasks-back']);
+      w.provider.failAdd = () => false;
+      const releases = join(w.provider.root('mock://a1'), 'otherapp/releases');
+      for (const d of readdirSync(releases)) rmSync(join(releases, d), { recursive: true, force: true });
+      return { w, op };
+    };
+    // Gone, with none of its tasks on: put back, and settled.
+    const { w, op } = await heldForTasksBack();
+    const back = await w.f.inject({ method: 'POST', url: `/v1/operations/${op.id}/recover`, headers: hdr, payload: { action: 'put-tasks-back' } });
+    expect(back.statusCode, back.body).toBe(200);
+    expect(back.json().operation.status).toBe('rolled_back');
+    expect(appTasks(w.provider)).toEqual(['demoapp-digest', 'demoapp-tick']);
+    expect(appTasks(w.provider, 'otherapp')).toEqual([]);
+    expect(w.store.getAgentApp('a1')?.app).toBe('demoapp');
+    await w.f.close();
+    // Gone, with a task its kept record names still on: held with the two choices, and going back takes it off.
+    const on = await heldForTasksBack();
+    on.w.provider.jobs.push({ id: 'left-on', name: 'otherapp-tick' });
+    writeFileSync(join(on.w.provider.root('mock://a1'), 'otherapp/.tasks-settled.json'), JSON.stringify({ version: 1, jobs: [{ id: 'left-on', name: 'otherapp-tick', manifest: OTHER }] }));
+    const again = await on.w.f.inject({ method: 'POST', url: `/v1/operations/${on.op.id}/recover`, headers: hdr, payload: { action: 'put-tasks-back' } });
+    expect(again.json().operation).toMatchObject({ status: 'held', outcome: expect.stringMatching(/^otherapp's scheduled tasks are on the agent, so it is not as it was before/) });
+    expect(on.w.store.getOperation(on.op.id)!.recovery!.actions.map((a) => a.action)).toEqual(['use-new', 'go-back']);
+    const gone = await on.w.f.inject({ method: 'POST', url: `/v1/operations/${on.op.id}/recover`, headers: hdr, payload: { action: 'go-back' } });
+    expect(gone.json().operation.status).toBe('rolled_back');
+    expect(appTasks(on.w.provider, 'otherapp')).toEqual([]);
+    expect(appTasks(on.w.provider)).toEqual(['demoapp-digest', 'demoapp-tick']);
+    await on.w.f.close();
+  });
+
   it('a task change of the new App left part way, with none of its tasks on, is said as that (HB-1080)', async () => {
     const w = await world();
     expect((await w.post('', { source: repo(TWO_TASKS), values: { mailbox: 'demo@example.org' } })).statusCode).toBe(200);
@@ -3146,6 +3184,64 @@ describe('apps: what the 2026-11-23 audit found', { timeout: INTEGRATION_TIMEOUT
     await w.f.close();
   });
 
+  it('a failure that is not one of the App rules says which press did not finish: the install, the update, the roll back', async () => {
+    const w = await world();
+    const dir = repo(TWO_TASKS);
+    recordingFails();
+    const ins = await w.post('', { source: dir, values: { mailbox: 'demo@example.org' } });
+    expect(ins.statusCode).toBe(502);
+    expect(ins.json().error).toMatch(/^The install did not finish: /);
+    await w.f.close();
+    const v = await world();
+    expect((await v.post('', { source: dir, values: { mailbox: 'demo@example.org' } })).statusCode).toBe(200);
+    commit(dir, { ...TWO_TASKS, tasks: [MANIFEST.tasks[0]!, { name: 'weekly', every: '7d', command: ['python3', '-m', 'demo', 'weekly'] }] });
+    recordingFails();
+    const upd = await v.post('/update', {});
+    expect(upd.statusCode).toBe(502);
+    expect(upd.json().error).toMatch(/^The update did not finish: demoapp /);
+    await v.f.close();
+    const r = await world();
+    expect((await r.post('', { source: dir, values: { mailbox: 'demo@example.org' } })).statusCode).toBe(200);
+    commit(dir, { ...TWO_TASKS, config: { fields: [...MANIFEST.config.fields, { key: 'extra', default: 'on' }] } });
+    expect((await r.post('/update', {})).statusCode).toBe(200);
+    recordingFails();
+    const back = await r.f.inject({ method: 'POST', url: '/v1/agents/a1/app/rollback', headers: hdr });
+    expect(back.statusCode).toBe(502);
+    expect(back.json().error).toMatch(/^The roll back did not finish: demoapp /);
+    await r.f.close();
+  });
+
+  it('a roll back whose step after its tasks fails is held with what went on, never pointed back over them, and either choice settles it (HB-1311)', async () => {
+    for (const choice of ['go-back', 'use-new'] as const) {
+      const w = await world();
+      const dir = repo(TWO_TASKS);
+      expect((await w.post('', { source: dir, values: { mailbox: 'demo@example.org' } })).statusCode).toBe(200);
+      const first = w.store.getAgentApp('a1')!.sha;
+      commit(dir, { ...TWO_TASKS, tasks: [MANIFEST.tasks[0]!, { name: 'weekly', every: '7d', command: ['python3', '-m', 'demo', 'weekly'] }] });
+      expect((await w.post('/update', {})).statusCode).toBe(200);
+      const second = w.store.getAgentApp('a1')!.sha;
+      expect(appTasks(w.provider)).toEqual(['demoapp-tick', 'demoapp-weekly']);
+      recordingFails();
+      const r = await w.f.inject({ method: 'POST', url: '/v1/agents/a1/app/rollback', headers: hdr });
+      expect(r.json()).toMatchObject({ held: true, unchanged: false });
+      expect(r.json().error).toMatch(new RegExp(`demoapp ${first.slice(0, 12)} was switched on and its scheduled tasks went on \\(demoapp-tick, demoapp-digest\\), then recording that its tasks are on failed: database is locked\\. Nothing was switched back, so it waits for your choice on its page: use the release it went back to \\(${first.slice(0, 12)}\\), or stay on ${second.slice(0, 12)}\\.$`));
+      // The release it went back to, with its tasks: never the newer one's link over them.
+      expect(w.provider.live('mock://a1').current).toBe(`releases/${first.slice(0, 12)}`);
+      expect(appTasks(w.provider)).toEqual(['demoapp-digest', 'demoapp-tick']);
+      expect(w.store.getAgentApp('a1')!.sha).toBe(second);
+      const op = w.store.listOperations(['a1'])[0]!;
+      expect(op).toMatchObject({ kind: 'app-rollback', status: 'held' });
+      expect(op.recovery!.actions.map((a) => a.action)).toEqual(['use-new', 'go-back']);
+      const done = await recover(w, op.id, choice);
+      expect(done.statusCode, done.body).toBe(200);
+      const want = choice === 'use-new' ? first : second;
+      expect(w.provider.live('mock://a1').current).toBe(`releases/${want.slice(0, 12)}`);
+      expect(appTasks(w.provider)).toEqual(choice === 'use-new' ? ['demoapp-digest', 'demoapp-tick'] : ['demoapp-tick', 'demoapp-weekly']);
+      expect(w.store.getAgentApp('a1')!.sha).toBe(want);
+      await w.f.close();
+    }
+  });
+
   it('a prune of old releases whose call is rejected is logged, and the install that finished stands (HB-1192)', async () => {
     const w = await world();
     const dir = repo(TWO_TASKS);
@@ -3193,6 +3289,92 @@ describe('apps: what the 2026-11-23 audit found', { timeout: INTEGRATION_TIMEOUT
     expect(appTasks(w.provider, 'otherapp')).toEqual(['otherapp-tick']);
     expect(w.store.getAgentApp('a1')!.app).toBe('otherapp');
     await w.f.close();
+  });
+
+  it('an update to a newer commit whose config is refused unpacks nothing: its code never reaches the agent (HB-1312)', async () => {
+    const dir = repo();
+    const agent = new FakeAgent();
+    const d = { provider: agent, runtimeRef: 'x', facts: FACTS };
+    await installRelease(d, await resolveRelease(hostGit, gitOf(dir), 'HEAD'), { mailbox: 'demo@example.org' });
+    const releases = join(agent.root('x'), 'demoapp/releases');
+    const had = readdirSync(releases).sort();
+    const live = agent.live('x');
+    // A field made required with no value; then a check of the config that refuses it.
+    commit(dir, { ...MANIFEST, config: { fields: [...MANIFEST.config.fields, { key: 'feed_code', type: 'text', required: true }] } });
+    const newer = await resolveRelease(hostGit, gitOf(dir), 'HEAD');
+    const mark = agent.calls.length;
+    await expect(installRelease(d, newer, {})).rejects.toThrow(/Needs a value for: feed_code/);
+    await expect(installRelease({ ...d, checkConfig: () => { throw new AppError('Another agent runs Demo App on that mailbox.'); } }, newer, { feed_code: 'made-up' }))
+      .rejects.toThrow(/Another agent runs Demo App/);
+    expect(agent.calls.slice(mark).filter((c) => c.kind === 'write')).toEqual([]);
+    expect(readdirSync(releases).sort()).toEqual(had);
+    expect(agent.live('x')).toEqual(live);
+    // Given its value and allowed, it goes in.
+    expect((await installRelease(d, newer, { feed_code: 'made-up' })).sha).toBe(newer.sha);
+    expect(readdirSync(releases)).toContain(newer.sha.slice(0, 12));
+  });
+
+  it("a config file that cannot be read is said without its text: a read cut off part way never quotes the settings (HB-1196)", async () => {
+    const KEY = 'made-up-feed-code-4410';
+    const withKey = { ...MANIFEST, config: { fields: [...MANIFEST.config.fields, { key: 'feed_code', type: 'text', required: true, secret: true }] } };
+    const r = await resolveRelease(hostGit, gitOf(repo(withKey)), 'HEAD');
+    const agent = new FakeAgent();
+    const d = { provider: agent, runtimeRef: 'x', facts: FACTS };
+    await installRelease(d, r, { mailbox: 'demo@example.org', feed_code: KEY });
+    const file = `${APPS}/demoapp/data/config.json`;
+    // The read prints the file, then fails with nothing on stderr (a timeout part way).
+    agent.breakScript = (sc) => (sc.startsWith(`if [ -e '${file}' ]`) ? `cat '${file}'; exit 1` : sc);
+    const e = (await installRelease(d, r, {}).catch((x: unknown) => x)) as Error;
+    expect(e.message).toMatch(/^Could not read .*config\.json in the agent \(it ended with code 1, saying nothing\), so its settings were left as they are/);
+    expect(e.message).not.toContain(KEY);
+    expect(e.message).not.toContain('demo@example.org');
+    // Update's check of the settings Hatchabot fills reads it the same way.
+    const stale = (await staleFilledFields(d, r.manifest).catch((x: unknown) => x)) as Error;
+    expect(stale.message).toMatch(/\(it ended with code 1, saying nothing\)/);
+    expect(stale.message).not.toContain(KEY);
+    // What it says on stderr is said, with a value given masked.
+    agent.breakScript = (sc) => (sc.startsWith(`if [ -e '${file}' ]`) ? `echo "cat: cannot read it while ${KEY} is held" >&2; exit 1` : sc);
+    const said = (await installRelease(d, r, { feed_code: KEY }).catch((x: unknown) => x)) as Error;
+    expect(said.message).toContain('cat: cannot read it while •••••• is held');
+  });
+
+  it('an update that drops a field masks only what was secret: a plain value of a field a known release declared is shown (HB-1198)', async () => {
+    const KEY = 'made-up-feed-code-2208';
+    const REGION = 'north-ridge-zone';
+    const HAND = 'made-up-hand-value-77';
+    const first = { ...MANIFEST, config: { fields: [...MANIFEST.config.fields, { key: 'feed_code', type: 'text', required: true, secret: true }, { key: 'region', type: 'text' }] } };
+    const dir = repo(first);
+    const agent = new FakeAgent();
+    const d = { provider: agent, runtimeRef: 'x', facts: FACTS };
+    const r1 = await resolveRelease(hostGit, gitOf(dir), 'HEAD');
+    await installRelease(d, r1, { mailbox: 'demo@example.org', feed_code: KEY, region: REGION });
+    // A setting no release declares, written in the file by hand.
+    const cfg = JSON.parse(readFileSync(agent.configFile('x'), 'utf8'));
+    writeFileSync(agent.configFile('x'), JSON.stringify({ ...cfg, handmade: HAND }));
+    // The next release drops both fields; its tests print the config.
+    commit(dir, MANIFEST);
+    const r2 = await resolveRelease(hostGit, gitOf(dir), 'HEAD');
+    agent.testCode = 1;
+    agent.testOutput = `config: feed_code=${KEY} region=${REGION} handmade=${HAND}\nFAILED (failures=1)`;
+    const failed = (await installRelease(d, r2, {}).catch((x: unknown) => x)) as Error & { test: { output: string } };
+    expect(failed.test.output).toContain(`region=${REGION}`);
+    expect(failed.test.output).toContain('feed_code=•••••• ');
+    expect(failed.test.output).toContain('handmade=••••••');
+    expect(failed.message).toContain(`region=${REGION}`);
+    // It goes in; a release after it knows the first one from the app record's previous release.
+    agent.testCode = 0;
+    await installRelease(d, r2, {});
+    commit(dir, { ...MANIFEST, name: 'Demo App 3' });
+    const r3 = await resolveRelease(hostGit, gitOf(dir), 'HEAD');
+    agent.testCode = 1;
+    const later = (await installRelease({ ...d, recorded: { app: 'demoapp', sha: r2.sha, manifest: r2.manifest, previousManifest: r1.manifest } }, r3, {}).catch((x: unknown) => x)) as Error & { test: { output: string } };
+    expect(later.test.output).toContain(`region=${REGION}`);
+    expect(later.test.output).not.toContain(KEY);
+    expect(later.test.output).not.toContain(HAND);
+    // With no record of the first, the dropped field is declared by no release known: masked, the safe way.
+    const unknown = (await installRelease(d, r3, {}).catch((x: unknown) => x)) as Error & { test: { output: string } };
+    expect(unknown.test.output).not.toContain(REGION);
+    expect(unknown.test.output).not.toContain(KEY);
   });
 
   it('a secret kept in the config stays masked once a later release stops declaring it (HB-1081)', async () => {

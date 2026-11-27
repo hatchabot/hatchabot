@@ -3,7 +3,7 @@
 // `doctorReport` turns them into ✓/⚠/✗ lines — pure, so it's tested without
 // a machine.
 import { execFileSync } from 'node:child_process';
-import type { ClientRequest } from 'node:http';
+import { request as httpRequest, type ClientRequest, type IncomingMessage } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { rootCertificates } from 'node:tls';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
@@ -12,8 +12,10 @@ import { isIP } from 'node:net';
 import { homedir, hostname, networkInterfaces } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { applyLegacyEnv, defaultBackupsDir, defaultDbPath } from './envCompat.js';
+import { dockerNames } from './providers/dockerNames.js';
 import { otherInstallsHere, sharedFolderFix, sharedFolderWords } from './store/folderMark.js';
 import { activeValues, envValue, inlineComments } from './config/envFile.js';
+import { zonedTarget } from './config/installTls.js';
 import { foreignSet, ownerMark, readSetStatus } from './orchestrator/backups/backupFiles.js';
 import { setAgeDays } from './orchestrator/backups/recoveryReadiness.js';
 import { funnelOff, funnelStatus, serveLeftOnMainPort, serveStatus, tailnetInfo, targetsPort } from './ops/tailnet.js';
@@ -33,7 +35,9 @@ export interface DoctorFacts {
   runtimeImage?: { openclawVersion?: string; sizeGb?: number };
   envFile: { present: boolean; secretKey: boolean; password: boolean; authMode: string; publicUrl?: string;
     /** Settings in force with a ` # note` after the value, which systemd keeps and a shell drops (HB-0634). */
-    inlineComments?: string[] };
+    inlineComments?: string[];
+    /** Lines holding a carriage return (a file saved with Windows line endings), which systemd and a shell read their own ways (HB-1379). */
+    carriageReturns?: number };
   db: { path: string; present: boolean; sizeMb?: number;
     /** Its schema number against this release's (store/schemaVersion.ts). undefined: it could not be read. */
     schema?: SchemaStanding;
@@ -52,7 +56,7 @@ export interface DoctorFacts {
    * `unreadable`: date-named folders newer than `lastSet` (or any, with none) that this user cannot read, newest first.
    * `keptUnlisted`: the sets the last run whose retention ran kept only for volumes no agent here has had (HB-1380), still there, with their size.
    */
-  backups: { dir: string; lastSet?: string; ageDays?: number; complete?: boolean; failed?: number; unreadable?: string[]; keptUnlisted?: KeptUnlisted[] };
+  backups: { dir: string; lastSet?: string; ageDays?: number; complete?: boolean; failed?: number; replacing?: number; unreadable?: string[]; keptUnlisted?: KeptUnlisted[] };
   /**
    * A `timeout` (or Homebrew's `gtimeout`) on this PATH: the backup and the
    * restore drill bound each Docker call with it. false: neither, so a call
@@ -182,9 +186,16 @@ export function doctorReport(f: DoctorFacts): DoctorLine[] {
   if (!f.envFile.present) out.push({ level: 'fail', text: '.env is missing', fix: './scripts/setup-host.sh writes it (secret key, password, port)' });
   else {
     // The same line is two settings: the Linux service (systemd) keeps the
-    // note in the value, the Mac's service and restart.sh drop it (HB-0634).
+    // note in the value, and so does restart.sh there, which reads .env as
+    // systemd does (HB-1529); the Mac's service, and restart.sh on a Mac,
+    // drop it (HB-0634).
     const notes = f.envFile.inlineComments ?? [];
-    if (notes.length) out.push({ level: 'warn', text: `.env has a # comment after the value of ${notes.join(', ')}: systemd (the service on Linux) reads it as part of the value, while the Mac's service and restart.sh drop it, so they use different settings`, fix: `Put each comment on a line of its own above its setting in .env (or quote the value whole if the # belongs to it), then ./scripts/restart.sh` });
+    if (notes.length) out.push({ level: 'warn', text: `.env has a # comment after the value of ${notes.join(', ')}: systemd (the service on Linux) reads it as part of the value, and so does restart.sh there, while the Mac's service drops it, so on Linux the setting is not the value it looks like`, fix: `Put each comment on a line of its own above its setting in .env (or quote the value whole if the # belongs to it), then ./scripts/restart.sh` });
+    // systemd ends a value at a carriage return, as the app's own reading of
+    // .env (doctor's too) now does (HB-1530), and a shell (the Mac's service)
+    // keeps it in the value: two readings of one file (HB-1379).
+    const cr = f.envFile.carriageReturns ?? 0;
+    if (cr) out.push({ level: 'warn', text: `.env has a carriage return on ${cr === 1 ? 'one line' : `${cr} lines`} (saved with Windows line endings): systemd (the service on Linux) and these checks end the value there, but the Mac's service keeps it as part of the value`, fix: `perl -pi -e 's/\\r//g' .env (it takes every carriage return out), then ./scripts/restart.sh` });
     if (!f.envFile.secretKey) out.push({ level: 'fail', text: '.env has no HATCHABOT_SECRET_KEY — credentials cannot be stored', fix: 'node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))" → HATCHABOT_SECRET_KEY=… in .env' });
     // Only the shared-password mode needs HATCHABOT_PASSWORD: accounts mode
     // holds a password per person, identity mode uses Google. Warning about it
@@ -218,7 +229,17 @@ export function doctorReport(f: DoctorFacts): DoctorLine[] {
   else if ((f.backups.ageDays ?? 0) > 2) out.push({ level: 'warn', text: `Last backup set is ${f.backups.ageDays} days old (${f.backups.lastSet})`, fix: 'journalctl --user -u hatchabot-backup -n 30' });
   // A set can exist and still be partial: judged by its run's own record,
   // not the directory (review, 2026-09-29).
-  else if (f.backups.complete === false) out.push({ level: 'warn', text: `Last backup set ${f.backups.lastSet} is incomplete${f.backups.failed ? ` (${f.backups.failed} volume${f.backups.failed === 1 ? '' : 's'} failed)` : ' (the run did not finish)'}`, fix: 'journalctl --user -u hatchabot-backup -n 30' });
+  else if (f.backups.complete === false) {
+    // A volume left out while its agent's files were replaced (a restore, an
+    // import, a move) is no failed archive: named apart, as the app names it,
+    // and with nothing to repair when it is the only one (HB-1205).
+    const failed = f.backups.failed ?? 0, replacing = f.backups.replacing ?? 0;
+    const why = [failed ? `${failed} volume${failed === 1 ? '' : 's'} failed` : '', replacing ? `${replacing} left out while their files were replaced` : ''].filter(Boolean).join(', ');
+    out.push({
+      level: 'warn', text: `Last backup set ${f.backups.lastSet} is incomplete${why ? ` (${why})` : ' (the run did not finish)'}`,
+      fix: !failed && replacing ? 'Nothing to repair: the next backup takes it (journalctl --user -u hatchabot-backup -n 30 names the agent)' : 'journalctl --user -u hatchabot-backup -n 30',
+    });
+  }
   else out.push({ level: 'ok', text: `Backups: last set ${f.backups.lastSet}` });
   const unread = f.backups.unreadable ?? [];
   if (unread.length) {
@@ -627,8 +648,9 @@ export function serviceDockerEnv(env: Record<string, string>, base: NodeJS.Proce
 export function serviceUrl(env: Record<string, string | undefined>): string {
   const scheme = env.HATCHABOT_TLS_CERT ? 'https' : 'http';
   const bind = (env.HATCHABOT_BIND ?? '').trim();
+  // A zone's % goes in as %25 (RFC 6874), as restart.sh writes it for curl (HB-1378).
   const host = ['', '0.0.0.0', '::', '[::]', 'localhost', '127.0.0.1'].includes(bind) ? 'localhost'
-    : bind.startsWith('[') ? bind : bind.includes(':') ? `[${bind}]` : bind;
+    : bind.startsWith('[') ? bind : bind.includes(':') ? `[${bind.replace(/%/g, '%25')}]` : bind;
   return `${scheme}://${host}:${servicePort(env)}`;
 }
 
@@ -673,7 +695,12 @@ export async function doctorTarget(flagUrl: string | undefined, savedUrl: string
   if (flagUrl) return flagUrl;
   if (!savedUrl) return undefined;
   let host: string;
-  try { host = new URL(savedUrl).hostname.replace(/^\[|\]$/g, '').toLowerCase(); } catch { return savedUrl; }
+  // One with a zone, which setup saves for a zoned bind address (HB-1539):
+  // no URL parser takes it, and kept as it was, a PORT change had doctor ask
+  // the old port. Its address without the zone, as this machine's
+  // interfaces list a link-local one.
+  const zoned = zonedTarget(savedUrl);
+  try { host = zoned ? zoned.host.replace(/%.*/, '').toLowerCase() : new URL(savedUrl).hostname.replace(/^\[|\]$/g, '').toLowerCase(); } catch { return savedUrl; }
   const mine = (a: string) => { const x = a.toLowerCase().replace(/^::ffff:/, ''); return own.has(x) || /^127\./.test(x) || x === '::1'; };
   const local = mine(host) || (!isIP(host) && (await resolve(host)).some(mine));
   return local && Object.keys(env).length > 0 ? undefined : savedUrl;
@@ -695,6 +722,12 @@ export function envMap(file: string): Record<string, string> {
 }
 
 /**
+ * A URL whose host is an IPv6 address with a zone, in the parts a request by host and port
+ * takes (HB-1378): one helper, the CLI's too (config/installTls.ts, HB-1539).
+ */
+export { zonedTarget };
+
+/**
  * GET the app's home page and read its version marker. A LAN install's certificate is
  * self-signed: the probe trusts the install's own certificate (`HATCHABOT_TLS_CERT`, the file
  * the server serves) beside the system roots, and skips the hostname check only for loopback
@@ -707,16 +740,20 @@ export function envMap(file: string): Record<string, string> {
 export async function probeControlPlane(url: string, certFile?: string, bind?: string): Promise<DoctorFacts['controlPlane']> {
   const home = `${url.replace(/\/$/, '')}/`;
   try {
-    if (!home.startsWith('https:')) {
+    // A bind address with a zone is asked by host and port: by URL, fetch
+    // refused it and doctor could not check such a listener (HB-1378).
+    const zoned = zonedTarget(home);
+    if (!home.startsWith('https:') && !zoned) {
       const res = await fetch(home, { signal: AbortSignal.timeout(5000) });
       return answered(url, res.status, await cappedText(res), res.headers.get('x-hatchabot-version') ?? undefined);
     }
-    const u = new URL(home);
+    const u = zoned ? undefined : new URL(home);
+    const hostname = zoned ? `[${zoned.host}]` : u!.hostname;
     const cert = certFile && existsSync(certFile) ? readFileSync(certFile) : undefined;
     const bare = (h: string) => h.trim().replace(/^\[|\]$/g, '').toLowerCase();
     // The bind only when it is an address: a name may resolve anywhere, and
     // a certificate can name it, so it is checked like any other name.
-    const loopback = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(u.hostname) || (!!bind && isIP(bare(bind)) !== 0 && bare(u.hostname) === bare(bind));
+    const loopback = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(hostname) || (!!bind && isIP(bare(bind)) !== 0 && bare(hostname) === bare(bind));
     const { status, body, header } = await new Promise<{ status: number; body: string; header?: string }>((resolve, reject) => {
       // One deadline for the whole answer, and every way an answer can end:
       // one cut off in its body (aborted, then closed) left this waiting for
@@ -726,26 +763,29 @@ export async function probeControlPlane(url: string, certFile?: string, bind?: s
       let req: ClientRequest | undefined;
       const done = (v: { status: number; body: string; header?: string }) => { if (settled) return; settled = true; clearTimeout(timer); resolve(v); };
       const fail = (err: Error) => { if (settled) return; settled = true; clearTimeout(timer); req?.destroy(); reject(err); };
+      const onAnswer = (res: IncomingMessage) => {
+        let text = '';
+        res.setEncoding('utf8');
+        res.on('data', (c: string) => { if (text.length < 1_000_000) text += c; });
+        const named = res.headers['x-hatchabot-version'];
+        res.on('end', () => done({ status: res.statusCode ?? 0, body: text, header: Array.isArray(named) ? named[0] : named }));
+        res.on('aborted', () => fail(new Error('the answer was cut off')));
+        res.on('error', fail);
+        res.on('close', () => { if (!res.complete) fail(new Error('the connection closed before the answer ended')); });
+      };
+      // Its own connection: Node checks the name only on a full handshake,
+      // so a TLS session kept from a probe that skipped the check (loopback,
+      // the bind address) let a later probe elsewhere through unchecked.
+      const asked = { method: 'GET', timeout: 5000, agent: false as const };
+      const tls = {
+        ...(cert ? { ca: [...rootCertificates, cert.toString()] } : {}),
+        ...(cert && loopback ? { checkServerIdentity: () => undefined } : {}),
+      };
       try {
-        req = httpsRequest(u, {
-          method: 'GET',
-          timeout: 5000,
-          // Its own connection: Node checks the name only on a full handshake,
-          // so a TLS session kept from a probe that skipped the check (loopback,
-          // the bind address) let a later probe elsewhere through unchecked.
-          agent: false,
-          ...(cert ? { ca: [...rootCertificates, cert.toString()] } : {}),
-          ...(cert && loopback ? { checkServerIdentity: () => undefined } : {}),
-        }, (res) => {
-          let text = '';
-          res.setEncoding('utf8');
-          res.on('data', (c: string) => { if (text.length < 1_000_000) text += c; });
-          const named = res.headers['x-hatchabot-version'];
-          res.on('end', () => done({ status: res.statusCode ?? 0, body: text, header: Array.isArray(named) ? named[0] : named }));
-          res.on('aborted', () => fail(new Error('the answer was cut off')));
-          res.on('error', fail);
-          res.on('close', () => { if (!res.complete) fail(new Error('the connection closed before the answer ended')); });
-        });
+        const at = zoned ? { host: zoned.host, port: zoned.port, path: zoned.path } : undefined;
+        req = !at ? httpsRequest(u!, { ...asked, ...tls }, onAnswer)
+          : zoned!.protocol === 'https:' ? httpsRequest({ ...asked, ...tls, ...at }, onAnswer)
+            : httpRequest({ ...asked, ...at }, onAnswer);
       } catch (err) {
         // Thrown before there was a request (options it refuses): no timer
         // yet, so nothing fires later at a request that never was.
@@ -875,17 +915,24 @@ export interface KeptUnlisted { set: string; volumes: string[]; bytes: number }
  * the set, they had no bound and nothing said so (review of HB-1380). Those
  * still there, newest first, each with its size; undefined when that run's
  * record has no such list (its retention did not run, or it is older).
+ * `named`: the volumes the database now names (registryVolumes), when it
+ * could be read. A set whose volumes it names all is not one of those any
+ * more: a database restored by hand since that run names them, and doctor
+ * listed the set until the next nightly run wrote a new record (HB-1433).
  */
-export function keptUnlistedSets(bdir: string, set: string): KeptUnlisted[] | undefined {
+export function keptUnlistedSets(bdir: string, set: string, named?: ReadonlySet<string>): KeptUnlisted[] | undefined {
   let raw: unknown;
   try { raw = (JSON.parse(readFileSync(join(bdir, set, 'backup-status.json'), 'utf8')) as { keptUnlisted?: unknown }).keptUnlisted; } catch { return undefined; }
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
   const out: KeptUnlisted[] = [];
   for (const [name, vols] of Object.entries(raw as Record<string, unknown>)) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(name)) continue;
+    const listed = Array.isArray(vols) ? vols.filter((v): v is string => typeof v === 'string') : [];
+    const left = named ? listed.filter((v) => !named.has(v)) : listed;
+    if (listed.length && !left.length) continue; // every one named now
     const bytes = treeBytes(join(bdir, name));
     if (bytes === undefined) continue; // deleted since
-    out.push({ set: name, volumes: Array.isArray(vols) ? vols.filter((v): v is string => typeof v === 'string').slice(0, 20) : [], bytes });
+    out.push({ set: name, volumes: left.slice(0, 20), bytes });
   }
   return out.sort((a, b) => (a.set < b.set ? 1 : -1));
 }
@@ -910,7 +957,37 @@ function treeBytes(dir: string, depth = 0): number | undefined {
 const shellPath = (p: string) => (/^[\w@%+=:,./-]+$/.test(p) ? p : `'${p.replace(/'/g, `'\\''`)}'`);
 const sizeWords = (bytes: number) => (bytes >= 1e9 ? `${(bytes / 1e9).toFixed(1)} GB` : bytes < 1e6 ? 'under 1 MB' : `${Math.round(bytes / 1e6)} MB`);
 
-export function backupFacts(bdir: string, now: number, mark: string | undefined): DoctorFacts['backups'] {
+/**
+ * The volumes the database at `dbPath` names, an agent's here or a deleted
+ * one's, as the nightly backup reads them (backup-volumes.sh's registry, by
+ * the same docker names); undefined when it cannot be read.
+ */
+export async function registryVolumes(dbPath: string, prefix: string): Promise<Set<string> | undefined> {
+  if (!existsSync(dbPath)) return undefined;
+  try {
+    const { default: Database } = await import('better-sqlite3');
+    const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    try {
+      const refs = db.prepare('SELECT runtime_ref ref FROM agents WHERE runtime_ref IS NOT NULL').all() as Array<{ ref: unknown }>;
+      return new Set(refs.map(({ ref }) => {
+        const r = String(ref);
+        return r.startsWith('docker://') ? dockerNames(r, prefix).volume : `${r.replace(/^\w+:\/\//, '')}-vol`;
+      }));
+    } finally { db.close(); }
+  } catch { return undefined; /* not a database, or one with no agents table */ }
+}
+
+/** How many lines of a .env hold a carriage return. */
+export function carriageReturnLines(text: string): number {
+  return text.split('\n').filter((l) => l.includes('\r')).length;
+}
+
+function counted(failedVolumes: string[], replacing: string[]): { failed?: number; replacing?: number } {
+  const failed = failedVolumes.filter((v) => !replacing.includes(v)).length;
+  return { ...(failed ? { failed } : {}), ...(replacing.length ? { replacing: replacing.length } : {}) };
+}
+
+export function backupFacts(bdir: string, now: number, mark: string | undefined, registry?: ReadonlySet<string>): DoctorFacts['backups'] {
   // Each entry on its own: the one readdir that threw (a file named like a
   // date, or a set this user cannot read) ended the scan, so doctor said
   // there was no backup beside good sets (HB-1118). A file is no set, and is
@@ -940,13 +1017,15 @@ export function backupFacts(bdir: string, now: number, mark: string | undefined)
     let kept: KeptUnlisted[] = [];
     for (const d of sets) {
       if (mark && foreignSet(join(bdir, d), mark)) continue;
-      const k = keptUnlistedSets(bdir, d);
+      const k = keptUnlistedSets(bdir, d, registry); // the volumes the database names now (HB-1433)
       if (k) { kept = k; break; }
     }
     return {
       dir: bdir, lastSet: last, ageDays: setAgeDays(last, now),
       ...(st.complete !== undefined ? { complete: st.complete } : {}),
-      ...(st.failedVolumes?.length ? { failed: st.failedVolumes.length } : {}),
+      // Those left out while their files were replaced are among the failed
+      // volumes too, for an older reader: counted apart here (HB-1205).
+      ...counted(st.failedVolumes ?? [], st.replacing ?? []),
       ...named,
       ...(kept.length ? { keptUnlisted: kept } : {}),
     };
@@ -1008,7 +1087,7 @@ export async function gatherFacts(urlIn?: string, envIn?: Record<string, string>
   const df = sh('df', ['-Pk', '.']); // -P: one line per filesystem on macOS too
   const diskFreeGb = df ? Number(df.split('\n').pop()!.split(/\s+/)[3]) / 1e6 : undefined;
   const bdir = env.HATCHABOT_BACKUP_DIR ?? defaultBackupsDir();
-  const backups = backupFacts(bdir, Date.now(), serviceBackupMark(env));
+  const backups = backupFacts(bdir, Date.now(), serviceBackupMark(env), await registryVolumes(dbPath, prefix));
   // The same lookup the app's HTTPS step uses: it knows the Mac app bundle,
   // Homebrew's path and `serve`. A plain `tailscale` on PATH missed the Mac
   // app entirely and told a working install it had no Tailscale (2026-09-22).
@@ -1032,7 +1111,8 @@ export async function gatherFacts(urlIn?: string, envIn?: Record<string, string>
   return {
     nodeVersion: process.version, dockerCli, dockerDaemon, runtimeImage,
     envFile: { present: existsSync('.env'), secretKey: !!env.HATCHABOT_SECRET_KEY, password: !!env.HATCHABOT_PASSWORD, authMode: env.HATCHABOT_AUTH ?? 'password', publicUrl: env.HATCHABOT_PUBLIC_URL || undefined,
-      inlineComments: (() => { try { return inlineComments(readFileSync('.env', 'utf8')); } catch { return []; } })() },
+      inlineComments: (() => { try { return inlineComments(readFileSync('.env', 'utf8')); } catch { return []; } })(),
+      carriageReturns: (() => { try { return carriageReturnLines(readFileSync('.env', 'utf8')); } catch { return 0; } })() },
     db: { path: dbPath, present: existsSync(dbPath), sizeMb: existsSync(dbPath) ? statSync(dbPath).size / 1e6 : undefined, schema: await schemaFacts(dbPath), sharedWith: dbSharedWith(dbPath) },
     service, controlPlane, diskFreeGb, backups, tailscale, proxyListener, tailscaleUser,
     timeLimit: !!sh('sh', ['-c', 'command -v timeout || command -v gtimeout']),

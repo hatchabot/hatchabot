@@ -244,6 +244,92 @@ describe('runBudgets', () => {
     expect(budgetView(store, store.getBudget('a3')!, 0, nov, 'UTC', 'a3').paused).toBeUndefined();
   });
 
+  it("a cheaper model whose month is over, its own model not back yet, says so until it is (HB-1496)", async () => {
+    const { store, agent, deps } = world();
+    deps.downgrade = async (a, hold) => { hold(null, 'claude-haiku-4-5'); store.setAgentModel(a.id, 'claude-haiku-4-5'); return { from: null, to: 'claude-haiku-4-5' }; };
+    agent('d3', 'Lab Notes');
+    store.setBudget('d3', OWNER, 10, 'cheaper', iso(NOW));
+    store.setModelProfile('d3', profile(NOW, opus(NOW - DAY, 12)), iso(NOW));
+    expect((await runBudgets(deps, NOW)).downgraded).toEqual(['d3']);
+    // November 2: its runtime does not take its own model back.
+    const nov = Date.parse('2026-11-02T08:00:00Z');
+    deps.restoreModel = async () => false;
+    await runBudgets(deps, nov);
+    expect(store.getAgent('d3')!.model).toBe('claude-haiku-4-5');
+    const v = budgetView(store, store.getBudget('d3')!, 0, nov, 'UTC', 'd3');
+    // Was: nothing at all, the switch being October's.
+    expect(v.downgraded).toEqual({ at: expect.any(String), to: 'claude-haiku-4-5', ended: { month: '2026-10', on: 'November 1' } });
+    expect(budgetLine(v, 'it')).toBe("Its budget's cheaper model ended on November 1, but its own model could not be put back yet: Hatchabot tries again each pass, or choose its model now");
+    // Its model chosen by hand: not owed any more.
+    store.setAgentModel('d3', 'claude-sonnet-5');
+    expect(budgetView(store, store.getBudget('d3')!, 0, nov, 'UTC', 'd3').downgraded).toBeUndefined();
+    store.setAgentModel('d3', 'claude-haiku-4-5');
+    // Its budget reached again this month: that budget holds it there, and says so as this month's.
+    store.setCostDays('d3', new Map([['2026-11-01', 11]]));
+    expect(budgetView(store, store.getBudget('d3')!, 11, nov, 'UTC', 'd3').downgraded).toBeUndefined();
+    store.setCostDays('d3', new Map([['2026-11-01', 1]]));
+    // The next pass's restore works: done.
+    deps.restoreModel = async (a, pin) => { store.setAgentModel(a.id, pin); return true; };
+    expect((await runBudgets(deps, nov + 10 * MIN, { record: false })).resumed).toEqual(['d3']);
+    expect(budgetView(store, store.getBudget('d3')!, 1, nov, 'UTC', 'd3').downgraded).toBeUndefined();
+  });
+
+  it("a pause its budget no longer holds this month (raised, or set to warn), the start failed, says so as a removed budget's does (HB-1496)", async () => {
+    const { store, agent, deps } = world();
+    agent('a3', 'Recipe Box');
+    store.setBudget('a3', OWNER, 20, 'pause', iso(NOW));
+    store.setModelProfile('a3', profile(NOW, opus(NOW - DAY, 25)), iso(NOW));
+    await runBudgets(deps, NOW);
+    expect(store.getAgent('a3')!.state).toBe('STOPPED');
+    // Raised past the spend; its machine does not answer, so the start fails.
+    store.setBudget('a3', OWNER, 40, 'pause', iso(NOW));
+    expect((await runBudgets({ ...deps, resume: async () => false }, NOW + MIN, { record: false })).resumed).toEqual([]);
+    const raised = budgetView(store, store.getBudget('a3')!, 25, NOW + MIN, 'UTC', 'a3');
+    // Was: "Paused: it used its $40 budget…", the level under 100, and no line at all on its tile.
+    expect(raised.paused).toEqual({ at: expect.any(String), ended: { month: '2026-10', spent: 25, raised: true } });
+    expect(budgetLine(raised, 'it')).toBe('Its budget was raised, which ended its pause, but it could not be started yet: Hatchabot tries again each pass, or start it now. It used $25.00 in October');
+    // Set to warn at the old amount: the same, said as such.
+    store.setBudget('a3', OWNER, 20, 'warn', iso(NOW));
+    const warn = budgetView(store, store.getBudget('a3')!, 25, NOW + MIN, 'UTC', 'a3');
+    expect(warn.paused).toMatchObject({ ended: { month: '2026-10', changed: true } });
+    expect(budgetLine(warn, 'it')).toMatch(/^Its budget no longer pauses it, which ended its pause, but it could not be started yet/);
+    // Lowered back under the spend: paused by it again, as before.
+    store.setBudget('a3', OWNER, 20, 'pause', iso(NOW));
+    expect(budgetView(store, store.getBudget('a3')!, 25, NOW + MIN, 'UTC', 'a3').paused).toEqual({ at: expect.any(String) });
+    // Raised again, and the next pass's start works: nothing owed.
+    store.setBudget('a3', OWNER, 40, 'pause', iso(NOW));
+    expect((await runBudgets(deps, NOW + 2 * MIN, { record: false })).resumed).toEqual(['a3']);
+    expect(budgetView(store, store.getBudget('a3')!, 25, NOW + 2 * MIN, 'UTC', 'a3').paused).toBeUndefined();
+  });
+
+  it('an ended pause held by a pause budget reached in the new month: that budget holds it, says so, and starts it (HB-1316)', async () => {
+    const { store, agent, deps, told } = world();
+    agent('ops', 'Hatchabot', { ops: true });
+    agent('a3', 'Recipe Box');
+    store.setBudget('a3', OWNER, 20, 'pause', iso(NOW));
+    store.setModelProfile('a3', profile(NOW, opus(NOW - DAY, 25)), iso(NOW));
+    await runBudgets(deps, NOW);
+    expect(store.getAgent('a3')!.state).toBe('STOPPED');
+    // November 2: this Hatchabot's budget is used up already, so October's pause is not ended.
+    const nov = Date.parse('2026-11-02T08:00:00Z');
+    store.setBudget(MACHINE, OWNER, 30, 'pause', iso(nov - DAY));
+    store.setModelProfile('ops', profile(nov, opus(nov - HOUR, 40)), iso(nov));
+    told.length = 0;
+    await runBudgets(deps, nov);
+    expect(store.getAgent('a3')!.state).toBe('STOPPED');
+    // Was: recorded as stopped by hand ("it stays stopped"), and its own budget's line said Hatchabot tries to start it each pass.
+    expect(store.getBudgetPause('a3', '2026-11')).toMatchObject({ scope: MACHINE, kind: 'pause' });
+    expect(store.getBudgetPause('a3', '2026-11')!.alreadyStopped).toBeFalsy();
+    expect(budgetView(store, store.getBudget('a3')!, 0, nov, 'UTC', 'a3').paused).toBeUndefined();
+    expect(budgetView(store, store.getBudget(MACHINE)!, 40, nov, 'UTC', 'a3').paused).toEqual({ at: expect.any(String) });
+    expect(told.map((t) => t.text).join('\n')).toContain('This Hatchabot has used its $30 budget for November ($40.00): 1 agent is paused (not me) until December 1.');
+    // The machine's budget raised: started, and both pauses closed.
+    store.setBudget(MACHINE, OWNER, 100, 'pause', iso(nov + HOUR));
+    expect((await runBudgets(deps, nov + 2 * HOUR, { record: false })).resumed).toContain('a3');
+    expect(store.getAgent('a3')!.state).toBe('RUNNING');
+    expect(store.openBudgetPauses('a3')).toEqual([]);
+  });
+
   it('started by hand after a pause: it runs on until the 1st; an asleep agent is paused without a wake; busy waits', async () => {
     const { store, agent, busy, deps, told } = world();
     agent('a4', 'Book Club');
@@ -524,6 +610,17 @@ describe('runBudgets', () => {
     expect(all).not.toHaveBeenCalled();
   });
 
+  it('a store wrapped with Object.create, as tests stub one, reads its pauses and switches (HB-1274)', () => {
+    const { store } = world();
+    store.addBudgetPause('k1', '2026-10', 'k1', iso(NOW - DAY));
+    store.addBudgetPause('k2', '2026-10', MACHINE, iso(NOW - HOUR), { fromModel: 'claude-opus-4-8', toModel: 'claude-haiku-4-5' });
+    const fake = Object.create(store) as Store;
+    expect(fake.listBudgetPauses({ open: true }).map((p) => [p.agentId, p.kind])).toEqual([['k1', 'pause'], ['k2', 'cheaper']]);
+    expect(fake.openBudgetPauses('k1')).toMatchObject([{ agentId: 'k1', month: '2026-10', kind: 'pause' }]);
+    expect(fake.openCheaperPause('k2')).toMatchObject({ scope: MACHINE, fromModel: 'claude-opus-4-8', toModel: 'claude-haiku-4-5' });
+    expect(fake.getBudgetPause('k1', '2026-10')).toEqual(store.getBudgetPause('k1', '2026-10'));
+  });
+
   it('a manager with a budget is never paused, even if a row says pause', async () => {
     const { store, agent, deps } = world();
     agent('ops', 'Hatchabot', { ops: true });
@@ -679,6 +776,76 @@ describe('the budget routes', () => {
     expect(store.openBudgetPauses('r1')).toEqual([]);
     expect(store.getBudgetPause('r1', last)!.resumedBy).toBe('owner');
     expect((await tileOf()).budgetPaused).toBeUndefined();
+    await f.close();
+  });
+
+  it("an ended pause of its own budget, still owed its start, is on its tile after the budget is removed (HB-1316)", async () => {
+    const { f, store, provider } = await app();
+    const { machineTz } = await import('../src/orchestrator/usage/budgets.js');
+    const last = prevMonth(monthKey(Date.now(), machineTz()));
+    const at = new Date(Date.parse(`${last}-20T12:00:00Z`)).toISOString();
+    await provider.stop(store.getAgent('r1')!.runtimeRef!);
+    store.setAgentState('r1', 'STOPPED');
+    store.addBudgetPause('r1', last, 'r1', at);
+    expect(store.getBudget('r1')).toBeUndefined();
+    const tile = ((await f.inject({ method: 'GET', url: '/v1/agents', headers: as(OWNER) })).json() as Array<{ id: string; budget?: unknown; budgetPaused?: { scope: string; line?: string; ended?: { month: string } } }>).find((a) => a.id === 'r1')!;
+    // Was: nothing, though each pass still tries to start it.
+    expect(tile.budget).toBeUndefined();
+    expect(tile.budgetPaused).toMatchObject({ scope: 'agent', at, ended: { month: last } });
+    expect(tile.budgetPaused!.line).toMatch(/^Its budget's pause ended on [A-Z][a-z]+ 1, but it could not be started yet: Hatchabot tries again each pass, or start it now\. It used \$0\.00 in [A-Z][a-z]+$/);
+    // A member's own tile only.
+    expect(((await f.inject({ method: 'GET', url: '/v1/agents', headers: as(OTHER) })).json() as Array<{ id: string }>).some((a) => a.id === 'r1')).toBe(false);
+    await f.close();
+  });
+
+  it("this month's pause of its own budget, the budget removed and the start it was owed failed, is on its tile too (HB-1316)", async () => {
+    const { f, store, provider } = await app();
+    const { machineTz } = await import('../src/orchestrator/usage/budgets.js');
+    const month = monthKey(Date.now(), machineTz());
+    const at = new Date(Date.now() - 2 * HOUR).toISOString();
+    await provider.stop(store.getAgent('r1')!.runtimeRef!);
+    store.setAgentState('r1', 'STOPPED');
+    store.addBudgetPause('r1', month, 'r1', at);
+    expect(store.getBudget('r1')).toBeUndefined();
+    const tileOf = async () => ((await f.inject({ method: 'GET', url: '/v1/agents', headers: as(OWNER) })).json() as Array<{ id: string; budgetPaused?: { scope: string; line?: string; ended?: { month: string; removed?: boolean; on?: string } } }>).find((a) => a.id === 'r1')!;
+    const tile = await tileOf();
+    // Was: no reason given, though each pass still tries to start it.
+    expect(tile.budgetPaused).toMatchObject({ scope: 'agent', at, ended: { month, removed: true } });
+    expect(tile.budgetPaused!.ended!.on).toBeUndefined();
+    expect(tile.budgetPaused!.line).toMatch(/^Its budget was removed, which ended its pause, but it could not be started yet: Hatchabot tries again each pass, or start it now\. It used \$0\.00 in [A-Z][a-z]+$/);
+    // Stopped by hand when the budget came: the pass starts nothing, and nothing is said.
+    store.resumeBudgetPause('r1', month, at, 'owner');
+    store.addBudgetPause('r1', month, 'r1', at, undefined, { alreadyStopped: true });
+    expect(store.openBudgetPauses('r1')).toMatchObject([{ month, alreadyStopped: true }]);
+    expect((await tileOf()).budgetPaused).toBeUndefined();
+    await f.close();
+  });
+
+  it("this Hatchabot's budget raised this month, or its cheaper model of a month that is over not undone yet: the agent's tile says so (HB-1496)", async () => {
+    const { f, store, provider } = await app();
+    const { machineTz } = await import('../src/orchestrator/usage/budgets.js');
+    const month = monthKey(Date.now(), machineTz()), last = prevMonth(month);
+    const at = new Date(Date.now() - 2 * HOUR).toISOString();
+    await provider.stop(store.getAgent('r1')!.runtimeRef!);
+    store.setAgentState('r1', 'STOPPED');
+    store.setBudget(MACHINE, OWNER, 50, 'pause', at);
+    store.addBudgetPause('r1', month, MACHINE, at);
+    const tileOf = async () => ((await f.inject({ method: 'GET', url: '/v1/agents', headers: as(OWNER) })).json() as Array<{ id: string;
+      budgetPaused?: { line?: string; ended?: { raised?: boolean } }; budgetCheaper?: { to: string; until?: string; line?: string; ended?: { month: string } } }>).find((a) => a.id === 'r1')!;
+    // Nothing spent, so the machine's $50 no longer pauses it: was "paused by this Hatchabot's monthly budget".
+    let r1 = await tileOf();
+    expect(r1.budgetPaused!.ended).toMatchObject({ month, raised: true });
+    expect(r1.budgetPaused!.line).toMatch(/^This Hatchabot's budget was raised, which ended its pause, but it could not be started yet/);
+    // Its cheaper model from last month, its own model not back yet.
+    store.resumeBudgetPause('r1', month, at, 'owner');
+    store.setAgentState('r1', 'RUNNING');
+    store.setAgentModel('r1', 'claude-haiku-4-5');
+    store.addBudgetPause('r1', last, MACHINE, at, { fromModel: null, toModel: 'claude-haiku-4-5' });
+    r1 = await tileOf();
+    // Was: nothing, the switch being last month's.
+    expect(r1.budgetCheaper).toMatchObject({ to: 'claude-haiku-4-5', ended: { month: last } });
+    expect(r1.budgetCheaper!.until).toBeUndefined();
+    expect(r1.budgetCheaper!.line).toMatch(/^This Hatchabot's budget's cheaper model ended on [A-Z][a-z]+ 1, but its own model could not be put back yet: Hatchabot tries again each pass, or choose its model now$/);
     await f.close();
   });
 

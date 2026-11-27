@@ -46,6 +46,20 @@ with a reason and an expiry date, and is published with the file, so its
 reason carries no private values. `nosemgrep` comments and `.semgrepignore`
 files are not honoured.
 
+The scan's summary says how many files it "parsed in part": its bash parser
+stops at a few forms bash takes, and reads none of a file it stops at on
+line 1. Seven scripts are written without those forms and scanned whole:
+the three every upgrade and deploy runs (`scripts/upgrade.sh`,
+`scripts/deploy-release.sh`, `scripts/upgrade-helpers.sh`) and the four
+that keep copies of their helpers (`scripts/restart.sh`,
+`scripts/setup-host.sh`, `scripts/first-run-link.sh`,
+`scripts/ensure-deps.sh`). `test/scriptsCodeScan.test.ts` holds those seven
+to it and names the forms (HB-1482). The other scripts are not held to it,
+and some are still parsed in part, or not at all: among them
+`scripts/uninstall.sh`, `scripts/backup-volumes.sh`,
+`scripts/restore-drill.sh`, `scripts/follow-latest.sh`,
+`scripts/follow-channel.sh` and `scripts/install-service.sh`.
+
 ## How a release reaches the public repo
 
 The publish kit (`cksci/publish-kit`) runs it, from the private
@@ -280,7 +294,10 @@ handing it the release it resolved, so a release set aside is the one tried. A r
 channel names a newer one. One whose install keeps failing (no network, a
 lockfile npm refuses) is retried less and less often — 10 minutes, 20, 40 … —
 and set aside after eight failures in a row; the service is never restarted
-for an install that failed. So promoting is the rollout: every follower of that
+for an install that failed. An upgrade cut off part-way is repaired first;
+a repair that fails before the release is touched (a git lock in the way) is
+no failure of the release: it is tried again less and less often, an hour
+apart at most, and never sets the release aside. So promoting is the rollout: every follower of that
 channel moves within about ten minutes.
 
 So the rhythm is: tag and deploy to your own machines as often as you like;
@@ -334,7 +351,9 @@ whether the image is ready for agents, and on a release it does not run on
 Practice refuses itself in words of its own. The last lines then say
 "Practice stays on OpenClaw Y: …" and why. Counted once means none of the
 run's calls is among the agent's own by their event ids (by its totals, with
-the heartbeat off, when a release gives them none) and that usage did not
+the heartbeat off, when a release gives them none or the agent has more calls
+than the usage reader lists by id; an id the agent's own calls already had
+before the run is told by its totals too) and that usage did not
 rise meanwhile, nor in the 8 s after the run ended, when it is read once
 more (a copy written there a moment later); only a run that finished is judged, and only once the usage
 reader is seen to read the agent's turns on that release, the gate's ask

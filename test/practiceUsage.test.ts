@@ -15,6 +15,7 @@ import { fakeUsage } from './helpers/usageFake.js';
 import { costsFor, spendSeries, windowPricing } from '../src/orchestrator/usage/agentCosts.js';
 import { computeUsagePeriod } from '../src/orchestrator/usage/fleetUsage.js';
 import { buildRecommendations } from '../src/orchestrator/usage/recommendations.js';
+import { buildScorecard } from '../src/orchestrator/usage/modelScorecard.js';
 
 /**
  * Skill practice counts as the agent's own calls (HB-0933). A practice run's
@@ -92,6 +93,55 @@ describe('a practice run is recorded as the agent spending it (HB-0933)', () => 
     expect(day.agents.find((a) => a.id === 'a1')).toMatchObject({ tokens: tokensOf(MIX), requests: MIX.calls });
     expect(day.buckets.reduce((x, b) => x + b.requests, 0)).toBe(MIX.calls);
     expect(computeUsagePeriod(store, OWNER, 'week', now).totals.requests).toBe(MIX.calls);
+  });
+
+  it("the calls its source refused are kept, and counted as refused requests, never as the source's refusal of a turn (HB-1497)", () => {
+    const { store, agent } = world();
+    const now = Date.now();
+    // One model with calls and two refusals, one whose every call was refused (no tokens at all).
+    const refusedOnly = { model: 'claude-haiku-4-5', calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, refused: 3 };
+    expect(recordPracticeUsage(store, agent, 'hatchabot-writing', 'timeout', [{ ...MIX, refused: 2 }, refusedOnly], now - 600_000)).toBe(tokensOf(MIX));
+    // Was: the refusals in no row, and a model with no tokens left out.
+    expect(store.practiceUsageFor(['a1']).map((r) => [r.model, r.calls, r.refused, r.usd > 0])).toEqual([['claude-haiku-4-5', 0, 3, false], ['claude-opus-4-8', 3, 2, true]]);
+    // The usage periods: requests, refused ones.
+    const day = computeUsagePeriod(store, OWNER, 'day', now);
+    expect(day.agents.find((a) => a.id === 'a1')).toMatchObject({ requests: MIX.calls + 5, limited: 5 });
+    expect(day.buckets.reduce((x, b) => x + b.limited, 0)).toBe(5);
+    // Its source's counts: requests and refused; not rate-limited by them, which only its own refusals say.
+    const src = summarizeSourceUsage(store, OWNER, now).find((s) => s.id === 'p1')!;
+    expect(src.window1h).toMatchObject({ requests: MIX.calls + 5, limited: 5 });
+    expect(src.window7d).toMatchObject({ requests: MIX.calls + 5, limited: 5 });
+    expect([src.status, src.lastLimitAt, src.limitHits7d]).toEqual(['idle', undefined, 0]);
+    // The scorecard: apart from its own turns' rate limits.
+    const card = buildScorecard(store, OWNER, { now }).rows.find((r) => r.id === 'a1')!;
+    expect(card.errors).toEqual({ practiceRefused: 5 });
+    expect(card.calls).toBe(MIX.calls);
+  });
+
+  it("the usage periods say how much of the window was practice, counted in their figures (HB-1275)", () => {
+    const { store, agent } = world();
+    const now = Date.now();
+    expect(computeUsagePeriod(store, OWNER, 'day', now).practice).toBeUndefined();
+    // Two runs in the day, one of them on two models; one three days back, in the week only.
+    recordPracticeUsage(store, agent, 'hatchabot-writing', 'completed', [MIX, { ...MIX, model: 'claude-haiku-4-5', calls: 1 }], now - 3_600_000);
+    recordPracticeUsage(store, agent, 'hatchabot-writing', 'completed', [MIX], now - 7_200_000);
+    recordPracticeUsage(store, agent, 'hatchabot-writing', 'completed', [MIX], now - 3 * DAY);
+    const day = computeUsagePeriod(store, OWNER, 'day', now);
+    expect(day.practice).toEqual({ runs: 2, calls: 2 * MIX.calls + 1, tokens: 3 * tokensOf(MIX), agents: 1 });
+    // In the figures, not besides them.
+    expect(day.totals.requests).toBe(day.practice!.calls);
+    expect(day.totals.tokens).toBe(day.practice!.tokens);
+    expect(computeUsagePeriod(store, OWNER, 'week', now).practice).toEqual({ runs: 3, calls: 3 * MIX.calls + 1, tokens: 4 * tokensOf(MIX), agents: 1 });
+    expect(computeUsagePeriod(store, OWNER, 'hour', now + 2 * 3_600_000).practice).toBeUndefined();
+  });
+
+  it("a run whose every call its source refused is a run in the usage periods, as on its Usage page (HB-1497 review)", () => {
+    const { store, agent } = world();
+    const now = Date.now();
+    recordPracticeUsage(store, agent, 'hatchabot-writing', 'timeout', [{ model: 'claude-haiku-4-5', calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, refused: 3 }], now - 600_000);
+    expect(practiceSummary(store, 'a1', now)).toMatchObject({ runs: 1, calls: 0, tokens: 0 });
+    // Was: undefined, the window said to hold no practice though its requests counted three.
+    expect(computeUsagePeriod(store, OWNER, 'day', now).practice).toEqual({ runs: 1, calls: 0, tokens: 0, agents: 1 });
   });
 
   it("is in Recommended's money: a spike's last 24 hours and a loop's cost so far, and their ranks (HB-1246)", () => {
@@ -175,7 +225,7 @@ describe('Practice waits while the agent is paused by its budget (HB-0933)', () 
     const now = Date.now(), month = monthKey(now, tz);
     expect(practicePausedLine(store, 'a1', now)).toBe('');
     store.addBudgetPause('a1', month, 'machine', iso(now));
-    expect(practicePausedLine(store, 'a1', now)).toMatch(/^This agent is paused by its budget for \w+, and Practice spends from the same budget\. It can practise again once the budget is raised or the pause ends on \w+ 1\.$/);
+    expect(practicePausedLine(store, 'a1', now)).toMatch(/^This Hatchabot has reached its budget for \w+, and Practice spends from the same budget\. It can practise again once the budget is raised or the pause ends on \w+ 1\.$/);
     store.resumeBudgetPause('a1', month, iso(now), 'owner');
     expect(practicePausedLine(store, 'a1', now)).toBe('');
     store.addBudgetPause('a1', month, 'a1', iso(now), { fromModel: 'claude-opus-4-8', toModel: 'claude-haiku-4-5' });
@@ -184,7 +234,7 @@ describe('Practice waits while the agent is paused by its budget (HB-0933)', () 
   it('says so as soon as its own pause budget is reached, before the pause is made; not for warn, below it, or once its owner took over', () => {
     const { store, agent } = world();
     const now = Date.now(), month = monthKey(now, tz);
-    const line = /^This agent is paused by its budget for \w+, and Practice spends from the same budget\./;
+    const line = /^This agent has reached its budget for \w+, and Practice spends from the same budget\./;
     store.setBudget('a1', OWNER, 1, 'pause', iso(now));
     expect(practicePausedLine(store, 'a1', now)).toBe('');
     // Over it, by practice alone: no pause yet (it waits for a quiet moment).
@@ -199,6 +249,33 @@ describe('Practice waits while the agent is paused by its budget (HB-0933)', () 
     // Paused, then started by hand: it runs on until the 1st, and may practise.
     store.setBudget('a1', OWNER, 1, 'pause', iso(now));
     store.addBudgetPause('a1', month, 'a1', iso(now));
+    store.resumeBudgetPause('a1', month, iso(now), 'owner');
+    expect(practicePausedLine(store, 'a1', now)).toBe('');
+  });
+  it("says so as soon as the machine's pause budget is reached, before its pause is made; not for the Hatchabot agent, nor once its owner took over (HB-1248)", () => {
+    const { store, agent } = world();
+    const now = Date.now(), month = monthKey(now, tz);
+    store.insertAgent({ id: 'ops1', ownerId: OWNER, name: 'Hatchabot', slug: 'hatchabot', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1', runtimeRef: 'mock://ops1',
+      persona: '', sharedMemory: false, ops: true, createdAt: iso(now - 30 * DAY), updatedAt: 'now' } as unknown as Agent);
+    store.setBudget('machine', OWNER, 1, 'pause', iso(now));
+    expect(practicePausedLine(store, 'a1', now)).toBe('');
+    // Over it, by another agent's spend: no pause yet (it waits for a quiet moment).
+    store.setCostDays('ops1', new Map([[dayKey(now, tz), 2]]));
+    expect(store.getBudgetPause('a1', month)).toBeUndefined();
+    // Was: '' (only its own budget was looked at), so Practice spent in the wait.
+    expect(practicePausedLine(store, 'a1', now)).toMatch(/^This Hatchabot has reached its budget for \w+, and Practice spends from the same budget\./);
+    // The machine's budget never pauses the Hatchabot agent.
+    expect(practicePausedLine(store, 'ops1', now)).toBe('');
+    // Its own reached as well: said as its own.
+    store.setBudget('a1', OWNER, 1, 'pause', iso(now));
+    recordPracticeUsage(store, agent, 'hatchabot-writing', 'completed', [{ ...MIX, input: 2_000_000 }], now);
+    expect(practicePausedLine(store, 'a1', now)).toMatch(/^This agent has reached its budget for /);
+    store.setBudget('a1', OWNER, null, 'pause', iso(now));
+    store.setBudget('machine', OWNER, 1, 'warn', iso(now));
+    expect(practicePausedLine(store, 'a1', now)).toBe('');
+    // Paused by it, then started by hand: it runs on until the 1st, and may practise.
+    store.setBudget('machine', OWNER, 1, 'pause', iso(now));
+    store.addBudgetPause('a1', month, 'machine', iso(now));
     store.resumeBudgetPause('a1', month, iso(now), 'owner');
     expect(practicePausedLine(store, 'a1', now)).toBe('');
   });
@@ -251,5 +328,20 @@ describe('GET /v1/agents/:id/usage shows practice, counted in (HB-0933)', () => 
     expect(after.byBilling.api).toBe(before.byBilling.api + tokensOf(MIX));
     expect(after.agents[0].practice).toMatchObject({ runs: 1, calls: 3, tokens: tokensOf(MIX) });
     expect(after.cost.low).toBeCloseTo(before.cost.low + priceMix(MIX.model, MIX)!, 9);
+  });
+
+  it("the day's point in the usage history keeps the counters' total, as the sampler writes it, when the fleet's reading includes practice (HB-1271)", async () => {
+    const { store, provider, f } = await routeWorld();
+    provider.usage.set('*', fakeUsage([{ model: 'claude-opus-4-8', input: 1000, output: 200, session: 's1', at: Date.now() - 60_000 }]));
+    const before = (await f.inject({ method: 'GET', url: '/v1/usage', headers: { 'x-hatchabot-owner': OWNER } })).json();
+    const was = (await f.inject({ method: 'GET', url: '/v1/usage/history', headers: { 'x-hatchabot-owner': OWNER } })).json().points.at(-1);
+    expect(was.totalTokens).toBe(before.totalTokens);
+    recordPracticeUsage(store, store.getAgent('a1')!, 'hatchabot-writing', 'completed', [MIX]);
+    const after = (await f.inject({ method: 'GET', url: '/v1/usage', headers: { 'x-hatchabot-owner': OWNER } })).json();
+    expect(after.totalTokens).toBe(before.totalTokens + tokensOf(MIX));
+    const point = (await f.inject({ method: 'GET', url: '/v1/usage/history', headers: { 'x-hatchabot-owner': OWNER } })).json().points.at(-1);
+    // Was: the counters plus lifetime practice, kept over the sampler's smaller total for the rest of the day.
+    expect(point.totalTokens).toBe(before.totalTokens);
+    expect(point.byBilling).toEqual({ included: 0, api: before.totalTokens, local: 0 });
   });
 });

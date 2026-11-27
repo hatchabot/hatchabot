@@ -1,12 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import dns from 'node:dns';
 import { execFile, execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { addressesOf, doctorTarget, envMap, probeControlPlane, serviceDockerEnv, servicePort, serviceUrl } from '../src/doctor.js';
+import { addressesOf, doctorTarget, envMap, probeControlPlane, serviceDockerEnv, servicePort, serviceUrl, zonedTarget } from '../src/doctor.js';
 import { inlineComments } from '../src/config/envFile.js';
 
 /**
@@ -24,6 +24,8 @@ describe('doctor asks the listener the service is set up with (HB-0549)', () => 
     expect(serviceUrl({ HATCHABOT_BIND: '192.0.2.7' })).toBe('http://192.0.2.7:8080');
     expect(serviceUrl({ HATCHABOT_BIND: 'fd00::7' })).toBe('http://[fd00::7]:8080');
     expect(serviceUrl({ HATCHABOT_BIND: '[fd00::7]', PORT: 'not-a-port' })).toBe('http://[fd00::7]:8080');
+    // A zone's % is %25 in a URL (RFC 6874; HB-1378).
+    expect(serviceUrl({ HATCHABOT_BIND: 'fe80::7%eth0' })).toBe('http://[fe80::7%25eth0]:8080');
   });
 });
 
@@ -46,6 +48,16 @@ describe('a saved local URL does not hide a PORT or bind change in the .env', ()
     expect(await target(undefined, 'http://[::1]:8090')).toBeUndefined();
     expect(await target(undefined, 'https://made-up-box:8090')).toBeUndefined();
     expect(await target(undefined, 'https://192.0.2.10:8090/')).toBeUndefined();
+  });
+  it('a saved address with a zone, as setup saves one for a zoned bind address, is judged by its address: this machine\'s gives way to the .env\'s listener (HB-1539)', async () => {
+    const withLinkLocal = new Set([...own, 'fe80::10']);
+    const zoned = (saved: string, e: Record<string, string> = env) => doctorTarget(undefined, saved, e, withLinkLocal, resolve);
+    for (const saved of ['http://[fe80::10%25eth0]:9137', 'http://[FE80::10%eth0]:9137', 'https://[fe80::10%25eth0]:9137/']) {
+      expect(await zoned(saved, { PORT: '9200', HATCHABOT_BIND: 'fe80::10%eth0' }), saved).toBeUndefined();
+    }
+    // Another machine's link-local address, or no .env to go by: kept as chosen.
+    expect(await zoned('http://[fe80::99%25eth0]:9137')).toBe('http://[fe80::99%25eth0]:9137');
+    expect(await zoned('http://[fe80::10%25eth0]:9137', {})).toBe('http://[fe80::10%25eth0]:9137');
   });
   it('a full name, a .local name or a tailnet name for this machine is this machine', async () => {
     expect(await target(undefined, 'https://made-up-box.example.org:8090')).toBeUndefined();
@@ -75,46 +87,78 @@ describe('a saved local URL does not hide a PORT or bind change in the .env', ()
     expect(servicePort({ PORT: '' })).toBe(8080);
     expect(servicePort({ PORT: '9137' })).toBe(9137);
   });
+  // An empty or 0 PORT bound a port at random, and one systemd read with its
+  // " # note" stopped the start, while doctor and the scripts asked 8080.
+  it('the service, and the CLI\'s links, read PORT as doctor does: 8080 when it is empty, 0 or no number (review of HB-1529)', () => {
+    const forms: string[] = [];
+    const walk = (dir: string): string[] => readdirSync(dir, { withFileTypes: true })
+      .flatMap((e) => e.isDirectory() ? walk(join(dir, e.name)) : e.name.endsWith('.ts') ? [join(dir, e.name)] : []);
+    for (const file of walk(join(import.meta.dirname, '..', 'src'))) {
+      // Any object's PORT: process.env's, a .env read (the CLI's dotenv, doctor's env).
+      for (const m of readFileSync(file, 'utf8').matchAll(/.{0,30}\.PORT\b.{0,30}/g)) forms.push(`${file.split('/src/')[1]}: ${m[0].trim()}`);
+    }
+    // index.ts, routes.ts, reachRoutes.ts, publicAccess.ts, provision.ts, proxyListener.ts, doctor.ts; cli.ts asks servicePort.
+    expect(forms.length).toBeGreaterThanOrEqual(7);
+    for (const line of forms) expect(line, line).toMatch(/Number\((?:process\.env|env|dotenv)\.PORT(?: \?\? 8080)?\) \|\| 8080\b/);
+    // And what that reads, value by value, is doctor's port.
+    for (const v of [undefined, '', '0', '9137', ' 9137 ', '9137 # note', '0x23C1', 'not-a-port']) {
+      const env = { PORT: v } as NodeJS.ProcessEnv;
+      expect(Number(env.PORT) || 8080, String(v)).toBe(servicePort({ PORT: v }));
+      expect(Number(env.PORT ?? 8080) || 8080, String(v)).toBe(servicePort({ PORT: v }));
+    }
+  });
 });
 
-// restart.sh probes the same listener with rules of its own in shell: its
-// lines that work out the address, run alone in a sandbox, against serviceUrl.
+// restart.sh probes the same listener in shell: its lines that work out the
+// address, with the functions they call, run alone in a sandbox, against
+// serviceUrl.
 describe('serviceUrl and scripts/restart.sh work out the same listener', () => {
   const script = readFileSync('scripts/restart.sh', 'utf8');
-  const from = script.indexOf('if [ "$(uname -s)" = "Darwin" ]; then\n  envlines()');
+  const fn = (name: string) => { const at = script.indexOf(`\n${name}() {\n`); expect(at, name).toBeGreaterThan(0); return script.slice(at + 1, script.indexOf('\n}\n', at) + 3); };
+  const from = script.indexOf('\nenv_named PORT HATCHABOT_TLS_CERT HATCHABOT_BIND\n') + 1;
   const to = script.indexOf('\n', script.indexOf('LISTENER="'));
   const cases: string[] = [
     '',
     'PORT=9137\n',
-    // Not an inline "# note": restart.sh drops it (as bash does on a Mac),
-    // while systemd keeps it in the value, as envValue reads it.
     'PORT="9137"\nHATCHABOT_BIND=192.0.2.5\n',
     'HATCHABOT_BIND=0.0.0.0\nHATCHABOT_TLS_CERT=/made-up/cert.pem\n',
     'HATCHABOT_BIND=fd00::5\nPORT=9000\n',
     'HATCHABOT_BIND=[fd00::6]\n',
     "PORT=1\nPORT='2'\n",
+    'PORT = 9137\n  HATCHABOT_TLS_CERT =/made-up/cert.pem\nHATCHABOT_BIND= 192.0.2.10\n',
+    'PORT=0x23C1\n',
+    'PORT=\nHATCHABOT_TLS_CERT=\n',
+    // The names from before the rename, which the service takes when the new ones are not set (HB-1529).
+    'AGENTCLAW_BIND=192.0.2.10\nAGENTCLAW_TLS_CERT=/made-up/cert.pem\nPORT=9137\n',
+    'AGENTCLAW_BIND=192.0.2.10\nHATCHABOT_BIND=\nAGENTCLAW_TLS_CERT=/made-up/cert.pem\n',
+    // Saved with Windows line endings: a carriage return ends the value, as systemd reads it (HB-1529, HB-1530).
+    'PORT=9137\r\nHATCHABOT_BIND=192.0.2.5\r\nHATCHABOT_TLS_CERT=/made-up/cert.pem\r\n',
+    // A link-local address with its zone: the % written %25, as RFC 6874 has it (HB-1378).
+    'HATCHABOT_BIND=fe80::5%eth0\nPORT=9137\n',
   ];
-  // The one way they part: a "# note" after a value, which restart.sh drops
-  // (as the Mac's shell-sourced service does) and systemd keeps in the value.
-  // doctor names each such setting instead (HB-0634).
+  // A "# note" after a value is part of it, as systemd keeps it: a PORT with
+  // one is no port, read by both as 8080 (where the service listens then,
+  // review of HB-1529), and doctor names each such setting (HB-0634). Read by sed, with the note
+  // taken off, restart.sh and doctor parted here (HB-1529).
   const noted: Array<[string, string[]]> = [
     ['PORT=9137 # moved off 8080\n', ['PORT']],
     ['HATCHABOT_BIND=192.0.2.5\t# the LAN\nPORT=9000\n', ['HATCHABOT_BIND']],
   ];
-  it.skipIf(process.platform === 'win32')('for each .env', () => {
+  it.skipIf(process.platform === 'win32')('for each .env: old names, CRLF and a "# note" after a value too', () => {
     expect(from).toBeGreaterThan(0);
     expect(to).toBeGreaterThan(from);
-    const part = script.slice(from, to);
+    const part = `unset SYSTEMD_MAJOR\n${fn('systemd_major')}${fn('env_named')}${fn('service_port')}${script.slice(from, to)}`;
     const sandbox = mkdtempSync(join(tmpdir(), 'hb-restart-url-'));
     try {
-      // Only what those lines run: sed, tail and uname, by shims.
+      // Only what those lines run: grep, sed and uname by shims, and node (env_named reads .env with it on Linux).
       const bin = join(sandbox, 'bin');
       mkdirSync(bin);
       const bash = execFileSync('sh', ['-c', 'command -v bash'], { encoding: 'utf8' }).trim();
-      for (const tool of ['sed', 'tail', 'uname']) {
+      for (const tool of ['grep', 'sed', 'uname']) {
         const real = execFileSync('sh', ['-c', `command -v ${tool}`], { encoding: 'utf8' }).trim();
         writeFileSync(join(bin, tool), `#!/bin/sh\nexec ${real} "$@"\n`, { mode: 0o755 });
       }
+      symlinkSync(process.execPath, join(bin, 'node'));
       const listener = (text: string) => {
         writeFileSync(join(sandbox, '.env'), text);
         return execFileSync(bash, ['-c', `set -euo pipefail\n${part}\nprintf '%s' "$LISTENER"`], {
@@ -126,11 +170,42 @@ describe('serviceUrl and scripts/restart.sh work out the same listener', () => {
         expect(serviceUrl(envMap(join(sandbox, '.env'))), JSON.stringify(text)).toBe(shell);
         expect(inlineComments(text), JSON.stringify(text)).toEqual([]);
       }
+      expect(listener(cases.at(-4)!)).toBe('https://192.0.2.10:9137');
+      expect(listener(cases.at(-2)!)).toBe('https://192.0.2.5:9137');
+      expect(listener(cases.at(-1)!)).toBe('http://[fe80::5%25eth0]:9137');
       for (const [text, names] of noted) {
         const shell = listener(text);
-        expect(serviceUrl(envMap(join(sandbox, '.env'))), JSON.stringify(text)).not.toBe(shell);
+        expect(serviceUrl(envMap(join(sandbox, '.env'))), JSON.stringify(text)).toBe(shell);
         expect(inlineComments(text), JSON.stringify(text)).toEqual(names);
       }
+      expect(listener(noted[0]![0])).toBe('http://localhost:8080');
+    } finally { rmSync(sandbox, { recursive: true, force: true }); }
+  });
+});
+
+describe('service_port reads PORT as the service and doctor do, the same in each script that asks the listener (HB-1529)', () => {
+  const SCRIPTS = ['restart.sh', 'upgrade-helpers.sh', 'setup-host.sh', 'first-run-link.sh'];
+  const fnOf = (script: string) => {
+    const src = readFileSync(join('scripts', script), 'utf8');
+    const at = src.indexOf('\nservice_port() {\n');
+    expect(at, script).toBeGreaterThan(0);
+    // With what it says of itself above it: the comment is the copy's too.
+    return src.slice(src.lastIndexOf('\n# service_port VALUE:', at) + 1, src.indexOf('\n}\n', at) + 3);
+  };
+  it('one copy, word for word', () => {
+    for (const script of SCRIPTS) expect(fnOf(script), script).toBe(fnOf('restart.sh'));
+  });
+  it.skipIf(process.platform === 'win32')('each value as servicePort reads it; with no node, digits alone, the white space Number drops taken off', () => {
+    const values = ['', '9137', ' 9137 ', '09137', '9137 # moved', '9137\t# x', '0', 'not-a-port', '0x23C1', '-p', '--help', '9137\f', '\v9137\r\n'];
+    const sandbox = mkdtempSync(join(tmpdir(), 'hb-service-port-'));
+    try {
+      const withNode = join(sandbox, 'with'), without = join(sandbox, 'without');
+      mkdirSync(withNode); mkdirSync(without);
+      symlinkSync(process.execPath, join(withNode, 'node'));
+      const bash = execFileSync('sh', ['-c', 'command -v bash'], { encoding: 'utf8' }).trim();
+      const port = (bin: string, v: string) => execFileSync(bash, ['-c', `set -euo pipefail\n${fnOf('restart.sh')}\nservice_port "$1"`, '_', v], { encoding: 'utf8', env: { HOME: sandbox, PATH: bin } });
+      for (const v of values) expect(port(withNode, v), JSON.stringify(v)).toBe(String(servicePort({ PORT: v })));
+      expect(values.map((v) => port(without, v).trim())).toEqual(['8080', '9137', '9137', '9137', '8080', '8080', '8080', '8080', '8080', '8080', '8080', '9137', '9137']);
     } finally { rmSync(sandbox, { recursive: true, force: true }); }
   });
 });
@@ -274,6 +349,33 @@ function namedCert(dir: string, name: string, san: string) {
 
 // 127.0.0.2 stands in for a LAN or tailnet address: not the loopback rule's
 // 127.0.0.1, and on Linux it answers without any setup.
+describe('a bind address with a zone is asked by host and port, which Node takes, not by URL, which it does not (HB-1378 review)', () => {
+  it('zonedTarget reads the parts of such a URL, its % as RFC 6874 writes it or bare, and no other', () => {
+    expect(zonedTarget('http://[fe80::10%25eth0]:9137/')).toEqual({ protocol: 'http:', host: 'fe80::10%eth0', port: 9137, path: '/' });
+    expect(zonedTarget('https://[fe80::10%eth0]:8443/x?y')).toEqual({ protocol: 'https:', host: 'fe80::10%eth0', port: 8443, path: '/x?y' });
+    expect(zonedTarget('http://[fe80::10%25eth0]')).toEqual({ protocol: 'http:', host: 'fe80::10%eth0', port: 80, path: '/' });
+    for (const url of ['http://[fd00::10]:8080/', 'http://192.0.2.10:8080/', 'http://localhost:8080/', 'ftp://[fe80::10%25eth0]:21/']) expect(zonedTarget(url), url).toBeUndefined();
+  });
+
+  // A loopback address with its zone (::1%lo) is the closest to a link-local one a sandbox can listen on.
+  let server: Server | undefined; let port = 0;
+  beforeAll(async () => {
+    const s = createHttpServer((_req, res) => { res.end('<html><script>HATCHABOT_VERSION="9.9.9"</script></html>'); });
+    port = await new Promise<number>((r) => { s.once('error', () => r(0)); s.listen(0, '::1', () => r((s.address() as { port: number }).port)); });
+    if (port) server = s;
+  });
+  afterAll(() => { server?.close(); });
+  it.skipIf(process.platform !== 'linux')('doctor checks such a listener, at the URL serviceUrl writes for it', async (ctx) => {
+    if (!server) ctx.skip(); // no IPv6 loopback here
+    const url = serviceUrl({ PORT: String(port), HATCHABOT_BIND: '::1%lo' });
+    expect(url).toBe(`http://[::1%25lo]:${port}`);
+    expect(() => new URL(url)).toThrow(); // why it is not asked by URL
+    expect(await probeControlPlane(url, undefined, '::1%lo')).toEqual({ url, ok: true, version: '9.9.9' });
+    // Nothing listening there: not ok, with a reason, as for any other address.
+    expect(await probeControlPlane(`http://[::1%25lo]:1`, undefined, '::1%lo')).toMatchObject({ ok: false });
+  });
+});
+
 describe.skipIf(!haveOpenssl || process.platform !== 'linux')('doctor\'s TLS probe on the address the .env binds to', () => {
   let dir: string; let close: () => void; let url: string;
   let own: ReturnType<typeof namedCert>; let other: ReturnType<typeof namedCert>;

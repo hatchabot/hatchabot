@@ -75,7 +75,7 @@ One table, `operations`, beside `agent_events` (which stays the narrative):
 | `id` | `op_…` |
 | `agent_id` | the agent (null for a machine-level operation: image copy, backup run) |
 | `host_id` | the machine it acts on, when that is not the agent's |
-| `kind` | `move-host`, `migrate`, `import`, `restore-backup`, `restore-snapshot`, `provision`, `rebuild`, `archive`, `unarchive`, `app-install`, `app-update`, `app-rollback`, `install-image`, `adopt-workspace` |
+| `kind` | `move-host`, `migrate`, `import`, `restore-backup`, `restore-snapshot`, `provision`, `rebuild`, `archive`, `unarchive`, `app-install`, `app-update`, `app-rollback`, `install-image`, `base-build`, `adopt-workspace` |
 | `requested_by`, `requested_at` | owner id and how (web, CLI, the Hatchabot agent, a sweep) |
 | `params` | JSON, never a secret: target host, date, peer, app ref, wasRunning… |
 | `step`, `step_at` | the last step **confirmed done** (a key from the kind's step list) |
@@ -133,6 +133,7 @@ row from an earlier boot it applies the kind's rule for the last step done:
 | archive | the bot released | **Finish, automatically**: park its Discord and Slack bots, mark ARCHIVED, rebuild-free (the container stays stopped) | The bot is already gone; going back would need a new one |
 | app-install / update / rollback | the switch | Compare the volume's `current` with the record; differ → **hold**: "[Use the new release] [Go back to the previous one]"; clear `staging` | |
 | install-image | anything | `failed`, "[Install again]" | Copying is repeatable |
+| base-build (a default base build only) | anything | Taken by the images service as it is built, before this pass, and settled once docker says whether the default's tag names its candidate: it does → `succeeded`, "… but <tag> names it now, so it is the fleet default"; it does not, or docker does not say within a minute → `failed`, "cut off by a restart, so it was not made the fleet default", where its candidate is if it got to its end, and how to make it the default (HB-1255) | It builds as a candidate and takes the default's tag only as it ends: nothing is undone, and only the owner knows whether to promote it |
 
 "Hold" puts the operation under **Alerts** on the agent's tile and in its
 sheet, with its buttons (`POST /v1/operations/:id/recover {action}`), the

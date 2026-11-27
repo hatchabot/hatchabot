@@ -59,7 +59,6 @@ function gate() {
 
 const opened: Array<() => Promise<void>> = [];
 afterEach(async () => {
-  clearBusy('a1');
   while (opened.length) await opened.pop()!();
 });
 
@@ -357,7 +356,7 @@ describe('deleting an AI source while an agent is switched to it (HB-0570)', () 
     expect(w.store.getAgent('a1')?.classId).toBeFalsy();
   });
 
-  it('a switch whose hold is older than ten minutes no longer keeps its source from being deleted', async () => {
+  it('a switch keeps its source from being deleted however long it takes, ten minutes or more (HB-1413)', async () => {
     const g = gate();
     const w = await world();
     w.store.insertAIProfile({ id: 'p2', ownerId: OWNER, name: 'Spare key', vendor: 'anthropic', kind: 'api_key', model: 'claude-sonnet-5', secretRef: 'ai/p2', createdAt: 'now' });
@@ -367,11 +366,12 @@ describe('deleting an AI source while an agent is switched to it (HB-0570)', () 
     expect((await w.inject('DELETE', '/v1/ai-profiles/p2')).statusCode).toBe(409);
     const later = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 11 * 60_000);
     try {
-      expect((await w.inject('DELETE', '/v1/ai-profiles/p2')).statusCode).toBe(200);
+      // Was 200: the hold lapsed at ten minutes, and the switch then found its source gone.
+      expect((await w.inject('DELETE', '/v1/ai-profiles/p2')).statusCode).toBe(409);
     } finally { later.mockRestore(); }
     g.release();
-    expect((await switching).statusCode).toBe(409);
-    expect(w.store.getAgent('a1')?.aiProfileId).toBe('p1');
+    expect((await switching).statusCode).toBe(200);
+    expect(w.store.getAgent('a1')?.aiProfileId).toBe('p2');
   });
 
   it('the store does not point an agent at a source that is not there, and says which is gone', async () => {
@@ -1202,13 +1202,14 @@ describe('a manual snapshot during a setup-values change (HB-0566)', () => {
     expect(filesReplacingCount('a1')).toBe(0);
   });
 
-  it('a change that replaces the files counts when it starts running, not when it is queued', async () => {
+  it('a rebuild counts neither while it is queued nor as its row starts: under its own take (HB-1491)', async () => {
     const w = await world();
     const before = filesReplacingCount('a1');
     const op = beginOperation(w.store, 'rebuild', 'a1', {}, { queued: true });
     expect(filesReplacingCount('a1')).toBe(before);
     op.start();
-    expect(filesReplacingCount('a1')).toBe(before + 1);
+    // Was before + 1: a take another holder then refused had counted all the same (test/filesReplacingCount.test.ts).
+    expect(filesReplacingCount('a1')).toBe(before);
     op.done('Rebuilt.');
   });
 

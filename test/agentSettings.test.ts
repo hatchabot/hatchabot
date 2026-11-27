@@ -1,8 +1,8 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
-import { clearBusy, markBusy } from '../src/orchestrator/lifecycle/busy.js';
+import { markBusy } from '../src/orchestrator/lifecycle/busy.js';
 import { createAgentSettings, type AgentSettings } from '../src/orchestrator/lifecycle/agentSettings.js';
 import { classChangedThrice, classKey, type ClassEdit } from '../src/orchestrator/lifecycle/classChanges.js';
 import { keptSaid, memoryCapProblem, swapAllowanceProblem } from '../src/orchestrator/lifecycle/memoryLimits.js';
@@ -33,11 +33,9 @@ interface World {
   agent(id: string, name?: string): Promise<{ id: string; ref: string }>;
 }
 
-const busyIds: string[] = [];
 const built: AgentSettings[] = [];
 afterEach(() => {
   for (const s of built.splice(0)) s.stop();
-  for (const id of busyIds.splice(0)) clearBusy(id);
 });
 
 function world(): World {
@@ -56,7 +54,6 @@ function world(): World {
     inFlight: (agentId) => flights.get(agentId),
     agentGone: (id) => { const state = store.getAgent(id)?.state; return !state || state === 'DELETED' || state === 'DELETING'; },
     withAgentsMdTurn: (_agentId, fn) => fn(),
-    sourceHoldMs: 600_000,
   });
   built.push(settings);
   const agent = async (id: string, name = 'Kitchen') => {
@@ -157,7 +154,7 @@ describe('model application', () => {
     w.flights.set(a.id, new Promise(() => {}));
     expect(await w.settings.models.applyModelToRuntime(a.id)).toBe('none');
     w.flights.delete(a.id);
-    markBusy(a.id); busyIds.push(a.id);
+    markBusy(a.id);
     expect(await w.settings.models.applyModelToRuntime(a.id)).toBe('none');
     expect(modelsSet(w)).toEqual([]);
     expect(w.events.filter((e) => e.event === 'model.apply_deferred')).toHaveLength(2);
@@ -264,7 +261,7 @@ describe('memory limits', () => {
 
   it('stop() ends the wait for an agent that stays busy, and nothing is told after it', async () => {
     const w = world(), a = await w.agent('a1');
-    markBusy(a.id); busyIds.push(a.id);
+    markBusy(a.id);
     const telling = w.settings.limits.tellMemoryBudget(a.id);
     await tick();
     let done = false;
@@ -368,7 +365,7 @@ describe('class changes', () => {
     // Nothing in their records changed since: one is being rebuilt, one is busy (a backup), one has nothing under way.
     const rebuild = gate();
     w.flights.set(a.id, rebuild.held);
-    markBusy(b.id); busyIds.push(b.id);
+    markBusy(b.id);
     const second = await classes.checkEditMembers(edit, first);
     expect(second.get(c.id)).toBe(first.get(c.id));
     expect(second.get(a.id)).not.toBe(first.get(a.id));
@@ -435,18 +432,20 @@ describe('source holds', () => {
     expect(sourceHeld('p1')).toBe(false);
   });
 
-  it('a hold that outlived its limit no longer counts, and is logged once', async () => {
-    const warned: Array<{ event: string; detail: Record<string, unknown> }> = [];
-    const { withSourceHold, sourceHeld } = createSourceHolds({ holdMs: 10, warn: (detail, event) => { warned.push({ event, detail }); } });
-    const g = gate();
-    const stuck = withSourceHold('p1', () => g.held);
+  it('a hold counts for as long as its switch works, however long, and two on one source each let go of their own (HB-1413)', async () => {
+    const { withSourceHold, sourceHeld } = createSourceHolds();
+    const g = gate(), h = gate();
+    const slow = withSourceHold('p1', () => g.held);
+    const other = withSourceHold('p1', () => h.held);
+    // Was: let go at ten minutes, a switch still at work or not.
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 11 * 60_000);
     expect(sourceHeld('p1')).toBe(true);
-    await new Promise((r) => setTimeout(r, 30));
-    expect(sourceHeld('p1')).toBe(false);
-    expect(sourceHeld('p1')).toBe(false);
-    expect(warned).toHaveLength(1);
-    expect(warned[0]).toMatchObject({ event: 'source.hold_expired', detail: { source: 'p1' } });
+    h.open();
+    await other;
+    expect(sourceHeld('p1')).toBe(true);
+    clock.mockRestore();
     g.open();
-    await stuck;
+    await slow;
+    expect(sourceHeld('p1')).toBe(false);
   });
 });

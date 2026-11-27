@@ -23,7 +23,12 @@
 # put back by an earlier deploy is not serving (its restart back did not come
 # up, or was given up after three) and the tag named is that release: no tag
 # was tried, and its record stays (kept_check, HB-1456). 6 only when the
-# caller set HATCHABOT_FOLLOW_KNOWS_6=1; to any other it is 3.
+# caller set HATCHABOT_FOLLOW_KNOWS_6=1; to any other it is 3. 7 the repair
+# of a deploy cut off part-way failed before the tag was touched (a git lock
+# in the way, a checkout of the release put back, the dependencies' lock held
+# for half an hour): says nothing about the tag, and the timer gives the
+# repair a clock of its own (HB-1431). 7 only when the caller set
+# HATCHABOT_FOLLOW_KNOWS_7=1; to any other it is 3.
 set -euo pipefail
 TAG="${1:?usage: deploy-release.sh vX.Y.Z}"
 PROD="${HATCHABOT_PROD_DIR:-$HOME/hatchabot-prod}"
@@ -49,29 +54,35 @@ CDPATH= cd -- "$PROD"
 # step_short, put_rec, change_failed (a failed step's words); link_end,
 # put_line, put_dir, put_failed (the records); proc_start, proc_start_utc,
 # started_as, lock_left_over, take_lock, lock_short, lock_in_way (the lock);
-# deps_holder_gone, deps_lock, deps_unlock; kept_tries, kept_record;
-# checkout_recorded; older_release, mark_rolled_back, systemd_major,
-# env_named, rolled_back_note, left_ran, unmark_rolled_back (the rollback's
-# note).
-HELPERS_BLOB=6cc1f1f8c134608439cbec85d58968a381df7195
+# deps_holder_gone, deps_take, deps_lock, deps_unlock, restore_deps;
+# kept_tries, kept_record; checkout_recorded; git_running_here,
+# clear_own_index_lock, save_other_edits, repair_tree (a run cut off
+# part-way); older_release,
+# mark_rolled_back, systemd_major, env_named, rolled_back_note, left_ran,
+# unmark_rolled_back (the rollback's note); service_port (the listener's
+# port).
+HELPERS_BLOB=9d164eaedd24f2f19485c1ade1813db80b790f95
 # Read once, to the byte (the x keeps the newlines a $(…) drops at its end),
 # and those bytes judged by their id before they are run.
 HELPERS=""
 if git --no-replace-objects cat-file -e "$HELPERS_BLOB" 2>/dev/null; then HELPERS="$(git --no-replace-objects cat-file blob "$HELPERS_BLOB" 2>/dev/null && printf x)" || HELPERS=""
 elif [ -n "$HERE" ] && [ -f "$HERE/upgrade-helpers.sh" ]; then HELPERS="$(cat "$HERE/upgrade-helpers.sh" 2>/dev/null && printf x)" || HELPERS=""
 fi
-case "$HELPERS" in *x) HELPERS="${HELPERS%x}" ;; *) HELPERS="" ;; esac
+case "$HELPERS" in
+  *x) HELPERS="${HELPERS%x}" ;;
+  *) HELPERS="" ;;
+esac
 [ -z "$HELPERS" ] || [ "$(printf '%s' "$HELPERS" | git hash-object --stdin 2>/dev/null)" = "$HELPERS_BLOB" ] || HELPERS=""
 if [ -z "$HELPERS" ] || ! eval "$HELPERS" || ! declare -F upgrade_helpers_end >/dev/null; then
   echo "This deploy-release.sh needs scripts/upgrade-helpers.sh as its own release has it, and found it neither in $PWD's git nor beside it, so nothing was changed. Fetch the release into $PWD (git -C \"$PWD\" fetch --tags origin), or run scripts/deploy-release.sh from a whole checkout, then try again."
   exit 2
 fi
 unset HELPERS
-# The names the helpers use: the tree, the release going in, and what to run
-# when putting the old one back did not work.
+# The names the helpers use: the tree, the release going in, what to run
+# when putting the old one back did not work, and this run's own name.
 # Absolute: a relative HATCHABOT_PROD_DIR named, after the cd, a folder that
 # was not there, so df found no disk to judge (tenth review).
-PROD="$PWD"; DIR="$PWD"; TARGET="$TAG"; REDO="scripts/deploy-release.sh $TAG"
+PROD="$PWD"; DIR="$PWD"; TARGET="$TAG"; REDO="scripts/deploy-release.sh $TAG"; RUN_NOUN=deploy
 # Whatever ends the script ends here. Something it did not plan for (set -e
 # after node_modules was moved aside) left a half-changed checkout and exit 1,
 # which follow-latest.sh reads as "this tag does not start" and never retries
@@ -84,6 +95,7 @@ DEPS_HELD=0   # 1 while this run holds the dependencies' lock (deps_lock)
 DISK=0   # 1 once this run found the machine short of room or permission (machine_short)
 KEPT=0   # 1 once this run ends on a release put back that is not serving (stop_or_go)
 KEPT_REC=0   # 1 once this run goes on from that release's record, which its own takes the place of
+REPAIR_FAILED=0   # 1 once this run's repair of a deploy cut off failed, before the tag was touched (repair_failed)
 finish() {
   local rc=$?
   set +e
@@ -100,7 +112,14 @@ finish() {
   # the timer that runs this is the release before's follow-latest.sh, and one
   # from before 5 read it as "try every tick", never backing off (seventh
   # review). To any other, the disk is 3, as it was.
-  case "$rc" in 0|2|3|4) ;; 5) [ "$DISK" = 1 ] && [ "${HATCHABOT_FOLLOW_KNOWS_5:-}" = 1 ] || rc=3 ;; 6) [ "$KEPT" = 1 ] && [ "${HATCHABOT_FOLLOW_KNOWS_6:-}" = 1 ] || rc=3 ;; 1) [ "$ROLLED_BACK" = 1 ] || rc=3 ;; *) rc=3 ;; esac
+  case "$rc" in
+    0|2|3|4) ;;
+    5) [ "$DISK" = 1 ] && [ "${HATCHABOT_FOLLOW_KNOWS_5:-}" = 1 ] || rc=3 ;;
+    6) [ "$KEPT" = 1 ] && [ "${HATCHABOT_FOLLOW_KNOWS_6:-}" = 1 ] || rc=3 ;;
+    7) [ "$REPAIR_FAILED" = 1 ] && [ "${HATCHABOT_FOLLOW_KNOWS_7:-}" = 1 ] || rc=3 ;;
+    1) [ "$ROLLED_BACK" = 1 ] || rc=3 ;;
+    *) rc=3 ;;
+  esac
   exit "$rc"
 }
 trap finish EXIT
@@ -154,10 +173,18 @@ fi
 # it, a restart's npm ci running there meanwhile had its tree moved from
 # under it (review of HB-1212). deps_lock and deps_unlock, as upgrade.sh's;
 # let go before every restart, whose ensure-deps.sh takes it, and in finish.
-DEPS_LOCK="$LOCKS/deps-$(printf %s "$DIR" | cksum | cut -d' ' -f1).lock.d"
+# Keyed on the folder's physical path, as ensure-deps.sh's (HB-1377).
+DEPS_LOCK="$LOCKS/deps-$(printf %s "$(pwd -P)" | cksum | cut -d' ' -f1).lock.d"
+# And, reached through a link, the one the scripts of releases before 2.193.0
+# key on the path as given, taken after it (deps_lock; review of HB-1377).
+DEPS_LOCK_OLD="$LOCKS/deps-$(printf %s "$DIR" | cksum | cut -d' ' -f1).lock.d"
+[ "$DEPS_LOCK_OLD" != "$DEPS_LOCK" ] || DEPS_LOCK_OLD=""
 DEPS_ME="$$"; DEPS_START="$(proc_start_utc $$)"; [ -z "$DEPS_START" ] || DEPS_ME="$$ $DEPS_START"
 # How many one-second tries the lock is waited for: half an hour (tests make it a few).
-DEPS_WAIT="${HATCHABOT_DEPS_WAIT_SECS:-1800}"; case "$DEPS_WAIT" in ''|*[!0-9]*) DEPS_WAIT=1800 ;; esac
+DEPS_WAIT="${HATCHABOT_DEPS_WAIT_SECS:-1800}"
+case "$DEPS_WAIT" in
+  ''|*[!0-9]*) DEPS_WAIT=1800 ;;
+esac
 DEPS_STUCK="Another install of the dependencies in $DIR has held $DEPS_LOCK for half an hour, so nothing was moved. If no npm is running there, remove it (rm -r \"$DEPS_LOCK\"), then try again."
 
 # A deploy in progress, beside the lock, in the record upgrade.sh keeps
@@ -169,91 +196,7 @@ DEPS_STUCK="Another install of the dependencies in $DIR has held $DEPS_LOCK for 
 # node_modules.prev. Put the old release back first, then deploy as usual
 # (HB-0266).
 FROM_FILE="${LOCK_PATH%.lock.d}.from"
-# A git running in this checkout, whoever started it: its pid, or "unknown" when
-# this machine has no way to tell. A commit waiting in its editor holds the lock
-# for as long as the person takes, however old the lock looks.
-git_running_here() {
-  local here p comm cwd line pid=""
-  here="$(pwd -P)"
-  if [ -d "/proc/$$" ]; then
-    # Read with the builtin, not $(cat): one cat per process on the machine
-    # took 1.7 s with 900 running, and longer the busier it was (HB-0505).
-    for p in /proc/[0-9]*; do
-      { read -r comm < "$p/comm"; } 2>/dev/null || continue
-      case "$comm" in git|git-*) ;; *) continue ;; esac
-      cwd="$(readlink "$p/cwd" 2>/dev/null)" || continue
-      case "$cwd/" in "$here/"*) echo "${p#/proc/}"; return 0 ;; esac
-    done
-    return 1
-  fi
-  command -v lsof >/dev/null 2>&1 || { echo unknown; return 0; }
-  while IFS= read -r line; do
-    case "$line" in
-      p*) pid="${line#p}" ;;
-      n*) case "${line#n}/" in "$here/"*) echo "$pid"; return 0 ;; esac ;;
-    esac
-  done < <(lsof -a -c git -d cwd -Fpn 2>/dev/null)
-  return 1
-}
-# .git/index.lock goes only when it is shown to be that checkout's own: the
-# record names a git, that git is gone, the lock is no older than the record
-# (the record is written first), it is not fresh, and no other git is running
-# here. Anything else stays and is said.
-# 0 clear to go on; 1 a git of this record's is running, or the lock is not its own.
-clear_own_index_lock() {
-  local word pid start named=0
-  while read -r word pid start; do
-    [ "$word" = git ] || continue
-    named=1
-    if [ -n "$start" ]; then ! started_as "$pid" "$start" || { echo "The checkout that deploy started is still running (pid $pid) — try again once it ends."; return 1; }
-    elif kill -0 "$pid" 2>/dev/null; then echo "The checkout that deploy started is still running (pid $pid) — try again once it ends."; return 1; fi
-  done < "$FROM_FILE"
-  [ -e .git/index.lock ] || return 0
-  local live
-  if live="$(git_running_here)"; then
-    if [ "$live" != unknown ]; then echo "$PWD/.git/index.lock is held by a git running there (pid $live), which this deploy did not start — try again once it ends."; return 1; fi
-    named=0
-  fi
-  if [ "$named" = 1 ] && [ ! "$FROM_FILE" -nt .git/index.lock ] && [ -n "$(find .git/index.lock -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
-    echo "Removing the .git/index.lock the deploy that was cut off left behind."
-    rm -f .git/index.lock; return 0
-  fi
-  echo "$PWD/.git/index.lock is in the way, and nothing shows it is that deploy's own (one a few minutes old may be: try again then). If no git is running there, remove it: rm $PWD/.git/index.lock"
-  return 1
-}
-# Back to the release the record names. Forced, and through the new one first
-# when the tree is part-way: a checkout cut off leaves HEAD and the index on the
-# old one with files rewritten, which a plain checkout kept (mixed code, then
-# refused as local changes for good). The deploy started from a clean tree, and
-# tracked files are all this touches, so .env and data/ stay. A tracked file
-# that matches neither release may be someone's edit since the kill (or a file
-# the kill cut short, which cannot be told apart): a copy is kept, and named.
-save_other_edits() {
-  local f got kept=""
-  while IFS= read -r -d '' f; do
-    [ -f "$f" ] || [ -L "$f" ] || continue
-    got="$(git hash-object -- "$f" 2>/dev/null)" || got=""
-    [ "$got" != "$(git rev-parse -q --verify "$FROM:$f" 2>/dev/null)" ] || continue
-    [ -z "$TO" ] || [ "$got" != "$(git rev-parse -q --verify "$TO:$f" 2>/dev/null)" ] || continue
-    if [ -z "$kept" ]; then
-      kept="${FROM_FILE%.from}.kept-$(date +%Y%m%d-%H%M%S)"
-      ( umask 077; mkdir -p "$kept" ) || { echo "Could not keep a copy of the edit to $f, so it was not overwritten."; return 1; }
-      echo "These tracked files match neither $FROM nor ${TO:-the new release}, so they may be someone's edits. Putting $FROM back overwrites them; a copy of each is kept in $kept:"
-    fi
-    mkdir -p "$kept/$(dirname "$f")" && cp -pP "$f" "$kept/$f" || { echo "Could not keep a copy of the edit to $f, so it was not overwritten."; return 1; }
-    echo "    $f"
-  done < <(git --no-optional-locks diff --name-only -z HEAD 2>/dev/null)
-  return 0
-}
 NOTED=0   # 1 once this run wrote the rollback's note for an older tag (mark_rolled_back)
-repair_tree() {
-  [ -n "$FROM" ] || return 1
-  save_other_edits || return 1
-  if [ -n "$TO" ] && [ "$(git rev-parse HEAD)" != "$(git rev-parse "$TO^{commit}" 2>/dev/null)" ] && [ -n "$(git status --porcelain)" ]; then
-    checkout_recorded --quiet --force "$TO" || return 1
-  fi
-  checkout_recorded --quiet --force "$FROM"
-}
 # serving_wait [once]: 0 once the service serves the release checked out
 # (WANT, its package.json's version), 1 when it has not in 90 seconds; with
 # `once`, asked once (kept_check). The deploy's own wait, and the restart
@@ -262,29 +205,31 @@ repair_tree() {
 # empty WANT (no node, or a package.json it cannot read) is never served: it
 # matched a service that did not answer at all. WANT_SAID says it either way.
 # Health URL from the production .env, not the caller's shell: PORT, native
-# TLS and the bind address, read as the service reads them (restart.sh does
-# the same) — the bare value, and the LAST line that sets it. The first was
-# taken, so a .env that set PORT twice was probed on the old port (audit #031).
-# (No .env is "not set": under pipefail sed's exit 2 for a missing file ended the deploy.)
-# Spaces around the = too, as systemd reads it (PORT = 9137; audit, 2026-10-29).
-envval() { { sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" .env 2>/dev/null || true; } \
-  | sed -e 's/[[:space:]]*#.*$//' -e 's/[[:space:]]*$//' -e "s/^['\"]//" -e "s/['\"]$//" | tail -n1; }
+# TLS and the bind address, read as the service reads them (env_named, as
+# restart.sh reads them): the LAST line that sets each (the first was taken,
+# and a .env that set PORT twice was probed on the old port; audit #031),
+# spaces around the = as systemd reads them (PORT = 9137; audit, 2026-10-29),
+# a name from before the rename too, and the port as the service takes it
+# (service_port). Read by sed, a listener set under the AGENTCLAW_ names was
+# asked over plain http on 127.0.0.1 (HB-1529). No .env is "not set".
 serving_wait() {
   local p scheme bind PROBE_HOST url got DEADLINE i n=45
   [ "${1:-}" != once ] || n=1
   WANT="$(node -e 'console.log(require("./package.json").version)' 2>/dev/null || true)"
-  WANT_SAID="${WANT:-the version in its package.json (which could not be read)}"
-  p="$(envval PORT)"; p="${p:-8080}"
-  scheme=http; [ -z "$(envval HATCHABOT_TLS_CERT)" ] || scheme=https
+  WANT_SAID="$WANT"
+  [ -n "$WANT_SAID" ] || WANT_SAID="the version in its package.json (which could not be read)"
+  env_named PORT HATCHABOT_TLS_CERT HATCHABOT_BIND
+  p="$(service_port "$ENV_PORT")"
+  scheme=http; [ -z "$ENV_HATCHABOT_TLS_CERT" ] || scheme=https
   # At the address it listens on when HATCHABOT_BIND is one host: a listener on
   # a LAN address never answers 127.0.0.1, and a healthy release was rolled
   # back — exit 1, which follow-latest sets aside for good (audit #030).
-  bind="$(envval HATCHABOT_BIND)"
+  bind="$ENV_HATCHABOT_BIND"
   case "$bind" in
     ""|0.0.0.0|127.0.0.1) PROBE_HOST=127.0.0.1 ;;
     ::|"[::]"|localhost) PROBE_HOST=localhost ;;
     \[*) PROBE_HOST="$bind" ;;
-    *:*) PROBE_HOST="[$bind]" ;;   # an IPv6 address goes in brackets in a URL
+    *:*) PROBE_HOST="[${bind//[%]/%25}]" ;;   # an IPv6 address goes in brackets in a URL, a zone's % as %25 (RFC 6874; HB-1378)
     *) PROBE_HOST="$bind" ;;
   esac
   url="${HATCHABOT_HEALTH_URL:-$scheme://$PROBE_HOST:$p/}"
@@ -357,14 +302,18 @@ restarted_back() {
   back_down "$1" "$1 is back in $PROD, but it is not serving $WANT_SAID — check: journalctl --user -u $SVC -n 50."
   return 1
 }
+# repair_failed: the repair below stopped before the tag was touched: 7 (to a
+# timer that knows it, finish), which is no try of the tag. Counted as one
+# (3), a repair that kept failing set a good tag aside for good (HB-1431).
+repair_failed() { REPAIR_FAILED=1; exit 7; }
 if [ -f "$FROM_FILE" ]; then
   FROM="$(sed -n 's/^from //p' "$FROM_FILE" | sed -n 1p)"; TO="$(sed -n 's/^to //p' "$FROM_FILE" | sed -n 1p)"
   if kept_record "$FROM_FILE"; then echo "${FROM:-The previous release} was put back in $PROD by an earlier run, whose restart of it did not come up or was cut off."
   else echo "A deploy of $PROD was cut off part-way — putting ${FROM:-the previous release} back first."; fi
-  clear_own_index_lock || exit 3
-  repair_tree || { echo "Could not check out ${FROM:-the previous release} (above): node_modules.prev holds its dependencies."; exit 3; }
+  clear_own_index_lock || repair_failed
+  repair_tree || { echo "Could not check out ${FROM:-the previous release} (above): node_modules.prev holds its dependencies."; repair_failed; }
   if [ -d node_modules.prev ]; then
-    deps_lock || { echo "Another install of the dependencies in $DIR has held $DEPS_LOCK for half an hour, so ${FROM:-the previous release}'s are still in node_modules.prev, not put back: the next deploy puts them back first. If no npm is running there, remove it: rm -r \"$DEPS_LOCK\""; exit 3; }
+    deps_lock || { echo "Another install of the dependencies in $DIR has held $DEPS_LOCK for half an hour, so ${FROM:-the previous release}'s are still in node_modules.prev, not put back: the next deploy puts them back first. If no npm is running there, remove it: rm -r \"$DEPS_LOCK\""; repair_failed; }
     rm -rf node_modules; mv node_modules.prev node_modules
     deps_unlock
   fi
@@ -412,20 +361,8 @@ echo "Deploying $TAG to $PROD (currently $CUR)…"
 # Only once the working one was moved aside (ASIDE): stopped while a stale
 # node_modules.prev was being removed, the rollback deleted the only working
 # node_modules (HB-0266).
-# Under the dependencies' lock, as upgrade.sh's: one this run cannot have
-# within half an hour leaves them where they are and fails, so the record
-# stays and the next deploy puts them back (review of HB-1212).
-restore_deps() {
-  [ -d node_modules.prev ] || [ "$ASIDE" = 1 ] || return 0
-  if ! deps_lock; then
-    echo "Another install of the dependencies in $DIR has held $DEPS_LOCK for half an hour, so ${CUR:-the previous release}'s were left in node_modules.prev, not put back. If no npm is running there, remove it: rm -r \"$DEPS_LOCK\""
-    return 1
-  fi
-  if [ -d node_modules.prev ]; then rm -rf node_modules; mv node_modules.prev node_modules
-  elif [ "$ASIDE" = 1 ]; then rm -rf node_modules; fi
-  deps_unlock
-  return 0
-}
+# restore_deps (scripts/upgrade-helpers.sh) puts it back, under the
+# dependencies' lock, as upgrade.sh's.
 # The service is restarted only when it was restarted onto the new release:
 # an install that failed left the old one serving, and restarting it anyway
 # restarted production every ten minutes while a tag that cannot install kept
@@ -454,7 +391,7 @@ rollback() {
   if [ "$RESTARTED" = 1 ]; then
     if left_ran "$FROM_FILE"; then mark_rolled_back "$DIR"; elif [ "$NOTED" = 1 ]; then unmark_rolled_back "$DIR"; fi
     NOTED=0
-    systemctl --user restart "$SVC" || return 1
+    systemctl --user restart "$SVC" || { echo "systemctl could not restart $SVC onto $CUR (above)."; return 1; }
     restarted_back "$CUR" || { BACK_DOWN=1; return 1; }
   fi
   if [ "$RESTARTED" = 0 ] && [ "$KEPT_REC" = 1 ]; then kept_again; else rm -f "$FROM_FILE"; fi
@@ -496,7 +433,7 @@ deps_unlock
 BACK_DOWN=0
 rollback_or_redo() {
   rollback && return 0
-  [ "$BACK_DOWN" = 1 ] || echo "Then run $REDO: it puts ${CUR:-the previous release} back first, from its record."
+  [ "$BACK_DOWN" = 1 ] || { echo "So the rollback did not finish either: ${CUR:-the previous release} is not back as it was."; echo "Then run $REDO: it puts ${CUR:-the previous release} back first, from its record."; }
 }
 # As upgrade.sh: the step's errors beside the lock, not in TMPDIR (which may
 # be the same full disk) unless that folder takes no new file (new_step_log),

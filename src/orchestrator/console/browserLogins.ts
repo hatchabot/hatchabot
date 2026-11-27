@@ -5,6 +5,7 @@
  */
 import type { Store } from '../../store/store.js';
 import type { Agent } from '../../domain/types.js';
+import { ANYONE } from '../google/accessOverview.js';
 
 const APP: Record<string, string> = { telegram: 'Telegram', slack: 'Slack', discord: 'Discord' };
 
@@ -37,6 +38,8 @@ export function browserSteerers(store: Store, agent: Agent): string[] {
   }
   for (const c of store.listAccessChecks(agent.id)) {
     if (c.kind !== 'person-unknown' || !c.present) continue;
+    // Its door open to everybody: anyone, not a count (HB-1201).
+    if (c.detail === ANYONE) { out.push(`anyone on ${APP[c.subject] ?? c.subject}, let in inside OpenClaw itself`); continue; }
     const n = Number(c.detail) || 0;
     if (n > 0) out.push(`${n} other ${n === 1 ? 'person' : 'people'} on ${APP[c.subject] ?? c.subject}, let in inside OpenClaw itself`);
   }

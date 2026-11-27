@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { DROP_CHAT_ACCOUNTS_SCRIPT } from '../src/orchestrator/members/members.js';
+import { DROP_CHAT_ACCOUNTS_SCRIPT, setDmPolicy } from '../src/orchestrator/members/members.js';
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, readFileSync, statSync, lstatSync, readdirSync, symlinkSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -187,6 +187,36 @@ describe('restoreAgentFromBackup', () => {
     expect(provider.stateStore.get(runtimeRef)!.toString()).toBe('that-night'); // memory and files are the backup's
   });
 
+  it('removes people again in the agent\'s turn at its chat apps\' config: a door write asked for meanwhile lands after it (HB-1554)', async () => {
+    const { store, provider, runtimeRef } = await runningAgent();
+    store.insertChannel({ id: 'c1', agentId: 'a1', kind: 'telegram', accountId: 'NewBot', secretRef: 'chan/a1', deepLink: 'x', createdAt: 'now' } as never);
+    store.insertMembership({ id: 'm2', agentId: 'a1', userId: 'u-sam', role: 'member', displayName: 'Sam', channelUserId: '4242', status: 'active' } as never);
+    store.revokeMembership('a1', 'u-sam');
+    mkdirSync(join(rbase, '2026-08-23'), { recursive: true });
+    writeFileSync(join(rbase, '2026-08-23', agentArchiveName(runtimeRef)), 'that-night');
+    let entered!: () => void, release!: () => void;
+    const reached = new Promise<void>((r) => { entered = r; });
+    const held = new Promise<void>((r) => { release = r; });
+    const landed: string[] = [];
+    const onVolume = provider.execShellOnVolume.bind(provider);
+    provider.execShellOnVolume = async (ref, script, o) => {
+      if (script.includes('const drop = ')) { entered(); await held; landed.push('scrub'); return { code: 0, stdout: '', stderr: '' }; }
+      if (script.includes('t.policy')) { landed.push('door'); return { code: 0, stdout: 'set\n', stderr: '' }; }
+      return onVolume(ref, script, o);
+    };
+    const restoring = restoreAgentFromBackup({ store, provider, reapply: async () => {} }, 'a1', '2026-08-23');
+    await reached;
+    // A knock window opens the door while Sam is being removed again.
+    const door = setDmPolicy({ store, provider }, { agentId: 'a1', runtimeRef, kind: 'telegram', accountId: 'NewBot', policy: 'pairing' });
+    await new Promise((r) => setTimeout(r, 20));
+    // Was: written meanwhile, from a config read before the scrub landed.
+    expect(landed).toEqual([]);
+    release();
+    await restoring;
+    await door;
+    expect(landed).toEqual(['scrub', 'door']);
+  });
+
   it('when a full re-apply cannot run, still drops the old bot and says the rest waits for a rebuild', async () => {
     const { store, provider, runtimeRef } = await runningAgent();
     mkdirSync(join(rbase, '2026-08-24'), { recursive: true });
@@ -219,6 +249,27 @@ describe('restoreAgentFromBackup', () => {
         if (rm) { put(keyring().filter((e) => e !== rm[1])); return { code: 0, stdout: '', stderr: '' }; }
         return exec(ref, script, o);
       };
+      // Its volume, the agent stopped: the same gog, run by the agent's own image (HB-1207).
+      // `misreports`: gog answers for a store that is not the agent's, as it did with no GOG_HOME
+      // (it said the account was deleted and listed none, and the agent's store kept it).
+      const onVolume = { fails: false, misreports: false, images: [] as Array<string | undefined>, ran: [] as string[] };
+      const volumeExec = provider.execShellOnVolume.bind(provider);
+      provider.execShellOnVolume = async (ref, script, o?: { readOnly?: boolean; image?: string }) => {
+        const removes = [...script.matchAll(/~\/\.local\/bin\/gog auth remove --force -- "([^"]+)"/g)].map((m) => m[1]!);
+        if (!removes.length) return volumeExec(ref, script, o);
+        onVolume.ran.push(script);
+        onVolume.images.push(o?.image);
+        // gog reads the agent's store only with the agent's GOG_HOME, set before it runs.
+        if (!script.startsWith("export GOG_HOME='/home/node/.openclaw/connections/gog'\n")) return { code: 1, stdout: '', stderr: 'not the agent\'s gog store: GOG_HOME is not set' };
+        if (onVolume.fails) return { code: 1, stdout: '', stderr: 'Unable to find image' };
+        if (!onVolume.misreports) put(keyring().filter((e) => !removes.includes(e)));
+        return { code: 0, stdout: `--- hatchabot: gog auth list ---\n${JSON.stringify({ accounts: onVolume.misreports ? [] : keyring().map((email) => ({ email })) })}`, stderr: '' };
+      };
+      /** What its volume held, and what was still queued to come off, each time it was started. */
+      const atStart: string[][] = [];
+      const queuedAtStart: string[][] = [];
+      const start = provider.start.bind(provider);
+      provider.start = async (ref) => { atStart.push(keyring()); queuedAtStart.push(store.connectionRemovals('a1')); return start(ref); };
       put([SAM]);
       const deps = { store, secrets: new MemSecrets(), provider };
       // Its owner's connection of the account, attached; another owner here holds the same account.
@@ -249,8 +300,57 @@ describe('restoreAgentFromBackup', () => {
         await restoreAgentFromBackup({ store, provider, afterStart: (id) => { synced = syncConnections(deps, id, runtimeRef); } }, 'a1', date);
         await synced;
       };
-      return { ...w, keyring, deleteIt, restore };
+      return { ...w, keyring, deleteIt, restore, onVolume, atStart, queuedAtStart };
     }
+
+    it('it is off its volume before the agent starts again, not at the sync once it is up (HB-1207)', async () => {
+      const w = await withKeyring();
+      w.store.setAgentImage('a1', 'ghcr.io/hatchabot/runtime:2026.11.1-1');
+      await w.deleteIt();
+      await w.restore('2026-08-26', [SAM]);
+      expect(w.atStart).toEqual([[]]);
+      expect(w.onVolume.images).toEqual(['ghcr.io/hatchabot/runtime:2026.11.1-1']);
+      // Only early: still queued when it starts, and the start's sync confirms it.
+      expect(w.queuedAtStart).toEqual([[SAM]]);
+      // A volume with no keyring of Hatchabot's cannot tell: nothing is run there.
+      expect(w.onVolume.ran[0]!.split('\n')[1]).toMatch(/^if \[ ! -f "\$GOG_HOME\/keyring_password" \]; then echo '[^']+' >&2; exit 3; fi$/);
+      expect(w.keyring()).toEqual([]);
+      expect(w.store.connectionRemovals('a1')).toEqual([]);
+    });
+
+    it("a volume step that says it is off, but answered for a store not the agent's: still queued at the start, and the sync takes it off (HB-1207 review)", async () => {
+      const w = await withKeyring();
+      w.onVolume.misreports = true;
+      await w.deleteIt();
+      await w.restore('2026-08-26', [SAM]);
+      expect(w.onVolume.ran).toHaveLength(1);
+      expect(w.atStart).toEqual([[SAM]]);
+      expect(w.queuedAtStart).toEqual([[SAM]]);
+      expect(w.keyring()).toEqual([]);
+      expect(w.store.connectionRemovals('a1')).toEqual([]);
+    });
+
+    it('one its volume does not confirm off stays queued, and the sync once it is up takes it off (HB-1207)', async () => {
+      const w = await withKeyring();
+      w.onVolume.fails = true;
+      await w.deleteIt();
+      await w.restore('2026-08-26', [SAM]);
+      expect(w.onVolume.ran).toHaveLength(1);
+      expect(w.atStart).toEqual([[SAM]]);
+      expect(w.keyring()).toEqual([]);
+      expect(w.store.connectionRemovals('a1')).toEqual([]);
+    });
+
+    it('one attached to it again since is not taken off its volume (HB-1207)', async () => {
+      const w = await withKeyring();
+      await w.deleteIt();
+      w.store.insertConnection({ id: 'c3', ownerId: 'o', kind: 'google', email: SAM, services: ['gmail'], secretRef: 'connection/c3' });
+      w.store.attachConnection('a1', 'c3', false);
+      w.store.addConnectionRemoval('a1', SAM);
+      await w.restore('2026-08-26', [SAM]);
+      expect(w.onVolume.ran).toEqual([]);
+      expect(w.atStart).toEqual([[SAM]]);
+    });
 
     it('a copy from before it was deleted: the account is taken off again when it starts', async () => {
       const w = await withKeyring();

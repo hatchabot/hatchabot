@@ -15,10 +15,22 @@ import { keyedLock } from '../util/queues.js';
 
 const LINE = /^\s*(#\s*)?([A-Z][A-Z0-9_]*)\s*=(.*)$/;
 
-/** The values in force: the LAST uncommented KEY= line per name (systemd and the shell both take the last). */
+/**
+ * The values in force: the LAST uncommented KEY= line per name (systemd and
+ * the shell both take the last). A carriage return ends a line, as it does
+ * for systemd (its newlines are "\n\r"): split at "\n" alone, every line of
+ * a .env saved with Windows line endings ended in a "\r" that `.` never
+ * matches, and was passed over, so doctor found no HATCHABOT_SECRET_KEY and
+ * the TLS and sign-in checks read nothing (HB-1530).
+ */
 export function activeValues(text: string): Map<string, string> {
+  return assignedIn(text.split(/[\r\n]/));
+}
+
+/** The uncommented KEY= lines among `lines`, the last per name. */
+function assignedIn(lines: string[]): Map<string, string> {
   const out = new Map<string, string>();
-  for (const line of text.split('\n')) {
+  for (const line of lines) {
     const m = LINE.exec(line);
     if (m && !m[1]) out.set(m[2]!, m[3]!);
   }
@@ -42,8 +54,9 @@ export function envValue(raw: string): string {
 /**
  * The settings in force whose line goes on with a ` # note` after the value
  * (HB-0634). systemd keeps the note as part of the value (envValue), and so
- * does the service on Linux; a shell drops it, and the Mac's launchd job and
- * restart.sh read the file as a shell does. The same line is two settings,
+ * do the service on Linux and restart.sh there, which reads the file as
+ * systemd does (HB-1529); a shell drops it, and the Mac's launchd job (and
+ * restart.sh on a Mac) reads the file as a shell does. The same line is two settings,
  * so the one reading both have is a file with comments on lines of their
  * own. A shell starts a comment at a `#` after a space or tab that is
  * neither quoted nor escaped: so a `#` with no space before it (`pa#ss`), one
@@ -111,7 +124,12 @@ function rawLines(text: string): string[] {
 const MARK = '# ~~';  // generated section rules start with this
 
 function parse(text: string, known: Set<string>): Parsed {
-  const active = activeValues(text);
+  // The lines the tidy writes again, split at "\n" as it keeps them: one with
+  // a carriage return stays a line it does not know (rawLines), as written,
+  // and its value is not written again in its group, since a shell (the Mac's
+  // service) reads that "\r" as part of the value. syncEnvText still checks
+  // every value as systemd reads it (activeValues), before and after.
+  const active = assignedIn(text.split('\n'));
   const commented = new Map<string, string>();
   const ownNotes = new Map<string, string[]>();
   const others: Parsed['others'] = [];

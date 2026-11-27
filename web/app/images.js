@@ -64,7 +64,7 @@ function renderRuntimeList() {
       t.exists ? `<button ${onAction('click', 'toggleImageDetails', [`${t.tag ?? ''}`, `${key}`])} title="What is baked into this image (its build steps)">🔎</button>` : '',
       t.exists && !t.isDefault ? `<button ${onAction('click', 'tryOnAgent', [`${t.tag ?? ''}`])} title="Try it on one agent: pin that agent to this image and rebuild it (memory kept)">🧪</button>` : '',
       canPromote ? `<button class="primary" ${onAction('click', 'promoteImage', [`${t.tag ?? ''}`])} title="${esc(d.promoteRefused || 'Point the fleet default at this image; agents without a pin pick it up on their next rebuild')}">⬆ Promote</button>` : '',
-      t.derived ? `<button ${onAction('click', 'rebuildDerivedImageAndList', [`${t.derived.name ?? ''}`])} title="Build it again from its Dockerfile lines">↻</button><button ${onAction('click', 'showDerivedLog', [`${t.derived.name ?? ''}`])}>Log</button><button class="danger" ${onAction('click', 'deleteDerivedImageAndList', [`${t.derived.name ?? ''}`])} title="Delete this derived image">🗑</button>` : '',
+      t.derived ? `<button ${onAction('click', 'rebuildDerivedImageAndList', [`${t.derived.name ?? ''}`])} title="Build it again from its Dockerfile lines">↻</button><button ${onAction('click', 'showDerivedLogFromList', [`${t.derived.name ?? ''}`])}>Log</button><button class="danger" ${onAction('click', 'deleteDerivedImageAndList', [`${t.derived.name ?? ''}`])} title="Delete this derived image">🗑</button>` : '',
       canDelete ? `<button class="danger" ${onAction('click', 'deleteImageTag', [`${t.tag ?? ''}`])} title="Delete this tag (refused while Used by lists anything)">🗑</button>` : '',
     ].join('');
     const under = mislabelled
@@ -249,17 +249,35 @@ async function promoteImage(tag) {
     }
   } catch (e) { $('rtErr').textContent = e.message; }
 }
-async function pollBaseBuild() {
+/**
+ * The base build's line on the Runtime tab, read again every 3 s while one runs and Settings is open. `first`: the
+ * tab's own read as it is drawn, which comes before Settings opens when Settings opens on it (openAiDlg('runtime')
+ * with the drawer open): it returned unread there, and the tab said nothing (HB-1510).
+ */
+async function pollBaseBuild(first = false) {
   clearTimeout(rtBuildTimer);
-  if (!aiDlg.open) return;
+  if (!first && !aiDlg.open) return;
   try {
     const b = await api('/v1/runtime/build');
-    // No build log here: the Hatchabot agent runs builds and reads their log;
-    // the tab shows one line while one is running, nothing after.
-    $('rtBuildLog').hidden = !b.running;
-    if (b.running) $('rtBuildLog').textContent = `Building an image for OpenClaw ${b.version || '(default version)'}…`;
-    if (b.running) rtBuildTimer = setTimeout(pollBaseBuild, 3000); else if (b.ok) loadRuntimeImages();
+    // No build log here: the Hatchabot agent runs builds and reads their log.
+    // The tab shows one line while one is running, and how the last one ended
+    // until another starts: its failure, and the words for one a restart cut
+    // off, reached the owner only through Activity and the agent (HB-1510).
+    const line = baseBuildLine(b);
+    $('rtBuildLog').innerHTML = line;
+    $('rtBuildLog').hidden = !line;
+    if (b.running) rtBuildTimer = setTimeout(() => pollBaseBuild(), 3000); else if (b.ok) loadRuntimeImages();
   } catch { /* not host owner / transient */ }
+}
+/** GET /v1/runtime/build in a line: the build running, or how the last one ended; nothing before the first since the start. */
+function baseBuildLine(b) {
+  const what = `OpenClaw ${b.version || '(default version)'}`;
+  if (b.running) return esc(`Building an image for ${what}…`);
+  if (b.ok !== true && b.ok !== false) return '';
+  const when = b.startedAt ? `, started ${new Date(b.startedAt).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}` : '';
+  const head = `The last base image build (${what}${when})`;
+  return b.ok ? `✓ ${esc(head)} finished.`
+    : `<span style="color:var(--bad)">⚠ ${esc(head)} did not go through:</span> ${esc(b.error || 'no reason was given.')}`;
 }
 
 /** The Runtime tab's capability list: probed tool versions from the image,
@@ -297,7 +315,7 @@ async function loadRuntime() {
   loadRuntimeCaps();
   loadDerivedImages();
   $('rtPanel').hidden = !myAccount.hostOwner;
-  if (myAccount.hostOwner) { $('rtErr').textContent = ''; loadRuntimeImages(); pollBaseBuild(); }
+  if (myAccount.hostOwner) { $('rtErr').textContent = ''; loadRuntimeImages(); pollBaseBuild(true); }
   const el = $('runtimeStatus');
   try {
     const r = await api('/v1/runtime');
@@ -411,6 +429,11 @@ async function loadDerivedImages() {
       // The Dockerfile lines, as one readable summary; the full text sits under the row.
       const steps = String(img.dockerfile || '').split('\n').map(s => s.trim()).filter(Boolean);
       const contents = steps.length ? `${esc(steps[0].slice(0, 54))}${steps[0].length > 54 ? '…' : ''}${steps.length > 1 ? `<div class="sub">+ ${steps.length - 1} more line${steps.length > 2 ? 's' : ''}</div>` : ''}` : '<span class="sub">—</span>';
+      // What an import lays on the base before the lines, as the base it came
+      // from had them: every Rebuild lays them on too, so they are named (HB-1327).
+      const basePkgs = (Array.isArray(img.basePackages) ? img.basePackages : []).filter(p => typeof p === 'string' && p);
+      const under = basePkgs.length
+        ? `<div class="sub" title="Installed on the base before these lines by every build: the image this one was imported from had them in its base, and this machine's base does not">+ base packages: ${esc(basePkgs.join(', '))}</div>` : '';
       const who = img.pinnedBy ? `<b>${img.pinnedBy}</b> agent${img.pinnedBy > 1 ? 's' : ''} <span class="sub">pinned</span>` : '<span class="sub">nothing</span>';
       const err = img.status === 'FAILED' && img.error
         ? `<div style="color:var(--bad)">${esc(String(img.error).split('\n').filter(Boolean).pop() ?? '')}</div>` : '';
@@ -418,7 +441,7 @@ async function loadDerivedImages() {
       return `<tr>
         <td><b>${esc(img.name)}</b><div class="sub"><code title="${esc(img.tag)}">${esc(imageTagOf(img.tag))}</code></div></td>
         <td>${kind}<div class="sub">${img.builtAt ? `built ${esc(img.builtAt.slice(0, 10))}` : 'never built'}</div></td>
-        <td>${contents}<div class="sub">FROM ${esc(imageTagOf(img.base))}</div></td>
+        <td>${contents}${under}<div class="sub">FROM ${esc(imageTagOf(img.base))}</div></td>
         <td>${who}</td>
         <td><div class="rt-acts">
           <button ${onAction('click', 'toggleDerivedLines', [`${img.name ?? ''}`, `${key}`])} title="The Dockerfile lines in this image">🔎</button>
@@ -477,12 +500,21 @@ async function showDerivedLog(name) {
 /** How long a build's log is waited for between two reads, and at most after reads that failed. */
 const DERIVED_POLL_MS = 1500, DERIVED_RETRY_MAX_MS = 30_000;
 /**
+ * The Derived images drawer is on screen: Settings open on Advanced, with that
+ * drawer unfolded. Folded, its log was read every 1.5 s out of sight, and the
+ * Runtime images drawer alone started following a build (HB-1525).
+ */
+const derivedPanelShown = () => aiDlg.open && !$(TABS.derived).hidden && !settingsAdvFolded('derived');
+/**
  * Follow a running build: stream the log into the output box until it ends.
  * A log that will not read is not the build ending: it is read again, each
  * wait twice the last, and said once. The failure went back to the list,
  * which followed the build again at once: a loop of reads with no wait and a
  * toast each time (HB-0996). Only an end (built, failed, the image gone or
- * not this person's) shows the list again.
+ * not this person's) shows the list again. Followed only while its panel is
+ * shown: it was read every 30 s or less with the panel closed, for as long as
+ * the page was open (HB-1220). Opening the panel, or unfolding its drawer,
+ * follows it again (loadRuntime, loadDerivedImages).
  */
 async function pollDerivedBuild(name) {
   if (derivedBuilding.has(name)) return;
@@ -492,6 +524,7 @@ async function pollDerivedBuild(name) {
   let ended = false;
   try {
     for (let fails = 0, wait = DERIVED_POLL_MS; ; await new Promise(res => setTimeout(res, wait))) {
+      if (!derivedPanelShown()) break;
       let r;
       try { r = await api(`/v1/images/${encodeURIComponent(name)}/log`); }
       catch (e) {

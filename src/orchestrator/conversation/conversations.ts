@@ -21,8 +21,10 @@ import { webChatStoreKey } from './webChat.js';
  *
  * It owns the sessions cache (`sessionsCache`), the quiet tasks' cache
  * (`quietTasksCache`) and the Recent capture (`RecentTracker`). Both caches
- * are per agent, and a delete empties them (`forgetAgent`). Every timer
- * is a read's own (the first read's short wait); `stop()` has nothing to end.
+ * are per agent: a delete or an archive empties them (`forgetAgent`), and
+ * an entry read where the agent ran before a move goes at its next look
+ * (HB-1362). Every timer is a read's own (the first read's short wait);
+ * `stop()` has nothing to end.
  */
 export interface Conversations {
   /** The agent's sessions file, read now (undefined when it could not be read). */
@@ -39,7 +41,7 @@ export interface Conversations {
   unreadFor(a: Agent, ownerId: string): Promise<boolean>;
   /** Its cached sessions are dropped: the next read is fresh (a turn just ran in it). */
   forget(agentId: string): void;
-  /** Everything cached for a deleted agent is dropped: its sessions and its quiet tasks (HB-0914). */
+  /** Everything cached for a deleted or archived agent is dropped: its sessions and its quiet tasks (HB-0914, HB-1362). */
   forgetAgent(agentId: string): void;
   /** The home screen's Recent list for this person (`all`: the whole week). */
   recent(me: string, all: boolean): Promise<RecentList>;
@@ -59,6 +61,9 @@ export interface ConversationsDeps {
   providerFor: (hostId: string) => RuntimeProvider;
 }
 
+/** Where an agent's sessions were read: its machine and its container. */
+type Place = Pick<Agent, 'hostId' | 'runtimeRef'>;
+
 export function createConversations(deps: ConversationsDeps): Conversations {
   const { store, providerFor } = deps;
   /**
@@ -69,11 +74,18 @@ export function createConversations(deps: ConversationsDeps): Conversations {
    * The list used to run `openclaw sessions list` per agent as well — the CLI
    * takes a second to start, so 30 running agents cost 8 s per cold list.
    */
-  const sessionsCache = new Map<string, { fetchedAt: number; value?: Record<string, SessionEntry>; refreshing?: boolean }>();
+  const sessionsCache = new Map<string, { fetchedAt: number; value?: Record<string, SessionEntry>; refreshing?: boolean } & Place>();
   /** Per agent: its quiet tasks, as of the scheduled runs its records showed then (HB-0302). */
   const quietTasksCache = new Map<string, { runs: string; ids: Set<string>; at: number }>();
-  /** Deleted, or being deleted: a read that ends now caches nothing for it (HB-0914). */
-  const gone = (agentId: string) => { const s = store.getAgent(agentId)?.state; return !s || s === 'DELETING' || s === 'DELETED'; };
+  /**
+   * Deleted, being deleted, archived, or no longer where `a` ran (a move, or
+   * one put back): a read that ends now caches nothing for it (HB-0914,
+   * HB-1362).
+   */
+  const gone = (a: Place & { id: string }) => {
+    const now = store.getAgent(a.id);
+    return !now || now.state === 'DELETING' || now.state === 'DELETED' || now.state === 'ARCHIVED' || now.hostId !== a.hostId || now.runtimeRef !== a.runtimeRef;
+  };
   const readSessions = async (a: Agent): Promise<Record<string, SessionEntry> | undefined> => {
     try {
       const res = await providerFor(a.hostId).execShell(a.runtimeRef!, sessionsReadShell(a.slug));
@@ -91,7 +103,7 @@ export function createConversations(deps: ConversationsDeps): Conversations {
             const jobs = await providerFor(a.hostId).execShell(a.runtimeRef!, cronStoreReadShell(a.slug)).catch(() => undefined);
             const ids = jobs?.code === 0 ? quietTaskIds(jobs.stdout) : undefined;
             quiet = ids ? { runs, ids, at: Date.now() } : undefined;
-            if (quiet && !gone(a.id)) quietTasksCache.set(a.id, quiet);
+            if (quiet && !gone(a)) quietTasksCache.set(a.id, quiet);
             else quietTasksCache.delete(a.id);
           }
           if (quiet?.ids.size) markQuietTasks(sessions, quiet.ids);
@@ -127,12 +139,17 @@ export function createConversations(deps: ConversationsDeps): Conversations {
    */
   const fill = (a: Agent, from: object, value: Record<string, SessionEntry> | undefined): void => {
     if (sessionsCache.get(a.id) !== from) return;
-    sessionsCache.set(a.id, { fetchedAt: Date.now(), value });
+    sessionsCache.set(a.id, { fetchedAt: Date.now(), value, hostId: a.hostId, runtimeRef: a.runtimeRef });
     void recentTracker.note(a, value);
   };
   const sessionsFor = async (a: Agent): Promise<Record<string, SessionEntry> | undefined> => {
     if (!a.runtimeRef || a.state !== 'RUNNING') return undefined;
-    const hit = sessionsCache.get(a.id);
+    let hit = sessionsCache.get(a.id);
+    // Read where it ran before a move: its sessions are read again where it
+    // runs now, and its quiet tasks with them (HB-1362).
+    if (hit && (hit.hostId !== a.hostId || hit.runtimeRef !== a.runtimeRef)) {
+      sessionsCache.delete(a.id); quietTasksCache.delete(a.id); hit = undefined;
+    }
     if (hit) {
       if (Date.now() - hit.fetchedAt >= 60_000 && !hit.refreshing) {
         hit.refreshing = true;
@@ -146,8 +163,8 @@ export function createConversations(deps: ConversationsDeps): Conversations {
     // the list goes on without this agent's activity; the read finishes in the
     // background and fills the cache for the next poll. Not for an agent
     // deleted since the caller looked it up: it would stay cached for good.
-    if (gone(a.id)) return undefined;
-    const placeholder = { fetchedAt: Date.now(), value: undefined, refreshing: true };
+    if (gone(a)) return undefined;
+    const placeholder = { fetchedAt: Date.now(), value: undefined, refreshing: true, hostId: a.hostId, runtimeRef: a.runtimeRef };
     sessionsCache.set(a.id, placeholder);
     const pending = readSessions(a).then((value) => { fill(a, placeholder, value); return value; });
     // A read that fails is forgotten, so the next poll tries again.

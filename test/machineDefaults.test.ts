@@ -76,6 +76,109 @@ describe('machine defaults', () => {
     expect(landed.filter(([ref]) => ref === refOf(first)).at(-1)).toEqual([refOf(first), '30']);
   });
 
+  it('a file ceiling written while a door write is on the agent\'s volume waits for it: each writes the whole config back (HB-1554)', async () => {
+    const w = await makeWorld();
+    const id = await seedRunningAgent(w);
+    const { setDmPolicy } = await import('../src/orchestrator/members/members.js');
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    const landed: string[] = [];
+    const onVolume = w.provider.execShellOnVolume.bind(w.provider);
+    w.provider.execShellOnVolume = async (ref, script, o) => {
+      if (script.includes('t.policy')) { await held; landed.push('door'); return { code: 0, stdout: 'set\n', stderr: '' }; }
+      return onVolume(ref, script, o);
+    };
+    const exec = w.provider.exec.bind(w.provider);
+    w.provider.exec = async (ref, argv, opts) => {
+      if (argv[0] === 'config' && argv[2] === 'channels.telegram.mediaMaxMb') landed.push('file ceiling');
+      return exec(ref, argv, opts);
+    };
+    // A knock window opens the door; its write is on the volume.
+    const door = setDmPolicy({ store: w.store, provider: w.provider }, { agentId: id, runtimeRef: w.store.getAgent(id)!.runtimeRef!, kind: 'telegram', accountId: 'kitchenbot', policy: 'pairing' });
+    const own = w.f.inject({ method: 'PATCH', url: `/v1/agents/${id}`, headers: as(), payload: { filesMaxMb: 20 } });
+    await new Promise((r) => setTimeout(r, 50));
+    // Was: written meanwhile, and OpenClaw's config set, finding the file changed under it by the door's write
+    // ("config changed since last load"), refused it: the ceiling was not set, and said so as files.cap_failed.
+    expect(landed).toEqual([]);
+    release();
+    expect((await own).statusCode).toBe(200);
+    await door;
+    expect(landed).toEqual(['door', 'file ceiling']);
+  });
+
+  it('a file ceiling that waited for its turn is written where the agent runs then: rebuilt meanwhile, on its new container; stopped, on its volume (HB-1554)', async () => {
+    for (const change of ['rebuilt', 'stopped'] as const) {
+      const w = await makeWorld();
+      const id = await seedRunningAgent(w);
+      const { setDmPolicy } = await import('../src/orchestrator/members/members.js');
+      // The door as an earlier test left it is remembered per agent, process-wide: this write must run.
+      (await import('../src/orchestrator/channels/dmPolicyMemo.js')).forgetDmPolicy(id);
+      let release!: () => void;
+      const held = new Promise<void>((r) => { release = r; });
+      const landed: string[] = [];
+      const onVolume = w.provider.execShellOnVolume.bind(w.provider);
+      w.provider.execShellOnVolume = async (ref, script, o) => {
+        if (script.includes('t.policy')) { await held; return { code: 0, stdout: 'set\n', stderr: '' }; }
+        if (script.includes('mediaMaxMb')) landed.push(`volume ${ref}`);
+        return onVolume(ref, script, o);
+      };
+      const exec = w.provider.exec.bind(w.provider);
+      w.provider.exec = async (ref, argv, opts) => {
+        if (argv[0] === 'config' && argv[2] === 'channels.telegram.mediaMaxMb') landed.push(`container ${ref}`);
+        return exec(ref, argv, opts);
+      };
+      const ref = w.store.getAgent(id)!.runtimeRef!;
+      const door = setDmPolicy({ store: w.store, provider: w.provider }, { agentId: id, runtimeRef: ref, kind: 'telegram', accountId: 'kitchenbot', policy: 'pairing' });
+      const own = w.f.inject({ method: 'PATCH', url: `/v1/agents/${id}`, headers: as(), payload: { filesMaxMb: 20 } });
+      await new Promise((r) => setTimeout(r, 50));
+      // While it waits for the door's write.
+      if (change === 'rebuilt') w.store.setAgentRuntimeRef(id, 'rt-made-up-new');
+      else w.store.setAgentState(id, 'STOPPED');
+      release();
+      expect((await own).statusCode).toBe(200);
+      await door;
+      // Was: on the container it ran on when it asked, read before its wait.
+      expect(landed, change).toEqual([change === 'rebuilt' ? 'container rt-made-up-new' : `volume ${ref}`]);
+    }
+  });
+
+  it("a file ceiling default whose first agent on a runner is being deleted while it waits for its turn still reaches the runner's other agents (HB-1554 review)", async () => {
+    const w = await makeWorld();
+    envFile();
+    const runner = new MockProvider();
+    w.providers.set('mock2', runner);
+    w.store.insertHost({ id: 'h2', ownerId: w.owner, kind: 'cloud', provider: 'mock2', name: 'Runner Two', settings: {}, createdAt: 'now' });
+    const onRunner = async (id: string) => {
+      w.store.insertAgent({ id, ownerId: w.owner, name: id, slug: id, state: 'STOPPED', aiProfileId: 'p1', hostId: 'h2', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' });
+      const { runtimeRef } = await runner.provision({ agentId: id, slug: id, workspace: { files: {}, configPatch: { agentId: id, authMode: 'api-key' } }, env: {} });
+      w.store.setAgentRuntimeRef(id, runtimeRef);
+      w.store.insertChannel({ id: `c-${id}`, agentId: id, kind: 'telegram', accountId: `${id}bot`, secretRef: `chan/${id}`, deepLink: `https://t.me/${id}bot`, createdAt: 'now' });
+      return runtimeRef;
+    };
+    await onRunner('r1');
+    const ref2 = await onRunner('r2');
+    const written: string[] = [];
+    const onVolume = runner.execShellOnVolume.bind(runner);
+    runner.execShellOnVolume = async (ref, script, o) => {
+      if (script.includes('mediaMaxMb')) written.push(ref);
+      return onVolume(ref, script, o);
+    };
+    // A slow change to the first agent's chat apps; it is being deleted by the time the default's turn comes.
+    const { inChannelConfigTurn } = await import('../src/orchestrator/members/members.js');
+    let release!: () => void;
+    const slow = inChannelConfigTurn(w.store, 'r1', () => new Promise<void>((r) => { release = r; }));
+    const putting = w.f.inject({ method: 'PUT', url: '/v1/machine-defaults', headers: as(), payload: { key: 'filesTelegram', value: '20' } });
+    await new Promise((r) => setTimeout(r, 50));
+    w.store.setAgentState('r1', 'DELETING');
+    release();
+    await slow;
+    const put = await putting;
+    expect(put.statusCode, put.body).toBe(200);
+    // Was: the skip read as a runner it could not reach, and the runner's other agent was passed by.
+    expect(written).toEqual([ref2]);
+    expect(put.json().applied).toBe(1);
+  });
+
   it('sleep after: a duration or off, at least 30 minutes, read by the next sweep; nobody but the machine owner may set it', async () => {
     const w = await makeWorld();
     envFile();

@@ -10,6 +10,12 @@ import { HOST_GOING, MACHINE_OWNER_ONLY, zodMessage, type RouteContext } from '.
 
 /** POST /v1/hosts/:id/install-image (HB-0814): `wait: true` holds the request until the copy ends (scripts). */
 const InstallImage = z.object({ wait: z.boolean().nullish() });
+/**
+ * DELETE /v1/hosts/:id: `stopImageCopy: true` is Remove anyway, which stops an
+ * image copy under way to it rather than be refused for it (409, code
+ * `image_copy`; HB-1254).
+ */
+const RemoveHost = z.object({ stopImageCopy: z.boolean().nullish() });
 
 /**
  * Machines and runners: the routes (HB-0808).
@@ -180,7 +186,9 @@ export function registerMachineRoutes(app: FastifyInstance, ctx: RouteContext): 
     if (host.kind === 'local') {
       return reply.code(400).send({ error: 'The local host is this machine — it cannot be removed.' });
     }
-    const r = await remove(host);
+    const body = RemoveHost.safeParse(req.body ?? {});
+    if (!body.success) return reply.code(400).send({ error: zodMessage(body.error) });
+    const r = await remove(host, { stopImageCopy: body.data.stopImageCopy === true });
     if ('refused' in r) return reply.code(409).send(r.refused);
     if ('going' in r) return reply.code(409).send({ error: HOST_GOING });
     return r;

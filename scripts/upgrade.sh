@@ -21,7 +21,13 @@
 # as it was — try again, but it says nothing about the release (HB-0470);
 # 6 the release put back by an earlier run is not up (its restart back did not
 # come up, or was given up after three) and there was nothing more to do: no
-# release was tried, and its record stays (kept_check, HB-1456).
+# release was tried, and its record stays (kept_check, HB-1456);
+# 7 the repair of an upgrade cut off part-way failed before the release was
+# touched (a git lock in the way, the release put back not checked out, the
+# dependencies' lock held for half an hour): it says nothing about the
+# release, and the channel timer gives the repair a clock of its own
+# (HB-1431). 7 only when the caller set HATCHABOT_FOLLOW_KNOWS_7=1
+# (follow-channel.sh does); to any other it is 3.
 set -euo pipefail
 # Each cd with CDPATH empty: an exported one made cd print the folder it
 # found, and $(cd …; pwd) said two lines.
@@ -44,11 +50,14 @@ DIR="$PWD"
 # step_short, put_rec, change_failed (a failed step's words); link_end,
 # put_line, put_dir, put_failed (the records); proc_start, proc_start_utc,
 # started_as, lock_left_over, take_lock, lock_short, lock_in_way (the lock);
-# deps_holder_gone, deps_lock, deps_unlock; kept_tries, kept_record;
-# checkout_recorded; older_release, mark_rolled_back, systemd_major,
-# env_named, rolled_back_note, left_ran, unmark_rolled_back (the rollback's
-# note).
-HELPERS_BLOB=6cc1f1f8c134608439cbec85d58968a381df7195
+# deps_holder_gone, deps_take, deps_lock, deps_unlock, restore_deps;
+# kept_tries, kept_record; checkout_recorded; git_running_here,
+# clear_own_index_lock, save_other_edits, repair_tree (a run cut off
+# part-way); older_release,
+# mark_rolled_back, systemd_major, env_named, rolled_back_note, left_ran,
+# unmark_rolled_back (the rollback's note); service_port (the listener's
+# port).
+HELPERS_BLOB=9d164eaedd24f2f19485c1ade1813db80b790f95
 if [ -z "${HATCHABOT_UPGRADE_COPY:-}" ]; then
   # This file by its own folder: "$0" names it from where it was started, and
   # the cd above moved from there (a relative one not from the install, as
@@ -94,12 +103,14 @@ SERVING=0       # 1 once the new release is up: only tidying is left
 DISK=0          # 1 once this run found the machine short of room or permission (machine_short)
 KEPT=0          # 1 once this run ends on a release put back that is not up (stop_or_go)
 KEPT_REC=""     # that release's record, which this run's own upgrade takes the place of (stop_or_go)
+REPAIR_FAILED=0 # 1 once this run's repair of an upgrade cut off failed, before the release was touched (repair_failed)
 BACK_DOWN=0     # 1 once a rollback's restart back did not come up (back_down said what comes next)
 LOCK=""; STAGE=""; STAGE_FREED=0; STEP_LOG=""; STEP_SAID=""
 PIN_ON=""       # the pin this run answers for, its own or one a killed run left; PRE_*: what it replaced
 PIN_RECORD=""; PRE_CHANNEL=""; PRE_USER_CHANNEL=""
 undo() { :; }   # set below, per kind of install
 REDO="hatchabot upgrade"   # what a person runs when the rollback did not work (change_failed)
+RUN_NOUN=upgrade   # how the helpers name this run (clear_own_index_lock)
 finish() {
   local rc=$?
   set +e
@@ -124,7 +135,14 @@ finish() {
   # 5 only where this run found the disk or a permission (machine_short): under
   # set -e a command that exits 5 for its own reasons (curl 5, a node fatal
   # error) read as "the disk", which the timer retries for ever (review of HB-0470).
-  case "$rc" in 0|2|3|4) ;; 5) [ "$DISK" = 1 ] || rc=3 ;; 6) [ "$KEPT" = 1 ] || rc=3 ;; 1) [ "$ROLLED_BACK" = 1 ] || rc=3 ;; *) rc=3 ;; esac
+  case "$rc" in
+    0|2|3|4) ;;
+    5) [ "$DISK" = 1 ] || rc=3 ;;
+    6) [ "$KEPT" = 1 ] || rc=3 ;;
+    7) [ "$REPAIR_FAILED" = 1 ] && [ "${HATCHABOT_FOLLOW_KNOWS_7:-}" = 1 ] || rc=3 ;;
+    1) [ "$ROLLED_BACK" = 1 ] || rc=3 ;;
+    *) rc=3 ;;
+  esac
   exit "$rc"
 }
 trap finish EXIT
@@ -177,7 +195,9 @@ remember_channel() {
   fi
 }
 if [ "${HATCHABOT_UPGRADE_BY_TIMER:-}" != 1 ]; then
-case "$ARG" in stable|beta|latest) PRC=0; remember_channel "$ARG" || PRC=$?; [ "$PRC" = 0 ] || put_failed "$PRC" "Could not write which channel this machine follows (a full disk, or no permission?), so nothing was changed. Free some space, then try again." ;; esac
+case "$ARG" in
+  stable|beta|latest) PRC=0; remember_channel "$ARG" || PRC=$?; [ "$PRC" = 0 ] || put_failed "$PRC" "Could not write which channel this machine follows (a full disk, or no permission?), so nothing was changed. Free some space, then try again." ;;
+esac
 fi
 # A version named by hand is a pin: the channel timer leaves this machine
 # alone until a channel is named again (a rollback used to be undone within
@@ -191,7 +211,10 @@ fi
 # took over a killed run's pin (below) goes back to what that pin replaced.
 pin_named() {
   [ "${HATCHABOT_UPGRADE_BY_TIMER:-}" != 1 ] || return 0
-  case "$ARG" in v[0-9]*) ;; *) return 0 ;; esac
+  case "$ARG" in
+    v[0-9]*) ;;
+    *) return 0 ;;
+  esac
   if [ -z "$PIN_ON" ]; then
     PRE_CHANNEL="$(file_channel "$CHANNEL_FILE")"; PRE_USER_CHANNEL="$(file_channel "$USER_CHANNEL_FILE")"
   fi
@@ -255,7 +278,10 @@ find_target() {
   if [ "$REPAIR_ONLY" = 1 ]; then
     TARGET=""
   elif [ -n "${HATCHABOT_UPGRADE_TARGET:-}" ]; then
-    case "$HATCHABOT_UPGRADE_TARGET" in v[0-9]*) TARGET="$HATCHABOT_UPGRADE_TARGET" ;; *) echo "Not a release: $HATCHABOT_UPGRADE_TARGET"; exit 2 ;; esac
+    case "$HATCHABOT_UPGRADE_TARGET" in
+      v[0-9]*) TARGET="$HATCHABOT_UPGRADE_TARGET" ;;
+      *) echo "Not a release: $HATCHABOT_UPGRADE_TARGET"; exit 2 ;;
+    esac
   else
     TARGET="$("$DIR/scripts/release-target.sh" "$CHANNEL")" || trc=$?
     [ "$trc" != 1 ] || exit 2
@@ -336,14 +362,20 @@ if [ -f "$PIN_RECORD" ]; then
   fi
 elif [ -f "$CUT_RECORD" ] && ! grep -qx "$PINS_RECORDED" "$CUT_RECORD"; then
   LEFT_PIN="$(remembered_channel)"
-  case "$LEFT_PIN" in v[0-9]*)
-    PRE_CHANNEL="$(file_channel "$CHANNEL_FILE")"; [ "$PRE_CHANNEL" != "$LEFT_PIN" ] || PRE_CHANNEL=""
-    PRE_USER_CHANNEL="$(file_channel "$USER_CHANNEL_FILE")"; [ "$PRE_USER_CHANNEL" != "$LEFT_PIN" ] || PRE_USER_CHANNEL=""
-    PIN_ON="$LEFT_PIN" ;;
+  case "$LEFT_PIN" in
+    v[0-9]*)
+      PRE_CHANNEL="$(file_channel "$CHANNEL_FILE")"; [ "$PRE_CHANNEL" != "$LEFT_PIN" ] || PRE_CHANNEL=""
+      PRE_USER_CHANNEL="$(file_channel "$USER_CHANNEL_FILE")"; [ "$PRE_USER_CHANNEL" != "$LEFT_PIN" ] || PRE_USER_CHANNEL=""
+      PIN_ON="$LEFT_PIN" ;;
   esac
 fi
 # A name a bundle's file list may not touch: a path, or what is this machine's.
-not_ours() { case "$1" in ''|*/*|.|..|.env|data|.swapping|.swapping.tmp|.prev-release|.rollback-aside|.rollback-scripts) return 0 ;; esac; return 1; }
+not_ours() {
+  case "$1" in
+    ''|*/*|.|..|.env|data|.swapping|.swapping.tmp|.prev-release|.rollback-aside|.rollback-scripts) return 0 ;;
+  esac
+  return 1
+}
 # Back to the release in .prev-release: the previous files moved back, then
 # what else came in from the new bundle removed. Run again after a cut, it
 # goes on: each file's `in` line is struck from .swapping before it moves
@@ -402,10 +434,10 @@ restore_prev() {
     # put back (twelfth review). It ended "did not work either", 3, with the
     # old release one rename from back.
     if [ -f "$SWAPPING" ] && grep -qxF "in $n" "$SWAPPING"; then
-      if ! { { grep -vxF "in $n" "$SWAPPING" || [ $? = 1 ]; } > "$SWAPPING.tmp" && mv -f "$SWAPPING.tmp" "$SWAPPING"; } 2>/dev/null; then
+      { { grep -vxF "in $n" "$SWAPPING" || [ $? = 1 ]; } > "$SWAPPING.tmp" && mv -f "$SWAPPING.tmp" "$SWAPPING"; } 2>/dev/null || {
         rm -f "$SWAPPING.tmp" 2>/dev/null || true
         unstruck=1
-      fi
+      }
     fi
     if [ "$src" != "$f" ]; then
       mv "$DIR/$n" "$held" || { mv "$beside" "$f"; return 1; }
@@ -424,14 +456,22 @@ restore_prev() {
   [ "$unstruck" = 0 ] || echo "Could not write $SWAPPING as the files went back (a full disk?): they are back all the same."
   # The new release's unpacked bundle, beside the install.
   STAGED="$(sed -n 's/^stage //p' "$SWAPPING" 2>/dev/null | sed -n 1p)"
-  case "$STAGED" in "$(dirname "$DIR")"/.hatchabot-next-*) ;; *) STAGED="" ;; esac
+  case "$STAGED" in
+    "$(dirname "$DIR")"/.hatchabot-next-*) ;;
+    *) STAGED="" ;;
+  esac
   if [ -f "$SWAPPING" ]; then
     while IFS= read -r line; do
-      case "$line" in "in "?*) f="${line#in }" ;; *) continue ;; esac
+      case "$line" in
+        "in "?*) f="${line#in }" ;;
+        *) continue ;;
+      esac
       # Put back just now, its line not struck: the old one's, kept.
-      case "$back" in *"
+      case "$back" in
+        *"
 $f
-"*) continue ;; esac
+"*) continue ;;
+      esac
       # The unpacked bundle gone, and not by this run: only a rollback of this
       # upgrade.sh's frees it first, and this one was cut off once it had put
       # files back whose lines it could not strike (a full disk). The one here
@@ -471,11 +511,20 @@ $f
 # dependencies back under a release whose ensure-deps.sh may be older than
 # this script. Waited for as ensure-deps.sh waits for it, half an hour at
 # most (then deps_lock returns 1); with no lock to be had at all (no room, no
-# permission) the move goes on without it, as an install does.
-DEPS_LOCK="$LOCKS/deps-$(printf %s "$DIR" | cksum | cut -d' ' -f1).lock.d"
+# permission) the move goes on without it, as an install does. Keyed on the
+# folder's physical path, as ensure-deps.sh's: reached through a symlink, a
+# restart and an upgrade took two locks (HB-1377).
+DEPS_LOCK="$LOCKS/deps-$(printf %s "$(pwd -P)" | cksum | cut -d' ' -f1).lock.d"
+# And, reached through a link, the one the scripts of releases before 2.193.0
+# key on the path as given, taken after it (deps_lock; review of HB-1377).
+DEPS_LOCK_OLD="$LOCKS/deps-$(printf %s "$DIR" | cksum | cut -d' ' -f1).lock.d"
+[ "$DEPS_LOCK_OLD" != "$DEPS_LOCK" ] || DEPS_LOCK_OLD=""
 DEPS_ME="$$"; DEPS_START="$(proc_start_utc $$)"; [ -z "$DEPS_START" ] || DEPS_ME="$$ $DEPS_START"
 # How many one-second tries the lock is waited for: half an hour (tests make it a few).
-DEPS_WAIT="${HATCHABOT_DEPS_WAIT_SECS:-1800}"; case "$DEPS_WAIT" in ''|*[!0-9]*) DEPS_WAIT=1800 ;; esac
+DEPS_WAIT="${HATCHABOT_DEPS_WAIT_SECS:-1800}"
+case "$DEPS_WAIT" in
+  ''|*[!0-9]*) DEPS_WAIT=1800 ;;
+esac
 DEPS_STUCK="Another install of the dependencies in $DIR has held $DEPS_LOCK for half an hour, so nothing was moved. If no npm is running there, remove it (rm -r \"$DEPS_LOCK\"), then try again."
 
 # A restart back that did not come up keeps its record (HB-1456): the next
@@ -531,7 +580,10 @@ stop_or_go() {
 # the timer moved the machine to its channel's release (review of HB-1456).
 kept_end() {
   if [ "${1:-}" = named ]; then
-    case "${HATCHABOT_UPGRADE_BY_TIMER:-}:$ARG" in 1:*) ;; *:v[0-9]*) pin_named; rm -f "$PIN_RECORD" ;; esac
+    case "${HATCHABOT_UPGRADE_BY_TIMER:-}:$ARG" in
+      1:*) ;;
+      *:v[0-9]*) pin_named; rm -f "$PIN_RECORD" ;;
+    esac
   fi
   PIN_ON=""; KEPT=1; exit 6
 }
@@ -568,6 +620,10 @@ restart_back() {
   else echo "$1 is back in $DIR, but it did not come up (above), and $SWAPPING could not be written (a full disk, or something in its way), so nothing restarts it again: once that is fixed, run $DIR/scripts/restart.sh"; fi
   return 1
 }
+# repair_failed: a repair below stopped before the release was touched: 7 (to
+# a timer that knows it, finish), which is no try of the release. Counted as
+# one (3), a repair that kept failing set a good release aside (HB-1431).
+repair_failed() { REPAIR_FAILED=1; exit 7; }
 if [ "$BUNDLED" = 1 ] && [ -f "$SWAPPING" ]; then
   BACK_TO="$(sed -n 's/^from //p' "$SWAPPING" | sed -n 1p)"
   if grep -qx put-back "$SWAPPING"; then
@@ -584,7 +640,7 @@ if [ "$BUNDLED" = 1 ] && [ -f "$SWAPPING" ]; then
     NOTED_AT="$(sed -n 's/^noted //p' "$SWAPPING" | tail -n 1)"
     STARTED=0; ! grep -qx started "$SWAPPING" || STARTED=1
     # Under the dependencies' lock, as every move of node_modules (deps_lock).
-    deps_lock || { echo "Another install of the dependencies in $DIR has held $DEPS_LOCK for half an hour, so the previous release's files are still in $PREV, not put back: the next upgrade puts them back first. If no npm is running there, remove it: rm -r \"$DEPS_LOCK\""; exit 3; }
+    deps_lock || { echo "Another install of the dependencies in $DIR has held $DEPS_LOCK for half an hour, so the previous release's files are still in $PREV, not put back: the next upgrade puts them back first. If no npm is running there, remove it: rm -r \"$DEPS_LOCK\""; repair_failed; }
     # The service was already restarted onto the new release: back onto this
     # one, written down only if the new release really ran and nothing went back since.
     # A note written for an older release named, which never started, goes as
@@ -599,7 +655,7 @@ if [ "$BUNDLED" = 1 ] && [ -f "$SWAPPING" ]; then
     else
       restore_prev || RP=1
     fi
-    [ "$RP" = 0 ] || { echo "Could not put the previous release back (above): $PREV holds its files."; exit 3; }
+    [ "$RP" = 0 ] || { echo "Could not put the previous release back (above): $PREV holds its files."; repair_failed; }
     deps_unlock
     [ "$WAS_RESTARTED" = 0 ] || restart_back "${BACK_TO:-The previous release}" || stop_or_go "$BACK_TO" "$SWAPPING"
   fi
@@ -612,98 +668,14 @@ RESTART="${HATCHABOT_RESTART_CMD:-./scripts/restart.sh}"   # overridable for tes
 # (SIGKILL, a power cut): the checkout may be on the new release with half
 # its dependencies installed, and the old ones in node_modules.prev. The next
 # run puts the old release back first, then upgrades as usual (HB-0043).
-# A git running in this checkout, whoever started it: its pid, or "unknown" when
-# this machine has no way to tell. A commit waiting in its editor holds the lock
-# for as long as the person takes, however old the lock looks.
-git_running_here() {
-  local here p comm cwd line pid=""
-  here="$(pwd -P)"
-  if [ -d "/proc/$$" ]; then
-    # Read with the builtin, not $(cat): one cat per process on the machine
-    # took 1.7 s with 900 running, and longer the busier it was (HB-0505).
-    for p in /proc/[0-9]*; do
-      { read -r comm < "$p/comm"; } 2>/dev/null || continue
-      case "$comm" in git|git-*) ;; *) continue ;; esac
-      cwd="$(readlink "$p/cwd" 2>/dev/null)" || continue
-      case "$cwd/" in "$here/"*) echo "${p#/proc/}"; return 0 ;; esac
-    done
-    return 1
-  fi
-  command -v lsof >/dev/null 2>&1 || { echo unknown; return 0; }
-  while IFS= read -r line; do
-    case "$line" in
-      p*) pid="${line#p}" ;;
-      n*) case "${line#n}/" in "$here/"*) echo "$pid"; return 0 ;; esac ;;
-    esac
-  done < <(lsof -a -c git -d cwd -Fpn 2>/dev/null)
-  return 1
-}
-# .git/index.lock goes only when it is shown to be that checkout's own: the
-# record names a git, that git is gone, the lock is no older than the record
-# (the record is written first), it is not fresh, and no other git is running
-# here. Anything else stays and is said.
-# 0 clear to go on; 1 a git of this record's is running, or the lock is not its own.
-clear_own_index_lock() {
-  local word pid start named=0
-  while read -r word pid start; do
-    [ "$word" = git ] || continue
-    named=1
-    if [ -n "$start" ]; then ! started_as "$pid" "$start" || { echo "The checkout that upgrade started is still running (pid $pid) — try again once it ends."; return 1; }
-    elif kill -0 "$pid" 2>/dev/null; then echo "The checkout that upgrade started is still running (pid $pid) — try again once it ends."; return 1; fi
-  done < "$FROM_FILE"
-  [ -e .git/index.lock ] || return 0
-  local live
-  if live="$(git_running_here)"; then
-    if [ "$live" != unknown ]; then echo "$DIR/.git/index.lock is held by a git running there (pid $live), which this upgrade did not start — try again once it ends."; return 1; fi
-    named=0
-  fi
-  if [ "$named" = 1 ] && [ ! "$FROM_FILE" -nt .git/index.lock ] && [ -n "$(find .git/index.lock -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
-    echo "Removing the .git/index.lock the upgrade that was cut off left behind."
-    rm -f .git/index.lock; return 0
-  fi
-  echo "$DIR/.git/index.lock is in the way, and nothing shows it is that upgrade's own (one a few minutes old may be: try again then). If no git is running there, remove it: rm $DIR/.git/index.lock"
-  return 1
-}
-# Back to the release the record names. Forced, and through the new one first
-# when the tree is part-way: a checkout cut off leaves HEAD and the index on the
-# old one with files rewritten, which a plain checkout kept (mixed code, then
-# refused as local changes for good). The upgrade started from a clean tree, and
-# tracked files are all this touches, so .env and data/ stay. A tracked file
-# that matches neither release may be someone's edit since the kill (or a file
-# the kill cut short, which cannot be told apart): a copy is kept, and named.
-save_other_edits() {
-  local f got kept=""
-  while IFS= read -r -d '' f; do
-    [ -f "$f" ] || [ -L "$f" ] || continue
-    got="$(git hash-object -- "$f" 2>/dev/null)" || got=""
-    [ "$got" != "$(git rev-parse -q --verify "$FROM:$f" 2>/dev/null)" ] || continue
-    [ -z "$TO" ] || [ "$got" != "$(git rev-parse -q --verify "$TO:$f" 2>/dev/null)" ] || continue
-    if [ -z "$kept" ]; then
-      kept="${FROM_FILE%.from}.kept-$(date +%Y%m%d-%H%M%S)"
-      ( umask 077; mkdir -p "$kept" ) || { echo "Could not keep a copy of the edit to $f, so it was not overwritten."; return 1; }
-      echo "These tracked files match neither $FROM nor ${TO:-the new release}, so they may be someone's edits. Putting $FROM back overwrites them; a copy of each is kept in $kept:"
-    fi
-    mkdir -p "$kept/$(dirname "$f")" && cp -pP "$f" "$kept/$f" || { echo "Could not keep a copy of the edit to $f, so it was not overwritten."; return 1; }
-    echo "    $f"
-  done < <(git --no-optional-locks diff --name-only -z HEAD 2>/dev/null)
-  return 0
-}
-repair_tree() {
-  [ -n "$FROM" ] || return 1
-  save_other_edits || return 1
-  if [ -n "$TO" ] && [ "$(git rev-parse HEAD)" != "$(git rev-parse "$TO^{commit}" 2>/dev/null)" ] && [ -n "$(git status --porcelain)" ]; then
-    checkout_recorded --quiet --force "$TO" || return 1
-  fi
-  checkout_recorded --quiet --force "$FROM"
-}
 if [ "$BUNDLED" = 0 ] && [ -f "$FROM_FILE" ]; then
   FROM="$(sed -n 's/^from //p' "$FROM_FILE" | sed -n 1p)"; TO="$(sed -n 's/^to //p' "$FROM_FILE" | sed -n 1p)"
   if kept_record "$FROM_FILE"; then echo "${FROM:-The previous release} was put back in $DIR by an earlier run, whose restart of it did not come up or was cut off."
   else echo "An upgrade of $DIR was cut off part-way — putting ${FROM:-the previous release} back first."; fi
-  clear_own_index_lock || exit 3
-  repair_tree || { echo "Could not check out ${FROM:-the previous release} (above): node_modules.prev holds its dependencies."; exit 3; }
+  clear_own_index_lock || repair_failed
+  repair_tree || { echo "Could not check out ${FROM:-the previous release} (above): node_modules.prev holds its dependencies."; repair_failed; }
   if [ -d node_modules.prev ]; then
-    deps_lock || { echo "Another install of the dependencies in $DIR has held $DEPS_LOCK for half an hour, so ${FROM:-the previous release}'s are still in node_modules.prev, not put back: the next upgrade puts them back first. If no npm is running there, remove it: rm -r \"$DEPS_LOCK\""; exit 3; }
+    deps_lock || { echo "Another install of the dependencies in $DIR has held $DEPS_LOCK for half an hour, so ${FROM:-the previous release}'s are still in node_modules.prev, not put back: the next upgrade puts them back first. If no npm is running there, remove it: rm -r \"$DEPS_LOCK\""; repair_failed; }
     rm -rf node_modules; mv node_modules.prev node_modules
     deps_unlock
   fi
@@ -751,11 +723,17 @@ fi
 # (none at all, or not a channel), the timer follows its own: nothing to read.
 # After the repairs above, which need no channel; a pin a killed run left
 # stays recorded for the next run to see through.
-case "$ARG" in ''|stable|beta|latest) RECHECK=1 ;; *) RECHECK=0 ;; esac
+case "$ARG" in
+  ''|stable|beta|latest) RECHECK=1 ;;
+  *) RECHECK=0 ;;
+esac
 [ "${HATCHABOT_UPGRADE_BY_TIMER:-}" != 1 ] || RECHECK=1
 if [ "$RECHECK" = 1 ]; then
   NOW="$(remembered_channel)"; [ -n "$NOW" ] || [ -n "$ARG" ] || NOW=stable
-  case "$NOW" in stable|beta|latest|v[0-9]*) ;; *) NOW="" ;; esac
+  case "$NOW" in
+    stable|beta|latest|v[0-9]*) ;;
+    *) NOW="" ;;
+  esac
   if [ -n "$NOW" ] && [ "$NOW" != "$CHANNEL" ]; then
     # Left as it is, a pin a killed run left is the next run's to see to.
     PIN_ON=""
@@ -784,7 +762,9 @@ if [ "$CUR" = "$TARGET" ]; then
   [ -z "$KEPT_REC" ] || kept_end named
   pin_named; echo "Already on $TARGET ($CHANNEL)."; exit 0
 fi
-case "$CHANNEL" in v[0-9]*) ;; *)
+case "$CHANNEL" in
+  v[0-9]*) ;;
+  *)
   # A channel never takes a machine backwards (this one may run ahead of it).
   if [[ "$CUR" == v* ]] && [ "$(vernewer "$CUR" "$TARGET")" = "$CUR" ]; then
     echo "On $CUR, which is newer than $CHANNEL ($TARGET). Nothing to do — name a version to go back."
@@ -812,11 +792,11 @@ if [ "$BUNDLED" = 1 ]; then
   # The disk, said as the disk: it read as "no bundle yet", or as a release that
   # would not unpack, and the timer went on trying (HB-0438). A bundle's download
   # and unpacked copy sit beside the install until the swap.
-  free_beside() { local mb; mb="$(free_mb "$(dirname "$DIR")")"; [ -z "$mb" ] || printf '%s MB free' "$mb"; }
+  free_beside() { local mb; mb="$(free_mb "$(dirname "$DIR")")"; [ -z "$mb" ] || printf ' (%s MB free)' "$mb"; }
   disk_full() {
     local free
     free="$(free_beside)"
-    echo "The disk holding $(dirname "$DIR") is full${free:+ ($free)}, so the $TARGET bundle could not be written there: nothing was changed. Free about 1 GB, then try again."
+    echo "The disk holding $(dirname "$DIR") is full$free, so the $TARGET bundle could not be written there: nothing was changed. Free about 1 GB, then try again."
     machine_short
   }
   # A folder that cannot be made there is not always the disk: a parent this user
@@ -829,7 +809,7 @@ if [ "$BUNDLED" = 1 ]; then
       machine_short
     fi
     free="$(free_beside)"
-    echo "Could not make a folder in $at for the $TARGET bundle: no room or no permission there${free:+ ($free)}: nothing was changed. Free about 1 GB or fix that folder's permissions, then try again."
+    echo "Could not make a folder in $at for the $TARGET bundle: no room or no permission there$free: nothing was changed. Free about 1 GB or fix that folder's permissions, then try again."
     machine_short
   }
   STAGE="$(mktemp -d "$(dirname "$DIR")/.hatchabot-next-XXXXXX")" || no_stage
@@ -869,7 +849,9 @@ if [ "$BUNDLED" = 1 ]; then
   # In English: its message is matched below.
   TAR_ERR="$(LC_ALL=C tar -xzf "$STAGE/$NAME" -C "$STAGE" 2>&1)" || {
     printf '%s\n' "$TAR_ERR" | tail -n 3
-    case "$TAR_ERR" in *"No space left"*|*"Disk quota"*) disk_full ;; esac
+    case "$TAR_ERR" in
+      *"No space left"*|*"Disk quota"*) disk_full ;;
+    esac
     echo "Could not unpack the $TARGET bundle."; exit 3
   }
   NEW="$STAGE/hatchabot"
@@ -949,13 +931,19 @@ if [ "$BUNDLED" = 1 ]; then
   # Back, and only its restart did not come up: restart_back said what comes next.
   rollback_or_redo() {
     rollback_bundle && return 0
-    [ "$BACK_DOWN" = 1 ] || echo "Then run $REDO: it puts ${CUR:-the previous release} back first, from its record."
+    [ "$BACK_DOWN" = 1 ] || { echo "So the rollback did not finish either: ${CUR:-the previous release} is not back as it was."; echo "Then run $REDO: it puts ${CUR:-the previous release} back first, from its record."; }
   }
   # By its words too: a move across file systems that ran out of room removes
   # its part copy, and the space it took is free again (third review).
   swap_failed() { change_failed undo "swapped in" "$1" "The upgrade stopped part-way — putting $CUR back."; }
   CHANGING=1
-  LC_ALL=C run_step put_rec "$SWAPPING" '>' "from $CUR" "to $TARGET" "stage $STAGE" "$PINS_RECORDED" says-started || swap_failed "Could not write $SWAPPING (above)."
+  # Written beside it, then renamed over it: written in place, a full disk
+  # cut short a record kept for a release put back (stop_or_go) as this run
+  # went on from it, and only this run's rollback wrote it back (HB-1468).
+  { LC_ALL=C run_step put_rec "$SWAPPING.tmp" '>' "from $CUR" "to $TARGET" "stage $STAGE" "$PINS_RECORDED" says-started && LC_ALL=C run_step mv -f "$SWAPPING.tmp" "$SWAPPING"; } || {
+    rm -f "$SWAPPING.tmp" 2>/dev/null || true
+    swap_failed "Could not write $SWAPPING (above)."
+  }
   went_on
   # One name at a time, the old one aside and the new one straight in, and
   # scripts/ first: cut off, the tree is short at most the one name being
@@ -998,25 +986,8 @@ else
 # Only once the working one was moved aside (ASIDE): stopped while a stale
 # node_modules.prev was being removed, the rollback deleted the only working
 # node_modules (HB-0266).
-# Under the dependencies' lock (deps_lock), let go before the restart that
-# follows, whose ensure-deps.sh takes it. One this run cannot have within half
-# an hour leaves them where they are and fails (1): the record stays, and the
-# next run's repair puts them back under the lock. Taken for done, the record
-# went, the next run deleted node_modules.prev as a leftover, and the old
-# release was left on the failed install's partial tree (review of HB-1212).
-# Not moved without the lock either: what holds it that long is most likely
-# an npm at work in that very tree.
-restore_deps() {
-  [ -d node_modules.prev ] || [ "$ASIDE" = 1 ] || return 0
-  if ! deps_lock; then
-    echo "Another install of the dependencies in $DIR has held $DEPS_LOCK for half an hour, so ${CUR:-the previous release}'s were left in node_modules.prev, not put back. If no npm is running there, remove it: rm -r \"$DEPS_LOCK\""
-    return 1
-  fi
-  if [ -d node_modules.prev ]; then rm -rf node_modules; mv node_modules.prev node_modules
-  elif [ "$ASIDE" = 1 ]; then rm -rf node_modules; fi
-  deps_unlock
-  return 0
-}
+# restore_deps (scripts/upgrade-helpers.sh) puts it back, under the
+# dependencies' lock.
 # The service is restarted only if it was restarted onto the new release: an
 # install that failed left the old one running, and restarting it anyway
 # restarted production every ten minutes while a release that cannot install
@@ -1060,7 +1031,7 @@ undo() {
 # restart alone did not come up, back_down said it.
 rollback_or_redo() {
   undo && return 0
-  [ "$BACK_DOWN" = 1 ] || echo "Then run $REDO: it puts ${CUR:-the previous release} back first, from its record."
+  [ "$BACK_DOWN" = 1 ] || { echo "So the rollback did not finish either: ${CUR:-the previous release} is not back as it was."; echo "Then run $REDO: it puts ${CUR:-the previous release} back first, from its record."; }
 }
 # An upgrade killed (or a power cut) right after moving node_modules aside
 # left node_modules.prev as the only working copy. Put back first: deleted as
@@ -1137,9 +1108,23 @@ fi
 # `HATCHABOT_IMAGE = x` was the service's image and setup's, but not the
 # upgrade's: setup fetched x, the upgrade the default (review of HB-1210).
 # (env_named is defined above, with rolled_back_note, which reads .env too.)
+# The daemon is the service's alone, as doctor asks it (serviceDockerEnv):
+# this shell's DOCKER_CONTEXT, DOCKER_TLS_VERIFY and DOCKER_CERT_PATH, and its
+# DOCKER_HOST when .env names none, pointed the look and the fetch at another
+# daemon (HB-1354), and so did its DOCKER_CONFIG, whose config.json's
+# currentContext names one too. They go once .env is read through, or when
+# there is none (the service then has none).
+DAEMON_SETTINGS="DOCKER_HOST DOCKER_CONTEXT DOCKER_TLS_VERIFY DOCKER_CERT_PATH DOCKER_CONFIG"
 if [ "${HATCHABOT_UPGRADE_IMAGE:-1}" = 1 ] && command -v docker >/dev/null 2>&1; then
-  if [ -f .env ]; then env_named DOCKER_HOST HATCHABOT_IMAGE HATCHABOT_IMAGE_REGISTRY; fi
-  for v in DOCKER_HOST HATCHABOT_IMAGE HATCHABOT_IMAGE_REGISTRY; do
+  ENV_READ=1
+  if [ -f .env ]; then
+    env_named $DAEMON_SETTINGS HATCHABOT_IMAGE HATCHABOT_IMAGE_REGISTRY
+    # Not read through (on Linux with no node, a line only systemd reads so):
+    # said, where the shell's settings were taken in silence (HB-1381).
+    [ -n "$ENV_READ" ] || echo "⚠ Could not read $DIR/.env as the service reads it (on Linux, with no node on this PATH, only plain NAME=value lines can be), so the runtime image is checked with this shell's DOCKER_HOST, DOCKER_CONTEXT, DOCKER_TLS_VERIFY, DOCKER_CERT_PATH, DOCKER_CONFIG, HATCHABOT_IMAGE and HATCHABOT_IMAGE_REGISTRY, which may not be the service's."
+  fi
+  if [ -n "$ENV_READ" ]; then for v in $DAEMON_SETTINGS; do unset "$v"; done; fi
+  for v in $DAEMON_SETTINGS HATCHABOT_IMAGE HATCHABOT_IMAGE_REGISTRY; do
     set_in="ENVSET_$v"; val="ENV_$v"
     [ -n "${!set_in:-}" ] || continue
     if [ -n "${!val}" ]; then export "$v=${!val}"; else unset "$v"; fi
@@ -1153,6 +1138,12 @@ if [ "${HATCHABOT_UPGRADE_IMAGE:-1}" = 1 ] && command -v docker >/dev/null 2>&1;
   if [ "$IMAGE" != "$IMAGE_REPO" ] && [ "$IMAGE" != "$IMAGE_REPO:latest" ] || [ "$IMAGE" != "${IMAGE%@*}" ]; then
     echo "The runtime image is pinned to $IMAGE (HATCHABOT_IMAGE): the upgrade leaves it as it is (this release's default is OpenClaw ${WANT:-unknown})."
     WANT=""
+  fi
+  # HATCHABOT_IMAGE_REPO, a by-hand override in this shell, is looked at and
+  # fetched into, where the app and its image list never look: said, and how
+  # to bring the image into the fleet's repository (HB-1386).
+  if [ -n "$WANT" ] && [ -n "${HATCHABOT_IMAGE_REPO:-}" ] && [ "$HATCHABOT_IMAGE_REPO" != "$IMAGE_REPO" ]; then
+    echo "⚠ HATCHABOT_IMAGE_REPO (set in this shell) names $HATCHABOT_IMAGE_REPO, not the fleet's repository $IMAGE_REPO (HATCHABOT_IMAGE): the runtime image is looked at and fetched there, where the app and its image list do not look. To use one fetched there, run the upgrade without HATCHABOT_IMAGE_REPO, or tag it in:  docker tag $HATCHABOT_IMAGE_REPO:latest $IMAGE_REPO:latest"
   fi
   HAVE=""
   [ -z "$WANT" ] || HAVE="$(docker image inspect "${HATCHABOT_IMAGE_REPO:-$IMAGE_REPO}:latest" --format '{{ index .Config.Labels "org.agentclaw.openclaw-version" }}' 2>/dev/null || true)"

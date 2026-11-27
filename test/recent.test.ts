@@ -219,6 +219,18 @@ describe('capture: reading only what moved', () => {
       expect(keysToRead(moved, rec, NOW)).toEqual([]);
     }
   });
+  it('a conversation whose last line cleans to nothing is remembered as empty, and not read again until it moves (HB-1360)', () => {
+    const s = { 'agent:k:main': { updatedAt: NOW - MIN }, 'agent:k:web:0123456789abcdef': { updatedAt: NOW - 2 * MIN } };
+    const prev: RecentRecord = { lastActiveAt: NOW - DAY, sessions: { 'agent:k:main': { at: NOW - DAY, role: 'assistant', text: 'an older line' } } };
+    const keys = keysToRead(s, prev, NOW);
+    expect(keys).toEqual(['agent:k:main', 'agent:k:web:0123456789abcdef']);
+    // Only markup, and only the web-app marker: nothing left once cleaned.
+    const rec = mergeRecent(prev, s, { 'agent:k:main': { role: 'assistant', text: '---\n```\n```' }, 'agent:k:web:0123456789abcdef': { role: 'user', text: '[Sam via the web app]' } }, keys, NOW);
+    expect(rec.sessions['agent:k:main']).toEqual({ at: NOW - MIN, role: 'assistant', text: '' });
+    expect(rec.sessions['agent:k:web:0123456789abcdef']).toEqual({ at: NOW - 2 * MIN, role: 'user', text: '' });
+    expect(keysToRead(s, rec, NOW)).toEqual([]);
+    expect(keysToRead({ ...s, 'agent:k:main': { updatedAt: NOW } }, rec, NOW)).toEqual(['agent:k:main']);
+  });
   it('drops conversations that are gone or past the week, and keeps the newest activity', () => {
     const prev: RecentRecord = { lastActiveAt: NOW - DAY, sessions: { 'agent:k:gone': { at: NOW - MIN, role: 'assistant', text: 'x' }, 'agent:k:main': { at: NOW - 8 * DAY, role: 'assistant', text: 'y' } } };
     const rec = mergeRecent(prev, { 'agent:k:main': { updatedAt: NOW - 8 * DAY } }, {}, [], NOW);

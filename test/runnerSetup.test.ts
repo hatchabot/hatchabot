@@ -16,6 +16,7 @@ import {
   ensureSshConfigBlock,
   installRuntimeImage,
   parseSshEndpoint,
+  PULL_CEILING_MS,
   runnerSetupSnippet,
   sshConfigPath,
 } from '../src/orchestrator/machines/runnerSetup.js';
@@ -808,7 +809,7 @@ describe('installRuntimeImage', () => {
   const stub = (script: string, sameCpu = true) => {
     const dir = mkdtempSync(join(tmpdir(), 'acl-imgdocker-'));
     const bin = join(dir, 'docker');
-    const cpu = sameCpu ? 'if [ "$1" = info ] || { [ "$1" = -H ] && [ "$3" = info ]; }; then echo x86_64; exit 0; fi\n' : '';
+    const cpu = sameCpu ? 'if [ "$1" = info ] || { [ "$1" = -H ] && [ "$3" = info ]; }; then echo x86_64; exit 0; fi\nif [ "$1" = image ] && [ "$2" = inspect ]; then echo amd64; exit 0; fi\n' : '';
     writeFileSync(bin, `#!/usr/bin/env bash\n${cpu}${script}`, { mode: 0o755 });
     return bin;
   };
@@ -884,6 +885,7 @@ cat > /dev/null; exit 0
     writeFileSync(docker, `#!${process.execPath}
 const fs = require('fs'); const a = process.argv.slice(2);
 if (a.includes('info')) console.log('x86_64');
+else if (a.includes('inspect')) console.log('amd64');
 else if (a.includes('save')) { fs.writeSync(1, 'image-bytes'); fs.closeSync(1); setTimeout(() => process.exit(0), 700); }
 else if (a.includes('load')) { process.stdin.resume(); process.stdin.on('end', () => process.exit(0)); }
 else process.exit(2);
@@ -903,10 +905,129 @@ cat > /dev/null; sleep 1; exit 0  # load: still unpacking after save ended
     expect(res).toEqual({ ok: true });
   });
 
+  describe('stopped (Remove anyway, HB-1254)', () => {
+    /** Its pid, once the stub has written it; whether that process still runs. */
+    const pidOf = (f: string) => { try { return Number(readFileSync(f, 'utf8')) || 0; } catch { return 0; } };
+    const alive = (pid: number) => { if (!pid) return false; try { process.kill(pid, 0); return true; } catch { return false; } };
+    const started = async (f: string) => { for (let i = 0; i < 400 && !pidOf(f); i++) await new Promise((r) => setTimeout(r, 10)); expect(pidOf(f), 'the docker call began').toBeGreaterThan(0); };
+    const gone = async (pid: number) => { for (let i = 0; i < 200 && alive(pid); i++) await new Promise((r) => setTimeout(r, 10)); expect(alive(pid), 'its docker is killed').toBe(false); };
+
+    it('a copy to a runner of the same CPU: its docker save and load are killed, and it ends "Stopped: …"', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'acl-imgstop-'));
+      const pidFile = join(dir, 'save.pid'), loadPid = join(dir, 'load.pid');
+      const docker = stub(`
+if [ "$1" = save ]; then echo $$ > ${JSON.stringify(pidFile)}; echo start; exec sleep 30; fi
+echo $$ > ${JSON.stringify(loadPid)}; exec cat > /dev/null
+`);
+      const stop = new AbortController();
+      const copy = installRuntimeImage('ssh://r@x', { docker, stallMs: 10_000, signal: stop.signal });
+      await started(pidFile); await started(loadPid);
+      stop.abort('Remove anyway was chosen for Laptop runner while its image was being installed.');
+      expect(await copy).toEqual({ ok: false, stopped: true, error: 'Stopped: Remove anyway was chosen for Laptop runner while its image was being installed.' });
+      await gone(pidOf(pidFile)); await gone(pidOf(loadPid));
+    });
+
+    it('a pull for a runner on another CPU: its docker pull is killed, nothing is tagged, and it ends "Stopped: …"; one stopped before it began runs no docker', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'acl-imgstop-'));
+      const pidFile = join(dir, 'pull.pid');
+      const docker = stub(`
+echo "$*" >> ${JSON.stringify(join(dir, 'calls'))}
+if [ "$1" = image ] && [ "$2" = inspect ]; then echo arm64; exit 0; fi
+if [ "$1" = -H ] && [ "$3" = info ]; then echo x86_64; exit 0; fi
+if [ "$3" = pull ]; then echo $$ > ${JSON.stringify(pidFile)}; exec sleep 30; fi
+exit 0
+`, false);
+      const published = { ref: 'registry.example.org/runtime:2026.9.8', openclawVersion: '2026.9.8' };
+      const stop = new AbortController();
+      const pull = installRuntimeImage('ssh://r@x', { docker, published, signal: stop.signal });
+      await started(pidFile);
+      stop.abort('made-up reason.');
+      expect(await pull).toEqual({ ok: false, stopped: true, error: 'Stopped: made-up reason.' });
+      await gone(pidOf(pidFile));
+      expect(readFileSync(join(dir, 'calls'), 'utf8')).not.toMatch(/ tag | build /);
+      // Stopped already: no docker at all.
+      const calls = readFileSync(join(dir, 'calls'), 'utf8');
+      expect(await installRuntimeImage('ssh://r@x', { docker, published, signal: stop.signal })).toEqual({ ok: false, stopped: true, error: 'Stopped: made-up reason.' });
+      expect(readFileSync(join(dir, 'calls'), 'utf8')).toBe(calls);
+    });
+
+    it('a pull is given an hour at most, whatever the install\'s own limit: one that hangs is killed then, and said so', async () => {
+      expect(PULL_CEILING_MS).toBe(3600_000);
+      const dir = mkdtempSync(join(tmpdir(), 'acl-imgstop-'));
+      const pidFile = join(dir, 'pull.pid');
+      const docker = stub(`
+if [ "$1" = image ] && [ "$2" = inspect ]; then echo arm64; exit 0; fi
+if [ "$1" = -H ] && [ "$3" = info ]; then echo x86_64; exit 0; fi
+if [ "$3" = pull ]; then echo $$ > ${JSON.stringify(pidFile)}; exec sleep 30; fi
+exit 0
+`, false);
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        const pull = installRuntimeImage('ssh://r@x', { docker, published: { ref: 'registry.example.org/runtime:2026.9.8', openclawVersion: '2026.9.8' }, timeoutMs: 3 * 3600_000 });
+        for (let i = 0; i < 4000 && !pidOf(pidFile); i++) await new Promise((r) => setImmediate(r));
+        const pid = pidOf(pidFile);
+        expect(pid, 'the pull began').toBeGreaterThan(0);
+        vi.advanceTimersByTime(PULL_CEILING_MS - 60_000);
+        expect(alive(pid), 'not yet').toBe(true);
+        vi.advanceTimersByTime(60_000);
+        const r = await pull;
+        expect(r.ok).toBe(false);
+        expect(r.error).toBe('That runner is amd64 and this machine\'s image arm64, so it needs the published image registry.example.org/runtime:2026.9.8, and pulling it there did not finish within an hour, so it was stopped: is that runner\'s link slow, or the pull stuck? Try Install image again, or pull it on that runner by hand (docker pull registry.example.org/runtime:2026.9.8), then Install image again.');
+        expect(alive(pid)).toBe(false);
+      } finally { vi.useRealTimers(); }
+    });
+
+    it('a shorter timeoutMs shortens the pull too, and the message gives the time it had (review of HB-1254)', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'acl-imgstop-'));
+      const pidFile = join(dir, 'pull.pid');
+      const docker = stub(`
+if [ "$1" = image ] && [ "$2" = inspect ]; then echo arm64; exit 0; fi
+if [ "$1" = -H ] && [ "$3" = info ]; then echo x86_64; exit 0; fi
+if [ "$3" = pull ]; then echo $$ > ${JSON.stringify(pidFile)}; exec sleep 30; fi
+exit 0
+`, false);
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        const pull = installRuntimeImage('ssh://r@x', { docker, published: { ref: 'registry.example.org/runtime:2026.9.8', openclawVersion: '2026.9.8' }, timeoutMs: 20 * 60_000 });
+        for (let i = 0; i < 4000 && !pidOf(pidFile); i++) await new Promise((r) => setImmediate(r));
+        const pid = pidOf(pidFile);
+        expect(pid, 'the pull began').toBeGreaterThan(0);
+        vi.advanceTimersByTime(20 * 60_000);
+        const r = await pull;
+        expect(r.error).toContain('and pulling it there did not finish within 20 minutes, so it was stopped');
+        expect(alive(pid)).toBe(false);
+      } finally { vi.useRealTimers(); }
+    });
+
+    it('the time a shorter pull had is said in the right number: a minute, or a second (review of HB-1254, round 2)', async () => {
+      for (const [ms, words] of [[75_000, 'within 1 minute,'], [1_000, 'within 1 second,'], [150_000, 'within 3 minutes,']] as const) {
+        const dir = mkdtempSync(join(tmpdir(), 'acl-imgstop-'));
+        const pidFile = join(dir, 'pull.pid');
+        const docker = stub(`
+if [ "$1" = image ] && [ "$2" = inspect ]; then echo arm64; exit 0; fi
+if [ "$1" = -H ] && [ "$3" = info ]; then echo x86_64; exit 0; fi
+if [ "$3" = pull ]; then echo $$ > ${JSON.stringify(pidFile)}; exec sleep 30; fi
+exit 0
+`, false);
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+        try {
+          const pull = installRuntimeImage('ssh://r@x', { docker, published: { ref: 'registry.example.org/runtime:2026.9.8', openclawVersion: '2026.9.8' }, timeoutMs: ms });
+          for (let i = 0; i < 4000 && !pidOf(pidFile); i++) await new Promise((r) => setImmediate(r));
+          const pid = pidOf(pidFile);
+          expect(pid, 'the pull began').toBeGreaterThan(0);
+          vi.advanceTimersByTime(ms);
+          const r = await pull;
+          expect(r.error, String(ms)).toContain(`and pulling it there did not finish ${words} so it was stopped`);
+          expect(alive(pid)).toBe(false);
+        } finally { vi.useRealTimers(); }
+      }
+    });
+  });
+
   describe('a runner on another CPU (2026-10-09)', () => {
     const archStub = (dir: string, extra = '') => stub(`
 echo "$*" >> ${JSON.stringify(join(dir, 'calls'))}
-if [ "$1" = info ]; then echo aarch64; exit 0; fi
+if [ "$1" = image ] && [ "$2" = inspect ]; then echo arm64; exit 0; fi
 if [ "$1" = -H ] && [ "$3" = info ]; then echo x86_64; exit 0; fi
 ${extra}
 if [ "$1" = save ]; then echo image-bytes; exit 0; fi
@@ -916,7 +1037,7 @@ cat > /dev/null; exit 0
       const dir = mkdtempSync(join(tmpdir(), 'acl-imgarch-'));
       const res = await installRuntimeImage('ssh://r@x', { docker: archStub(dir) });
       expect(res.ok).toBe(false);
-      expect(res.error).toMatch(/built for aarch64.*runner is x86_64/);
+      expect(res.error).toMatch(/built for arm64.*runner is amd64/);
       expect(readFileSync(join(dir, 'calls'), 'utf8')).not.toMatch(/^save /m);
     });
     it('pulls the published image of the same OpenClaw there and tags it as the runtime image', async () => {
@@ -1006,24 +1127,89 @@ cat > /dev/null; exit 0
     });
   });
 
+  it("judges by the CPU this machine's image is built for, not the one this machine runs on (HB-1188)", async () => {
+    // This machine runs on arm64 and holds an amd64 image (built under emulation).
+    const at = (runner: string) => {
+      const dir = mkdtempSync(join(tmpdir(), 'acl-imgarch-'));
+      const docker = stub(`
+echo "$*" >> ${JSON.stringify(join(dir, 'calls'))}
+if [ "$1" = info ]; then echo aarch64; exit 0; fi
+if [ "$1" = image ] && [ "$2" = inspect ]; then echo amd64; exit 0; fi
+if [ "$1" = -H ] && [ "$3" = info ]; then echo ${runner}; exit 0; fi
+if [ "$3" = image ] && [ "$4" = inspect ]; then echo 2026.9.8; exit 0; fi
+if [ "$1" = save ]; then echo image-bytes; exit 0; fi
+cat > /dev/null; exit 0
+`, false);
+      return { docker, calls: () => readFileSync(join(dir, 'calls'), 'utf8') };
+    };
+    const published = { ref: 'registry.example.org/runtime:2026.9.8', openclawVersion: '2026.9.8' };
+    // An arm64 runner would get an image it cannot run: it pulls the published one instead.
+    const arm = at('aarch64');
+    expect(await installRuntimeImage('ssh://r@x', { docker: arm.docker, published })).toEqual({ ok: true, pulled: published.ref });
+    expect(arm.calls()).not.toMatch(/^save /m);
+    const none = at('aarch64');
+    expect((await installRuntimeImage('ssh://r@x', { docker: none.docker })).error).toMatch(/^This machine's image is built for amd64, and that runner is arm64: a copy would not run there/);
+    // An amd64 runner runs it as it is: copied.
+    const intel = at('x86_64');
+    expect(await installRuntimeImage('ssh://r@x', { docker: intel.docker, published })).toEqual({ ok: true });
+    expect(intel.calls()).toMatch(/^save hatchabot-runtime:latest$/m);
+    expect(intel.calls()).not.toMatch(/pull/);
+  });
+
+  it("no such image here is said by its name; one that says no CPU is judged by this machine's, as before (review of HB-1188)", async () => {
+    const at = (local: string, info: string, runner = 'x86_64') => {
+      const dir = mkdtempSync(join(tmpdir(), 'acl-imgarch-'));
+      const docker = stub(`
+echo "$*" >> ${JSON.stringify(join(dir, 'calls'))}
+if [ "$1" = info ]; then ${info}; exit 0; fi
+if [ "$1" = image ] && [ "$2" = inspect ]; then ${local}; exit 0; fi
+if [ "$1" = -H ] && [ "$3" = info ]; then echo ${runner}; exit 0; fi
+if [ "$3" = image ] && [ "$4" = inspect ]; then echo 2026.9.8; exit 0; fi
+if [ "$1" = save ]; then echo image-bytes; exit 0; fi
+cat > /dev/null; exit 0
+`, false);
+      return { docker, calls: () => readFileSync(join(dir, 'calls'), 'utf8') };
+    };
+    const published = { ref: 'registry.example.org/runtime:2026.9.8', openclawVersion: '2026.9.8' };
+    for (const said of ['Error: No such image: hatchabot-runtime:latest', 'Error response from daemon: No such image: hatchabot-runtime:latest', 'Error: hatchabot-runtime:latest: image not known']) {
+      const gone = at(`echo ${JSON.stringify(said)} >&2; exit 1`, 'echo x86_64');
+      expect(await installRuntimeImage('ssh://r@x', { docker: gone.docker, published }), said)
+        .toEqual({ ok: false, error: 'There is no image hatchabot-runtime:latest on this machine, so nothing was copied: build or pull it here first.' });
+      expect(gone.calls()).not.toMatch(/^save |load|pull| tag /m);
+    }
+    // Here, and saying no CPU: this machine's, by docker info. The same as the runner's: copied.
+    const unsaid = at('echo', 'echo x86_64');
+    expect(await installRuntimeImage('ssh://r@x', { docker: unsaid.docker, published })).toEqual({ ok: true });
+    expect(unsaid.calls()).toMatch(/^save hatchabot-runtime:latest$/m);
+    // Another: the published image is pulled.
+    const arm = at('echo "<no value>"', 'echo x86_64', 'aarch64');
+    expect(await installRuntimeImage('ssh://r@x', { docker: arm.docker, published })).toEqual({ ok: true, pulled: published.ref });
+    expect(arm.calls()).not.toMatch(/^save /m);
+    // This machine's CPU not read either: nothing copied.
+    const unread = at('echo', 'echo "Cannot connect to the Docker daemon" >&2; exit 1');
+    expect((await installRuntimeImage('ssh://r@x', { docker: unread.docker, published })).error)
+      .toBe('Could not tell which CPU this machine runs on (docker info did not say), so nothing was copied: an image for another kind of CPU would not run there. Try again in a moment.');
+    expect(unread.calls()).not.toMatch(/^save |load|pull| tag /m);
+  });
+
   it('copies nothing when either side\'s CPU cannot be read: it might be another kind (HB-0976)', async () => {
     for (const [local, remote, who] of [
-      ['echo x86_64', 'echo "Cannot connect to the Docker daemon" >&2; exit 1', 'that runner runs'],
-      ['echo x86_64', 'echo "x86 64 (unknown)"', 'that runner runs'],
-      ['exit 1', 'echo x86_64', 'this machine runs'],
-      ['exit 1', 'exit 1', 'this machine or that runner runs'],
+      ['echo amd64', 'echo "Cannot connect to the Docker daemon" >&2; exit 1', 'that runner runs on (docker info did not say)'],
+      ['echo amd64', 'echo "x86 64 (unknown)"', 'that runner runs on (docker info did not say)'],
+      ['echo "Cannot connect to the Docker daemon" >&2; exit 1', 'echo x86_64', "this machine's image is built for (docker image inspect did not say)"],
+      ['exit 1', 'exit 1', "this machine's image is built for or that runner runs on (docker did not say)"],
     ] as const) {
       const dir = mkdtempSync(join(tmpdir(), 'acl-imgarch-'));
       const docker = stub(`
 echo "$*" >> ${JSON.stringify(join(dir, 'calls'))}
-if [ "$1" = info ]; then ${local}; exit 0; fi
+if [ "$1" = image ] && [ "$2" = inspect ]; then ${local}; exit 0; fi
 if [ "$1" = -H ] && [ "$3" = info ]; then ${remote}; exit 0; fi
 if [ "$1" = save ]; then echo image-bytes; exit 0; fi
 cat > /dev/null; exit 0
 `, false);
       const res = await installRuntimeImage('ssh://r@x', { docker, published: { ref: 'registry.example.org/runtime:2026.9.8', openclawVersion: '2026.9.8' } });
       expect(res.ok, `${local} / ${remote}`).toBe(false);
-      expect(res.error).toBe(`Could not tell which CPU ${who} on (docker info did not say), so nothing was copied: an image for another kind of CPU would not run there. Try again in a moment.`);
+      expect(res.error).toBe(`Could not tell which CPU ${who}, so nothing was copied: an image for another kind of CPU would not run there. Try again in a moment.`);
       const calls = readFileSync(join(dir, 'calls'), 'utf8');
       expect(calls).not.toMatch(/^save |load|pull| tag /m);
     }

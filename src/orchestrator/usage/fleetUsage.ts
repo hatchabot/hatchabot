@@ -43,6 +43,11 @@ export interface UsagePeriodView {
   cost: (CostRange & { agents: number }) | null;
   /** When token counting began for the newest-started agent — a window that starts earlier is partial. */
   countingSince?: string;
+  /**
+   * The window's skill practice runs, which its tokens, requests and costs already count (HB-1246): said apart, as an
+   * agent's own Usage says its own (HB-1275). Absent when there were none.
+   */
+  practice?: { runs: number; calls: number; tokens: number; agents: number };
 }
 
 const MIN = 60_000;
@@ -147,11 +152,24 @@ export function computeUsagePeriod(store: Store, ownerId: string, period: UsageP
     }
   }
   // Its practice runs' calls, which its log and transcripts do not hold (HB-1246); their tokens are in tokenDeltas.
+  // How much of the window was practice is said apart (HB-1275).
+  const practiceRuns = new Set<string>(), practiceAgents = new Set<string>();
+  let practiceCalls = 0, practiceTokens = 0;
   for (const p of store.practiceUsageFor(ids, from)) {
-    if (!(p.calls > 0) || p.at > to) continue;
-    row(p.agentId).requests += p.calls;
-    const b = bucket(p.at); if (b) b.requests += p.calls;
+    if (p.at > to) continue;
+    const tokens = p.input + p.output + p.cacheRead + p.cacheWrite;
+    // The calls its source refused are requests too, refused ones (HB-1497),
+    // and a run whose every call was refused is a run, as its Usage page says.
+    const refused = Math.max(0, p.refused ?? 0);
+    if (p.calls > 0 || tokens > 0 || refused > 0) {
+      practiceRuns.add(`${p.agentId}\u0000${p.run}`); practiceAgents.add(p.agentId);
+      practiceCalls += Math.max(0, p.calls); practiceTokens += Math.max(0, tokens);
+    }
+    if (!(p.calls > 0) && !refused) continue;
+    const r = row(p.agentId); r.requests += Math.max(0, p.calls) + refused; r.limited += refused;
+    const b = bucket(p.at); if (b) { b.requests += Math.max(0, p.calls) + refused; b.limited += refused; }
   }
+  const practice = practiceRuns.size ? { runs: practiceRuns.size, calls: practiceCalls, tokens: practiceTokens, agents: practiceAgents.size } : undefined;
 
   const byBilling: Record<string, number> = { included: 0, api: 0, local: 0 };
   const rows: UsageAgentRow[] = agents.map((a) => {
@@ -210,7 +228,7 @@ export function computeUsagePeriod(store: Store, ownerId: string, period: UsageP
     if (!countingSince || reach > countingSince) countingSince = reach;
   }
   if (countingSince && countingSince <= from) countingSince = undefined;
-  return { period, from, to, bucketMinutes, buckets: [...buckets.values()], agents: rows, totals, byBilling, cost, ...(countingSince ? { countingSince } : {}) };
+  return { period, from, to, bucketMinutes, buckets: [...buckets.values()], agents: rows, totals, byBilling, cost, ...(countingSince ? { countingSince } : {}), ...(practice ? { practice } : {}) };
 }
 
 /**

@@ -1,12 +1,12 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../src/store/store.js';
 import { markBusy, clearBusy } from '../src/orchestrator/lifecycle/busy.js';
-import { beginOperation } from '../src/orchestrator/lifecycle/operations.js';
+import { beginOperation, newBootForTests } from '../src/orchestrator/lifecycle/operations.js';
 import { createMachines, type Machines } from '../src/orchestrator/machines/machines.js';
 import { createImageInstalls } from '../src/orchestrator/machines/imageInstalls.js';
 import { registerMachineRoutes } from '../src/api/machine/machineRoutes.js';
@@ -26,7 +26,12 @@ vi.mock('../src/orchestrator/machines/runnerSetup.js', async (importOriginal) =>
     installRuntimeImage: (dockerHost: string, opts: Record<string, unknown> = {}) => {
       copies.calls.push(dockerHost);
       copies.opts.push(opts);
-      return new Promise((resolve) => { copies.release = resolve; });
+      return new Promise((resolve) => {
+        copies.release = resolve;
+        // As the real one ends when it is stopped (its docker killed; test/runnerSetup.test.ts).
+        const signal = opts.signal as AbortSignal | undefined;
+        signal?.addEventListener('abort', () => resolve({ ok: false, stopped: true, error: `Stopped: ${String(signal.reason)}` } as never), { once: true });
+      });
     },
   };
 });
@@ -199,6 +204,11 @@ describe('the machines', () => {
     expect(w.svc.hosts.addProblem(OWNER, 'tcp://runner.example:2376')).toHaveProperty('invalid');
     expect(w.svc.hosts.addProblem(OWNER, 'SSH://runner@10.0.0.9/')).toMatchObject({ already: { id: 'h2' } });
     expect(w.svc.hosts.addProblem(OWNER, 'ssh://runner@10.0.0.8')).toBeUndefined();
+    // ssh reads a user or host starting with "-" as an option, and refuses it: no console could open there (HB-1258).
+    for (const a of ['ssh://-oProxyCommand=x', 'ssh://runner@-box', 'ssh://-runner@fixture-box']) {
+      expect(w.svc.hosts.addProblem(OWNER, a), a).toEqual({ invalid: 'A user or host that starts with "-" cannot be reached over ssh: ssh takes it for an option and refuses it, so neither Docker nor an agent\'s console could reach that runner. Use the machine\'s own name or address.' });
+    }
+    expect(w.svc.hosts.addProblem(OWNER, 'ssh://runner@.box')).toBeUndefined();
     expect(sameEndpoint(' ssh://A@b/ ', 'ssh://a@b')).toBe(true);
     expect(sameEndpoint('', '')).toBe(false);
   });
@@ -399,7 +409,7 @@ describe('Install image', () => {
     } finally { if (had === undefined) delete process.env.HATCHABOT_IMAGE; else process.env.HATCHABOT_IMAGE = had; }
   });
 
-  it('this machine\'s extra packages go with the image, for a runner on another CPU to build them on (HB-1062)', async () => {
+  it('this machine\'s extra packages go with the image, for a runner on another CPU to build them on (HB-1062), and the image pulled is said after a restart (HB-1451)', async () => {
     const w = world();
     w.machines.h1!.tags = [{ tag: BASE, imageId: 'img1', size: '2GB', extraPackages: ['jq', 'ripgrep'] }];
     const copy = w.svc.installs.start(host(w, 'h2'), 'ssh://runner@10.0.0.9', OWNER);
@@ -409,6 +419,10 @@ describe('Install image', () => {
     await copy.finished;
     const op = w.store.listMachineOperations(['h2'], 5).find((o) => o.kind === 'install-image')!;
     expect(op.outcome).toBe("Laptop runner pulled the published image registry.example.org/runtime:2026.9.8, with this machine's extra packages (jq, ripgrep) built onto it.");
+    // The image pulled is said after a restart too, as the job said it (HB-1451).
+    expect(w.svc.installs.status('h2')).toMatchObject({ done: true, ok: true, pulled: 'registry.example.org/runtime:2026.9.8' });
+    const restarted = createImageInstalls({ store: w.store, providerFor: () => { throw new Error('nothing is asked'); }, trace: () => () => {} });
+    expect(restarted.status('h2')).toMatchObject({ done: true, ok: true, pulled: 'registry.example.org/runtime:2026.9.8' });
     copies.calls.length = 0;
     copies.opts.length = 0;
   });
@@ -438,7 +452,7 @@ describe('Install image', () => {
     await settle(); await settle();
     expect(copies.calls).toEqual(['ssh://runner@10.0.0.9']);
     const busy = 'The runtime image is being installed on this host — wait for Install image to finish (its row shows how far it has come), then remove it.';
-    expect(await w.svc.hosts.remove(host(w, 'h2'))).toEqual({ refused: { error: busy } });
+    expect(await w.svc.hosts.remove(host(w, 'h2'))).toEqual({ refused: { error: busy, code: 'image_copy' } });
     expect(w.store.getHost('h2')).toBeDefined();
     expect(w.removing.size).toBe(0);
     copies.release!({ ok: true });
@@ -450,7 +464,7 @@ describe('Install image', () => {
     for (let i = 0; i < 20 && !answer; i++) await settle();
     const late = w.svc.installs.start(host(w, 'h2'), 'ssh://runner@10.0.0.9', OWNER);
     answer(true);
-    expect(await going).toEqual({ refused: { error: busy } });
+    expect(await going).toEqual({ refused: { error: busy, code: 'image_copy' } });
     expect(w.store.getHost('h2')).toBeDefined();
     expect(w.forgotten).toEqual([]);
     for (let i = 0; i < 50 && copies.calls.length < 2; i++) await settle();
@@ -461,6 +475,57 @@ describe('Install image', () => {
     expect(w.store.getHost('h2')).toBeUndefined();
     copies.calls.length = 0;
     copies.opts.length = 0;
+  });
+
+  it('Remove anyway stops an image copy under way: its install is told to stop, its operation fails "Stopped: …" with no Install again, and the runner is removed; agents there still refuse, and the copy goes on (HB-1254)', async () => {
+    const w = world();
+    const app = Fastify();
+    registerMachineRoutes(app, {
+      store: w.store, providerFor: () => { throw new Error('unused'); }, ownedAgent: () => undefined, ownsLocalHost: () => true, holdOnce: () => true,
+      hostBeingRemoved: (id: string) => w.removing.has(id), machines: w.svc,
+    } as never);
+    try {
+      const copy = w.svc.installs.start(host(w, 'h2'), 'ssh://runner@10.0.0.9', OWNER);
+      await settle(); await settle();
+      expect(copies.calls).toEqual(['ssh://runner@10.0.0.9']);
+      const signal = copies.opts[0]!.signal as AbortSignal;
+      expect(signal.aborted).toBe(false);
+      const busy = 'The runtime image is being installed on this host — wait for Install image to finish (its row shows how far it has come), then remove it.';
+      // Asked plainly: refused, with the code the page offers Remove anyway for.
+      const plain = await app.inject({ method: 'DELETE', url: '/v1/hosts/h2' });
+      expect(plain.statusCode).toBe(409);
+      expect(plain.json()).toEqual({ error: busy, code: 'image_copy' });
+      // An agent there still refuses Remove anyway, and the copy is left alone.
+      agent(w, 'a9', { hostId: 'h2' });
+      const agents = await app.inject({ method: 'DELETE', url: '/v1/hosts/h2', payload: { stopImageCopy: true } });
+      expect(agents.statusCode).toBe(409);
+      expect(agents.json()).toEqual({ error: '1 agent still run on this host — move or delete them first.' });
+      expect(signal.aborted).toBe(false);
+      expect(w.svc.installs.underWay('h2')).toBe(true);
+      w.store.setAgentHost('a9', 'h1');
+      // Remove anyway: the copy stopped, waited for, and the runner removed.
+      const anyway = await app.inject({ method: 'DELETE', url: '/v1/hosts/h2', payload: { stopImageCopy: true } });
+      expect(anyway.statusCode, anyway.body).toBe(200);
+      expect(anyway.json()).toEqual({ ok: true });
+      expect(signal.aborted).toBe(true);
+      const why = 'Stopped: Remove anyway was chosen for Laptop runner while its image was being installed.';
+      expect(await copy.finished).toMatchObject({ done: true, ok: false, error: why });
+      const op = w.store.listMachineOperations(['h2'], 5).find((o) => o.kind === 'install-image')!;
+      expect(op).toMatchObject({ status: 'failed', outcome: why });
+      expect(op.recovery?.actions ?? []).toEqual([]);
+      expect(w.traced).toContain('host.image_copy_failed');
+      expect(w.store.getHost('h2')).toBeUndefined();
+      expect(w.removing.size).toBe(0);
+      // A flag that is not a boolean is refused, as any other body.
+      w.store.insertHost({ id: 'h3', ownerId: OWNER, kind: 'cloud', provider: 'remote-docker', name: 'Spare runner', settings: { dockerHost: 'ssh://runner@10.0.0.10' }, createdAt: 'now' });
+      w.machines.h3 = { daemon: 'daemon-three', stopped: [], statsCalls: 0 } as never;
+      expect((await app.inject({ method: 'DELETE', url: '/v1/hosts/h3', payload: { stopImageCopy: 'yes' } })).statusCode).toBe(400);
+      expect(w.store.getHost('h3')).toBeDefined();
+    } finally {
+      await app.close();
+      copies.calls.length = 0;
+      copies.opts.length = 0;
+    }
   });
 
   it('Install image is refused onto a runner whose removal is under way, and nothing is copied (HB-1025)', async () => {
@@ -525,6 +590,23 @@ describe('the resources', () => {
     expect(here.totals!.memBytes).toBe(100);
     expect(await w.svc.resources.clearPeaksOf([w.store.getAgent('a1')!])).toBe(1);
     expect(w.store.getAgent('a1')!.memoryCapBaseline).toBe(9);
+  });
+
+  it("an agent's old copy left on its previous machine is not counted as that agent there, nor read into its peak and cap hits (HB-1259)", async () => {
+    const w = world();
+    agent(w, 'a1', { hostId: 'h2' }); // moved to the runner
+    const row = (memBytes: number, memCapHits: number, startedAt: string) => ({ name: 'a1', cpuPct: 5, memBytes, memLimitBytes: 4000, pids: 3, memCapHits, startedAt });
+    // Its container on the runner, and the copy the move left on this machine (larger, with more cap hits).
+    w.machines.h2!.statsAnswer = async () => [row(100, 1, '2026-11-02T00:00:00Z')] as never;
+    w.machines.h1!.statsAnswer = async () => [row(3000, 40, '2026-11-01T00:00:00Z')] as never;
+    await w.svc.resources.clearPeaksOf([w.store.getAgent('a1')!]); // its peaks count from a clear: the readings are kept
+    const f = await w.svc.resources.fleet(OWNER, true);
+    const on = (id: string) => (f.hosts as Array<{ id: string; containers: Array<Record<string, unknown>>; totals?: { memBytes: number } }>).find((h) => h.id === id)!;
+    expect(on('h2').containers).toEqual([expect.objectContaining({ agentId: 'a1', memBytes: 100, memPeakBytes: 100, memCapHits: 0 })]);
+    expect(on('h1').containers).toEqual([]);
+    expect(on('h1').totals!.memBytes).toBe(0);
+    expect(w.store.getAgent('a1')!.memoryPeakSince).toBe(100);
+    expect(w.store.getAgent('a1')!.memoryCapBaseline).toBe(1);
   });
 
   it('one docker stats sample per machine serves every viewer for three seconds', async () => {
@@ -669,7 +751,7 @@ describe('the images', () => {
     expect(w.machines.h1!.tagged).toEqual([['hatchabot-runtime:2026.7.1-2', BASE]]);
     expect(w.svc.images.baseBuildNow()).toMatchObject({ ok: true });
     // Not "default": the default is the pin (HB-1256).
-    expect(w.told.at(-1)!.body).toBe(`The base image for OpenClaw 2026.7.1-2 finished building and is now ${BASE}. The fleet default stays ${pin}, as HATCHABOT_IMAGE pins it: only agents pinned to ${BASE} move onto it when they are rebuilt.`);
+    expect(w.told.at(-1)!.body).toBe(`The base image for OpenClaw 2026.7.1-2 finished building and is now ${BASE}. The fleet default stays ${pin}, as HATCHABOT_IMAGE pins it: only agents pinned to ${BASE} move onto it when they are rebuilt. To make it the fleet default, set HATCHABOT_IMAGE in .env to hatchabot-runtime:2026.7.1-2 and restart Hatchabot.`);
     // One pinned to :latest runs what moves: it is asked, and told of as one pinned to :latest, with no Promote (it would retag the pin).
     agent(w, 'l1', { hostId: 'h1', image: BASE });
     w.machines.h1!.runs = { ...w.machines.h1!.runs, 'mock://l1': '2026.9.8' };
@@ -694,8 +776,120 @@ describe('the images', () => {
     w.svc.images.startBaseBuild({ version: '2026.9.9', candidate: false, forOwner: OWNER });
     await finish();
     expect(w.base.at(-1)!.opts).toMatchObject({ candidate: false });
-    expect(w.told.at(-1)!.body).toBe(`The base image for OpenClaw 2026.9.9 finished building and is now ${BASE}. The fleet default stays ${pin}, as HATCHABOT_IMAGE pins it: only agents pinned to ${BASE} move onto it when they are rebuilt.`);
+    expect(w.told.at(-1)!.body).toBe(`The base image for OpenClaw 2026.9.9 finished building and is now ${BASE}. The fleet default stays ${pin}, as HATCHABOT_IMAGE pins it: only agents pinned to ${BASE} move onto it when they are rebuilt. To make it the fleet default, set HATCHABOT_IMAGE in .env to its tag and restart Hatchabot.`);
     expect(w.machines.h1!.tagged).toHaveLength(1);
+    w.svc.stop();
+  });
+
+  it("the base build's log ends with what was done with a default build once its script ended, not the script's \"candidate\" (HB-1508)", async () => {
+    // The script builds it as a candidate and says so as it ends; the fake writes that line, as the script would.
+    const said = (tag: string) => `Built ${tag} (candidate — :latest untouched)\n`;
+    const logOf = (w: World) => (w.base.at(-1)!.opts as { logPath: string }).logPath;
+    const ended = async (w: World, ok = true) => {
+      writeFileSync(logOf(w), said('hatchabot-runtime:2026.9.8'));
+      w.base.at(-1)!.finish(ok ? { ok: true } : { ok: false, error: 'made-up failure' });
+      for (let i = 0; i < 20 && w.svc.images.baseBuildNow().running; i++) await settle();
+    };
+    const lastLine = async (w: World, want: string) => {
+      for (const end = Date.now() + 5000; Date.now() < end; await new Promise((r) => setTimeout(r, 10))) {
+        if (readFileSync(logOf(w), 'utf8').endsWith(`${want}\n`)) break;
+      }
+      return readFileSync(logOf(w), 'utf8');
+    };
+    const makeDefault = { hostId: 'h1', tag: 'hatchabot-runtime:2026.9.8', latest: BASE, version: '2026.9.8' };
+    const w = world();
+    w.svc.images.startBaseBuild({ version: '2026.9.8', candidate: false, forOwner: OWNER, makeDefault });
+    await ended(w);
+    const made = `Then Hatchabot made it the fleet default: ${BASE} names hatchabot-runtime:2026.9.8 now.`;
+    expect(await lastLine(w, made)).toBe(said('hatchabot-runtime:2026.9.8') + `${made}\n`);
+    // Not made the default: why, after the script's line.
+    w.machines.h1!.tagFails = true;
+    w.svc.images.startBaseBuild({ version: '2026.9.8', candidate: false, forOwner: OWNER, makeDefault });
+    await ended(w);
+    const notMade = `Then Hatchabot did not make it the fleet default: docker could not tag it as ${BASE} (No such image). It is kept as hatchabot-runtime:2026.9.8.`;
+    expect(await lastLine(w, notMade)).toBe(said('hatchabot-runtime:2026.9.8') + `${notMade}\n`);
+    w.machines.h1!.tagFails = false;
+    // A candidate, and a build that failed: the script's own last line is the log's.
+    w.svc.images.startBaseBuild({ version: '2026.9.8', candidate: true, forOwner: OWNER, makeDefault });
+    await ended(w);
+    w.svc.images.startBaseBuild({ version: '2026.9.8', candidate: false, forOwner: OWNER, makeDefault });
+    await ended(w, false);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(readFileSync(logOf(w), 'utf8')).toBe(said('hatchabot-runtime:2026.9.8'));
+    // A log that is gone is not made again.
+    w.svc.images.startBaseBuild({ version: '2026.9.8', candidate: false, forOwner: OWNER, makeDefault });
+    rmSync(logOf(w));
+    w.base.at(-1)!.finish({ ok: true });
+    for (let i = 0; i < 20 && w.svc.images.baseBuildNow().running; i++) await settle();
+    await new Promise((r) => setTimeout(r, 100));
+    expect(existsSync(logOf(w))).toBe(false);
+    w.svc.stop();
+    // Under a HATCHABOT_IMAGE pinned to a version tag: :latest moved, and the fleet default stays the pin.
+    const pin = 'hatchabot-runtime:2026.9.4';
+    const p = world({ defaultBase: pin });
+    p.svc.images.startBaseBuild({ version: '2026.9.8', candidate: false, forOwner: OWNER, makeDefault });
+    await ended(p);
+    const moved = `Then Hatchabot moved ${BASE} to it: ${BASE} names hatchabot-runtime:2026.9.8 now. The fleet default stays ${pin}, as HATCHABOT_IMAGE pins it.`;
+    expect(await lastLine(p, moved)).toBe(said('hatchabot-runtime:2026.9.8') + `${moved}\n`);
+    p.svc.stop();
+  });
+
+  it('a default base build a restart cut off is said at the next start, with how to make its candidate the default (HB-1255)', async () => {
+    // It builds as a candidate and takes the default's tag only as it ends:
+    // cut off by a restart, it was left a candidate and nobody was told, its
+    // log ending "(candidate — :latest untouched)".
+    const w = world();
+    /** The service as a restart builds it again, over the same database: what it says of the build before. `ids`: the images docker has then, by name. */
+    const restart = (ids: Record<string, string> = {}) => {
+      newBootForTests();
+      const inspectImage = async (ref: string) => { if (!ids[ref]) throw new Error('No such image'); return { id: ids[ref], user: 'node', layers: [], labels: {} }; };
+      return createMachines({
+        store: w.store, providerFor: () => ({ inspectImage }) as never, trace: () => () => {}, disownPauseOnStop: () => {},
+        beginRemoval: () => true, endRemoval: () => {}, embedderOf: () => ({ remove: async () => ({}) }), forgetEmbedder: () => {}, forgetProviders: () => {},
+        defaultBase: BASE, dataDir: tmpdir(), notify: async () => {}, log: { info: () => {}, error: () => {} },
+      });
+    };
+    const makeDefault = { hostId: 'h1', tag: 'hatchabot-runtime:2026.9.8', latest: BASE, version: '2026.9.8' };
+    w.svc.images.startBaseBuild({ version: '2026.9.8', candidate: false, forOwner: OWNER, makeDefault });
+    expect(w.base).toHaveLength(1);
+    expect(w.store.listMachineOperations(['h1']).find((o) => o.kind === 'base-build')).toMatchObject({ status: 'running', requestedBy: OWNER });
+    // The service restarts in the middle of the build.
+    const after = restart({ 'hatchabot-runtime:2026.9.8': 'sha256:new', [BASE]: 'sha256:old' });
+    const said = 'The default base image build for OpenClaw 2026.9.8 was cut off by a restart, so it was not made the fleet default. If it got to its end, it is kept as hatchabot-runtime:2026.9.8 (Settings → Advanced → Runtime images): try it on an agent, then promote it. If it is not there, build it again.';
+    expect(after.images.baseBuildNow()).toMatchObject({ running: false, ok: false, error: said, version: '2026.9.8' });
+    // On the Activity list: a machine's operation, failed with those words once docker has said the default is another image.
+    const ops = () => w.store.listMachineOperations(['h1']).filter((o) => o.kind === 'base-build');
+    for (let i = 0; i < 20 && ops()[0]!.status === 'running'; i++) await settle();
+    expect(ops()[0]).toMatchObject({ status: 'failed', outcome: said });
+    // Said once: the start after that has nothing to say of it.
+    expect(restart().images.baseBuildNow()).toEqual({ running: false, candidate: true });
+    after.stop();
+    // Cut off after the default's tag moved: the default names the candidate, and it is said so.
+    w.svc.images.startBaseBuild({ version: '2026.9.8', candidate: false, forOwner: OWNER, makeDefault });
+    const moved = restart({ 'hatchabot-runtime:2026.9.8': 'sha256:new', [BASE]: 'sha256:new' });
+    for (let i = 0; i < 20 && ops()[0]!.status === 'running'; i++) await settle();
+    expect(ops()[0]).toMatchObject({ status: 'succeeded', outcome: `The default base image build for OpenClaw 2026.9.8 was cut off by a restart, but ${BASE} names hatchabot-runtime:2026.9.8 now, so it is the fleet default.` });
+    expect(moved.images.baseBuildNow()).toMatchObject({ running: false, ok: true, error: undefined });
+    moved.stop();
+    // Docker cannot say: said as cut off, as it may be.
+    w.svc.images.startBaseBuild({ version: '2026.9.8', candidate: false, forOwner: OWNER, makeDefault });
+    const blind = restart();
+    for (let i = 0; i < 20 && ops()[0]!.status === 'running'; i++) await settle();
+    expect(ops()[0]).toMatchObject({ status: 'failed', outcome: said });
+    blind.stop();
+    // A default build that ends is recorded as it ended; a candidate is not recorded at all.
+    w.svc.images.startBaseBuild({ version: '2026.9.8', candidate: false, forOwner: OWNER, makeDefault });
+    w.base.at(-1)!.finish({ ok: true });
+    for (let i = 0; i < 20 && w.svc.images.baseBuildNow().running; i++) await settle();
+    expect(ops()[0]).toMatchObject({ status: 'succeeded', outcome: 'Built hatchabot-runtime:2026.9.8; it is the fleet default now.' });
+    w.svc.images.startBaseBuild({ version: '2026.9.8', candidate: false, forOwner: OWNER, makeDefault });
+    w.base.at(-1)!.finish({ ok: false, error: 'made-up failure' });
+    for (let i = 0; i < 20 && w.svc.images.baseBuildNow().running; i++) await settle();
+    expect(ops()[0]).toMatchObject({ status: 'failed', outcome: 'made-up failure' });
+    w.svc.images.startBaseBuild({ version: '2026.9.8', candidate: true, forOwner: OWNER, makeDefault });
+    w.base.at(-1)!.finish({ ok: true });
+    for (let i = 0; i < 20 && w.svc.images.baseBuildNow().running; i++) await settle();
+    expect(ops()).toHaveLength(5);
     w.svc.stop();
   });
 

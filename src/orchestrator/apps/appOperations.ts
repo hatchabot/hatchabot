@@ -12,7 +12,7 @@
  */
 import type { AgentApp, Store } from '../../store/store.js';
 import {
-  appJobs, appPaths, appTaskNames, clearStaging, currentSha, MANIFEST_FILE, pointBack, releaseManifest, removeTasks, sq, stagingDir, syncTasks, taskTransitionPending,
+  appJobs, appPaths, appTaskNames, clearStaging, currentSha, MANIFEST_FILE, pointBack, releaseManifest, releaseManifestState, removeTasks, settledAppJobs, sq, stagingDir, syncTasks, taskTransitionPending,
   type AppManifest, type InstallDeps,
 } from './apps.js';
 import { handleFor, stepReached, type OpHandle, type Recovery } from '../lifecycle/operations.js';
@@ -148,17 +148,23 @@ async function tasksBackAgain(deps: AppOpDeps, op: OpHandle, p: AppOpParams): Pr
     return;
   }
   // What of the new app may be left: its tasks on, its task change left part
-  // way, or (its manifest gone or unreadable once it switched: they go on only
-  // after the switch) tasks that cannot be named. Each is held with the two
+  // way, or (its manifest unreadable once it switched: they go on only after
+  // the switch) tasks that cannot be named. Each is held with the two
   // choices: going back takes them off from the task journal and the task
-  // ids recorded, without the manifest. Only a read that failed just then
-  // (the agent out of reach) is "try again".
+  // ids recorded, without the manifest. A release folder that is gone for
+  // good names its tasks by the task record kept beside it (written once
+  // they are on), and holds only when one of them is on (HB-1199). Only a
+  // read that failed just then (the agent out of reach) is "try again".
   let left: 'tasks' | 'change' | 'unnamed' | undefined;
   try {
-    const m = await releaseManifest(d, `${appPaths(p.app).releases}/${to}`);
+    const found = await releaseManifestState(d, `${appPaths(p.app).releases}/${to}`);
+    const m = 'manifest' in found ? found.manifest : undefined;
     if (m && (await appJobs(d, appTaskNames(m))).length) left = 'tasks';
     else if (await taskTransitionPending(d, p.app)) left = 'change';
-    else if (!m && stepReached(row.kind, row.step, 'switched')) left = 'unnamed';
+    else if (!m && stepReached(row.kind, row.step, 'switched')) {
+      if (!('gone' in found)) left = 'unnamed';
+      else if ((await settledAppJobs(d, p.app)).length) left = 'tasks';
+    }
   } catch (err) {
     throw new AppRecoverError(`Whether ${p.app}'s own scheduled tasks are off could not be checked (${String((err as Error)?.message ?? err).slice(0, 200)}). It is still waiting; try again in a moment.`);
   }

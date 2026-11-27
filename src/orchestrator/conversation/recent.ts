@@ -350,7 +350,10 @@ export function mergeRecent(
   for (const [key, r] of Object.entries(read)) {
     const at = atOf(sessions?.[key]) || now;
     const text = cleanPreview(r.text);
-    if (!text && !r.task) continue;
+    // A line that cleans to nothing (only markup, or only the web-app
+    // marker) is nothing to show, remembered as such: left out, it was
+    // read again every poll (HB-1360).
+    if (!text && !r.task) { lines[key] = { at, role: r.role, text: '' }; continue; }
     lines[key] = { at, role: r.role, text, ...(r.senderId ? { senderId: r.senderId } : {}), ...(r.senderName ? { senderName: cleanPreview(r.senderName, 40) } : {}), ...(r.task ? { task: cleanPreview(r.task, 60) } : {}) };
   }
   const kept = Object.entries(lines).sort(([ka, a], [kb, b]) => newestFirst({ key: ka, at: a.at }, { key: kb, at: b.at })).slice(0, KEEP_SESSIONS);

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { scriptEnv } from './helpers/scriptEnv.js';
@@ -124,6 +124,66 @@ echo "npm $* done" >> '${join(i.app, '..', 'calls.log')}'
     expect(i.calls()).toEqual(['npm ci --no-audit --no-fund begun', 'npm ci --no-audit --no-fund done', 'driver-check']);
     expect(readFileSync(i.lockStamp, 'utf8').trim()).toBe(i.sum);
     expect(readdirSync(join(i.app, '..', 'home', '.local', 'state', 'hatchabot'))).toEqual([]); // the lock let go
+  });
+
+  // HB-1377: the lock is the folder's, its physical path; one with no holder for a minute is a leftover.
+  const lockOf = (app: string) => {
+    const sum = spawnSync('bash', ['-c', 'printf %s "$1" | cksum | cut -d" " -f1', '_', realpathSync(app)], { encoding: 'utf8' }).stdout.trim();
+    return join(app, '..', 'home', '.local', 'state', 'hatchabot', `deps-${sum}.lock.d`);
+  };
+  const fastRun = (app: string, script: string) => {
+    const fast = join(app, '..', 'fast'); mkdirSync(fast, { recursive: true });
+    writeFileSync(join(fast, 'sleep'), '#!/bin/bash\n[ "$1" = 1 ] && exit 0\nexec /bin/sleep "$@"\n', { mode: 0o755 });
+    return spawnSync('bash', [script], { encoding: 'utf8', env: scriptEnv(join(app, '..', 'home'), `${fast}:${join(app, '..', 'bin')}:/usr/bin:/bin`, { HATCHABOT_DEPS_WAIT_SECS: '3' }) });
+  };
+  it('a run through a link to the folder waits for the install holding it by the folder\'s own path (HB-1377)', () => {
+    const i = install();
+    const lock = lockOf(i.app);
+    const start = spawnSync('ps', ['-o', 'lstart=', '-p', String(process.pid)], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', LC_ALL: 'C', TZ: 'UTC0' } }).stdout.trim().replace(/\s+/g, ' ');
+    expect(start).not.toBe('');
+    mkdirSync(lock, { recursive: true }); writeFileSync(join(lock, 'owner'), `${process.pid} ${start}\n`);
+    const link = join(i.app, '..', 'linked'); symlinkSync(i.app, link);
+    for (const via of [i.app, link]) {
+      const r = fastRun(i.app, join(via, 'scripts', 'ensure-deps.sh'));
+      expect(r.stdout, via).toContain('Waiting for another install of the dependencies');
+      expect(r.status, r.stdout + r.stderr).toBe(1);
+    }
+    expect(i.calls()).toEqual([]);
+  });
+  it('through a link, the lock a release before 2.193.0 takes by the path as given is waited on too, and both let go after (review of HB-1377)', () => {
+    const i = install();
+    const link = join(i.app, '..', 'linked'); symlinkSync(i.app, link);
+    const sum = spawnSync('bash', ['-c', 'printf %s "$1" | cksum | cut -d" " -f1', '_', link], { encoding: 'utf8' }).stdout.trim();
+    const given = join(i.app, '..', 'home', '.local', 'state', 'hatchabot', `deps-${sum}.lock.d`);
+    expect(given).not.toBe(lockOf(i.app));
+    // An older release's ensure-deps.sh, alive, holding the lock it keys on the link's path.
+    const start = spawnSync('ps', ['-o', 'lstart=', '-p', String(process.pid)], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', LC_ALL: 'C', TZ: 'UTC0' } }).stdout.trim().replace(/\s+/g, ' ');
+    expect(start).not.toBe('');
+    mkdirSync(given, { recursive: true }); writeFileSync(join(given, 'owner'), `${process.pid} ${start}\n`);
+    const r = fastRun(i.app, join(link, 'scripts', 'ensure-deps.sh'));
+    expect(r.stdout).toContain('Waiting for another install of the dependencies');
+    expect(r.status, r.stdout + r.stderr).toBe(1);
+    expect(i.calls()).toEqual([]);
+    expect(existsSync(lockOf(i.app))).toBe(false); // the one it held while it waited, let go
+    // Gone: both taken, the install made, and both let go.
+    rmSync(given, { recursive: true });
+    const done = fastRun(i.app, join(link, 'scripts', 'ensure-deps.sh'));
+    expect(done.status, done.stdout + done.stderr).toBe(0);
+    expect(done.stdout).not.toContain('Waiting for another install');
+    expect(i.calls()).toContain('driver-check'); // past the lock, to its work
+    expect(readdirSync(join(i.app, '..', 'home', '.local', 'state', 'hatchabot'))).toEqual([]);
+  });
+  it('a lock with no holder written: waited on while it is new, taken over once it is a minute old, not ten (HB-1377)', () => {
+    const i = install();
+    const lock = lockOf(i.app);
+    mkdirSync(lock, { recursive: true });
+    const fresh = fastRun(i.app, join(i.app, 'scripts', 'ensure-deps.sh'));
+    expect(fresh.status, fresh.stdout + fresh.stderr).toBe(1); // a run that has only just made it
+    const old = new Date(Date.now() - 120_000); utimesSync(lock, old, old);
+    const r = fastRun(i.app, join(i.app, 'scripts', 'ensure-deps.sh'));
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).not.toContain('Waiting for another install');
+    expect(existsSync(lock)).toBe(false);
   });
 
   it('a lock left by a run that is gone is taken over', () => {

@@ -47,6 +47,8 @@ const PEER_USER = 'test/peerUser.test.ts';
 /** A guest console's door (HB-0645): ConsoleAccess.admitGuest, and the upgrade handler that calls it. */
 const GUEST_DOOR = 'test/guestAdmission.test.ts';
 const CONSOLE_GUESTS = 'test/consoleGuests.test.ts';
+/** A door held for one person: the @handle an invite or a Reopen is for (HB-1439 review). */
+const HANDLES = 'test/accessPromises.test.ts';
 
 /**
  * name, file, the guard's exact text, what replaces it, the tests that must then fail,
@@ -300,6 +302,13 @@ const MUTANTS = [
   ['smaller: counted guesses are never refused', 'src/api/chat/memberRoutes.ts', "    if (guard?.throttled(req, undefined, 'link')) return reply.code(429).send({ valid: false, reason: 'Too many attempts — try again later.' });\n", "", [SMALLER], undefined, 'invitation code'],
   ['smaller: a used link counts as a guess', 'src/api/chat/memberRoutes.ts', "      if (check.reason === 'unknown') guard?.noteFailure(req, undefined, 'link');", "      guard?.noteFailure(req, undefined, 'link');", [SMALLER], undefined, 'invitation code'],
   ['smaller: invitation guesses lock the password form', 'src/api/chat/memberRoutes.ts', "      if (check.reason === 'unknown') guard?.noteFailure(req, undefined, 'link');", "      if (check.reason === 'unknown') guard?.noteFailure(req);", [SMALLER], undefined, 'invitation code'],
+  // A handle typed that is no handle is refused, never kept as none: none is anyone (HB-1439 review).
+  ['handles: a Reopen handle that is none is dropped, and the door opens to anyone', 'src/api/chat/memberRoutes.ts', "      if (handle === undefined) return reply.code(400).send({ error: NOT_A_HANDLE });\n", "", [HANDLES], undefined, 'cannot use'],
+  ['handles: an invite for a handle that is none is anyone\'s', 'src/api/chat/memberRoutes.ts', "    if (forHandle === undefined) return reply.code(400).send({ error: NOT_A_HANDLE });\n", "", [HANDLES], undefined, 'names nobody is a 400'],
+  ['handles: a name over 64 is taken', 'src/api/chat/memberRoutes.ts', "  return name && name.length <= HANDLE_MAX ? name : undefined;", "  return name ? name : undefined;", [HANDLES], undefined, 'cannot use|names nobody is a 400'],
+  ['handles: one kept that names nobody is read as none', 'src/store/store.ts', "  return normalizeHandle(v) ?? NAMES_NOBODY;", "  return normalizeHandle(v);", [HANDLES], undefined, 'older release'],
+  ['handles: an invite made for a bare link can be used, and leads nowhere', 'src/orchestrator/members/invite.ts', "  if (!invite.webChat && invite.expectHandle === NAMES_NOBODY) return { valid: false, reason: 'names-nobody' };\n", "", [HANDLES], undefined, 'older release kept as typed'],
+  ['handles: Reopen opens to anyone for an invite that named nobody', 'src/orchestrator/members/roster.ts', "    if (namedNobody && !expect) {", "    if (false) {", [HANDLES], undefined, 'older release kept as typed'],
   ['smaller: factors are listed before the second factor is given', 'src/api/signIn/secondFactor.ts', "    const shown = api.secondFactorGiven(req);", "    const shown = true;", [SMALLER], undefined, 'before the second factor'],
   ['smaller: "given" is true for any public pass', 'src/api/publicAccess.ts', "    return !!pass && !!ownerId && factorAt(req, pass, ownerId) > 0;", "    return !!pass;", [SMALLER], undefined, 'before the second factor'],
   ['smaller: an owner\'s passkey answer need not verify its user', 'src/api/signIn/secondFactor.ts', "            { challenge, origins: api.origins(), rpId, requireUserVerification: uvFor(ownerId) === 'required' },", "            { challenge, origins: api.origins(), rpId },", [SMALLER], undefined, 'passkey'],

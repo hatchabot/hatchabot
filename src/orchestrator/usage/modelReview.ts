@@ -70,32 +70,58 @@ export async function syncModelReviewCron(
     return 'removed';
   }
   const hash = reviewMessageHash();
-  // A task made by an earlier release: renamed and reworded IN PLACE (a patch —
-  // its schedule, delivery and on/off stay as they are; never a second task).
-  // One the owner deleted by hand stays deleted, and is not argued with.
-  const update = async (jobId: string): Promise<boolean | 'gone'> => {
-    const res = await provider.exec(runtimeRef, ['cron', 'edit', jobId, '--name', MODEL_REVIEW_NAME, '--message', OPS_MODEL_REVIEW_MESSAGE]).catch(() => undefined);
+  // A task made by an earlier release: reworded IN PLACE (a patch — its
+  // schedule, delivery and on/off stay as they are; never a second task), and
+  // renamed only from the name before v2.120: a name the owner gave it by
+  // hand is theirs, and stays (review of HB-1317). One the owner deleted by
+  // hand stays deleted, and is not argued with.
+  const update = async (jobId: string, fromLegacyName: boolean): Promise<boolean | 'gone'> => {
+    const res = await provider.exec(runtimeRef, ['cron', 'edit', jobId, ...(fromLegacyName ? ['--name', MODEL_REVIEW_NAME] : []), '--message', OPS_MODEL_REVIEW_MESSAGE]).catch(() => undefined);
     if (!res) return false;
     if (res.code === 0) return true;
     return /not found|unknown|no such|does not exist/i.test(`${res.stderr}${res.stdout}`) ? 'gone' : false;
   };
-  if (mine) {
+  // A record that a restore marked (recorded after the copy the volume is
+  // now) is not taken at its word: the task is looked for below (HB-1317).
+  if (mine && !mine.afterCopy) {
     if (current && current.messageHash === hash) return 'kept';
-    if (!mine.jobId) { remember(undefined, mine.at, hash); return 'kept'; }
-    const r = await update(mine.jobId);
-    if (r === false) return 'failed';
-    remember(mine.jobId, mine.at, hash);
-    if (r === true) deps.log?.('schedule.model_review_updated', { agentId: agent.id });
-    return r === true ? 'updated' : 'kept';
+    if (mine.jobId) {
+      // Recorded under the old name: renamed only while the task still has
+      // it, as the list says; one renamed by hand keeps the name it was
+      // given (review of HB-1317). One more call, once: the record then
+      // moves to the new name.
+      let rename = false;
+      if (legacy) {
+        const jobs = await listCrons(provider, runtimeRef, agent.slug).catch(() => undefined);
+        if (!jobs) return 'failed';
+        rename = jobs.find((j) => j.id === mine.jobId)?.name === LEGACY_REVIEW_NAME;
+      }
+      const r = await update(mine.jobId, rename);
+      if (r === false) return 'failed';
+      remember(mine.jobId, mine.at, hash);
+      if (r === true) deps.log?.('schedule.model_review_updated', { agentId: agent.id });
+      return r === true ? 'updated' : 'kept';
+    }
+    // No id to edit it by. Outside a restore it is not looked for: a task the
+    // owner made under the same name is not reworded as Hatchabot's (review
+    // of HB-1317). One a restore marked (its wording mark taken off: the
+    // copy's may be older) is found by its name below, and written again.
+    if (mine.messageHash) { remember(undefined, mine.at, hash); return 'kept'; }
   }
   const jobs = await listCrons(provider, runtimeRef, agent.slug).catch(() => undefined);
   if (!jobs) return 'failed';
-  const there = jobs.find((j) => j.name === MODEL_REVIEW_NAME) ?? jobs.find((j) => j.name === LEGACY_REVIEW_NAME);
+  // By its id first: one a restored copy holds under a name given by hand
+  // got a second one when it was looked for by its name alone (HB-1317).
+  const there = (mine?.jobId ? jobs.find((j) => j.id === mine.jobId) : undefined)
+    ?? jobs.find((j) => j.name === MODEL_REVIEW_NAME) ?? jobs.find((j) => j.name === LEGACY_REVIEW_NAME);
   if (there) {
-    const r = await update(there.id);
-    remember(there.id, now, r === false ? undefined : hash);
+    const r = await update(there.id, there.name === LEGACY_REVIEW_NAME);
+    remember(there.id, mine?.at ?? now, r === false ? undefined : hash);
     return 'present';
   }
+  // Recorded before the copy, with no id, and not there by its name: the
+  // owner deleted it, or renamed it, by hand, and is not argued with.
+  if (mine && !mine.afterCopy) { remember(undefined, mine.at, hash); return 'kept'; }
   const out = await addCron(provider, runtimeRef, agent.slug, {
     name: MODEL_REVIEW_NAME,
     message: OPS_MODEL_REVIEW_MESSAGE,

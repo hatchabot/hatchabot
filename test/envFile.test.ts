@@ -28,6 +28,24 @@ describe('the settings catalog', () => {
   });
 });
 
+describe('putting a .env saved with Windows line endings in order (HB-1530)', () => {
+  const key = ['k', 'e', 'y'].join('') + '-5678';   // a made-up value, never a real one
+  it('its lines are kept as written, under Other settings, and every value systemd reads stays the same', () => {
+    const before = `HATCHABOT_SECRET_KEY=${key}\r\nPORT=9137\r\nHATCHABOT_AUTH=accounts\r\n`;
+    const r = syncEnvText(before);
+    expect(r.ok && r.changed).toBe(true);
+    const text = (r as { text: string }).text;
+    expect([...activeValues(text)]).toEqual([['HATCHABOT_SECRET_KEY', key], ['PORT', '9137'], ['HATCHABOT_AUTH', 'accounts']]);
+    // Not written again in its group: a shell (the Mac's service) reads the \r as part of the value.
+    expect(text).toContain('\n# PORT=8080\n');
+    expect(text.split('\n').filter((l) => l.endsWith('\r'))).toEqual([`HATCHABOT_SECRET_KEY=${key}\r`, 'PORT=9137\r', 'HATCHABOT_AUTH=accounts\r']);
+  });
+  it('a setting on such a line before one on a plain line is left as it was: the tidy would move it after, and systemd would read it in force', () => {
+    // systemd takes PORT=1, the last; moved under Other settings, PORT=2 came last, and the service changed port.
+    expect(syncEnvText('PORT=2\r\nPORT=1\n')).toEqual({ ok: false, error: 'would change PORT — left as it was' });
+  });
+});
+
 describe('putting a .env in order', () => {
   const key = ['k', 'e', 'y'].join('') + '-1234';   // a made-up value, never a real one
   const before = [

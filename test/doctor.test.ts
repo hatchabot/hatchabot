@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { backupFacts, browserFacts, checkoutFacts, doctorReport, envMap, metaVersion, probeControlPlane, releaseBehind, serviceBackupMark, type DoctorFacts } from '../src/doctor.js';
+import { backupFacts, browserFacts, checkoutFacts, doctorReport, envMap, metaVersion, probeControlPlane, registryVolumes, releaseBehind, serviceBackupMark, type DoctorFacts } from '../src/doctor.js';
 import { ownerMark } from '../src/orchestrator/backups/backupFiles.js';
 import { scriptEnv } from './helpers/scriptEnv.js';
+import Database from 'better-sqlite3';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:https';
@@ -265,11 +266,15 @@ describe('another program answering where the control plane should is not taken 
       page = '<html><head><meta name="hatchabot-version" content="9.9.9"><!-- HATCHABOT_VERSION="9.9.9" --></head></html>';
       expect(await probeControlPlane(url)).toEqual({ url, ok: true, version: '9.9.9' });
     } finally { server.closeAllConnections(); server.close(); }
-    // Nothing there at all is still "not answering".
-    const gone = await probeControlPlane(url);
-    expect(gone).toMatchObject({ url, ok: false });
+    // Nothing there at all is still "not answering". Port 1, where nothing listens and which the
+    // kernel never hands out: the closed server's port was anyone's again, and another test's
+    // listen(0) could be given it and answer (HB-1495). Not port 0: the probe's http.request asks
+    // port 80 for it.
+    const nowhere = 'http://127.0.0.1:1';
+    const gone = await probeControlPlane(nowhere);
+    expect(gone).toMatchObject({ url: nowhere, ok: false });
     expect(gone.other).toBeUndefined();
-    expect(doctorReport({ ...healthy, controlPlane: gone }).some((l) => l.text.startsWith(`Control plane not answering at ${url}`))).toBe(true);
+    expect(doctorReport({ ...healthy, controlPlane: gone }).some((l) => l.text.startsWith(`Control plane not answering at ${nowhere}`))).toBe(true);
   });
 
   it('a hostile page is read in time: the meta tag looked for tag by tag, in its head (review of HB-1111)', async () => {
@@ -421,6 +426,35 @@ describe('doctor reads a backup set\'s age as the app does (HB-0386)', () => {
       writeFileSync(join(dir, '2026-11-21', 'backup-status.json'), JSON.stringify({ state: 'complete', keptUnlisted: {} }));
       expect(backupFacts(dir, now, undefined).keptUnlisted).toBeUndefined();
       expect(doctorReport({ ...healthy, backups: backupFacts(dir, now, undefined) }).some((l) => /no agent here has had/.test(l.text))).toBe(false);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('a set kept for volumes a database restored since names is not listed, before the next nightly run writes a new record (HB-1433)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hb-doctor-named-'));
+    try {
+      const bdir = join(dir, 'backups'); mkdirSync(bdir);
+      for (const d of ['2026-11-20', '2026-10-01', '2026-10-02']) { mkdirSync(join(bdir, d)); writeFileSync(join(bdir, d, 'hatchabot.sqlite'), ''); }
+      writeFileSync(join(bdir, '2026-10-01', 'hatchabot-kitchen-1-vol.tgz'), Buffer.alloc(1));
+      writeFileSync(join(bdir, '2026-10-02', 'hatchabot-garden-2-vol.tgz'), Buffer.alloc(1));
+      writeFileSync(join(bdir, '2026-11-20', 'backup-status.json'), JSON.stringify({
+        state: 'complete', keptUnlisted: { '2026-10-01': ['hatchabot-kitchen-1-vol'], '2026-10-02': ['hatchabot-garden-2-vol', 'hatchabot-notes-3-vol', 'agentclaw-vol-0a1b2c3d4e5f'] },
+      }));
+      // The database restored by hand since: it names the kitchen agent's volume, the notes one's (deleted there) and a legacy ref's.
+      const dbPath = join(dir, 'hatchabot.sqlite');
+      const db = new Database(dbPath);
+      db.exec("CREATE TABLE agents (id TEXT PRIMARY KEY, runtime_ref TEXT, state TEXT)");
+      const add = db.prepare('INSERT INTO agents VALUES (?, ?, ?)');
+      add.run('a1', 'docker://hatchabot-kitchen-1', 'RUNNING'); add.run('a2', 'docker://hatchabot-notes-3', 'DELETED');
+      add.run('a3', 'docker://0a1b2c3d4e5f0000', 'STOPPED'); add.run('a4', null, 'PROVISIONING');
+      db.close();
+      const named = await registryVolumes(dbPath, 'hatchabot');
+      expect([...named!].sort()).toEqual(['agentclaw-vol-0a1b2c3d4e5f', 'hatchabot-kitchen-1-vol', 'hatchabot-notes-3-vol']);
+      const now = new Date(2026, 10, 20, 12, 0).getTime();
+      // The kitchen set is not listed; the garden one is, for its one volume still unnamed.
+      expect(backupFacts(bdir, now, undefined, named).keptUnlisted).toEqual([{ set: '2026-10-02', volumes: ['hatchabot-garden-2-vol'], bytes: 1 }]);
+      // No database to read: the record as it is, as before.
+      expect(await registryVolumes(join(dir, 'none.sqlite'), 'hatchabot')).toBeUndefined();
+      expect(backupFacts(bdir, now, undefined, undefined).keptUnlisted?.map((k) => k.set)).toEqual(['2026-10-02', '2026-10-01']);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 

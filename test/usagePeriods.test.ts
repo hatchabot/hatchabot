@@ -164,6 +164,100 @@ describe('computeUsagePeriod', () => {
     expect(after.cost).toEqual(before.cost);
   });
 
+  it('a deleted source\'s tombstone stays while a reading, a change, a practice run or an agent running it names it, then goes (HB-1179)', () => {
+    const store = world();
+    // The tombstone's time is the clock's, so these cutoffs are too.
+    const later = (days: number) => new Date(Date.now() + days * 24 * H).toISOString();
+    store.setAgentAIProfile('kitchen', 'api');
+    // The attic was built on the plan and not rebuilt since its switch: its container still runs it.
+    store.setAgentApplied('attic', 'sub', 'claude-sonnet-5', iso(24 * H));
+    store.setAgentAIProfile('attic', 'api');
+    store.deleteAIProfile('sub');
+    const kept = () => store.formerAIProfile('sub')?.name;
+    // Kept at least as long as the readings, whatever names it.
+    store.pruneSourceUsage(iso(0));
+    expect(kept()).toBe('Max');
+    // Its readings all older than the cutoff: the agent running it holds it.
+    store.pruneSourceUsage(later(1));
+    expect(kept()).toBe('Max');
+    // Rebuilt onto the key: the change of source from the plan holds it, and so do a reading and a practice run on it.
+    store.setAgentApplied('attic', 'api', 'claude-opus-4-8', later(2));
+    store.addTokenSample('kitchen', 'sub', later(2), 300);
+    store.addPracticeUsage([{ agentId: 'kitchen', run: 'run-1', model: 'claude-sonnet-5', profileId: 'sub', at: later(2), day: later(2).slice(0, 10), skill: 'recipes', status: 'ok', calls: 1, input: 10, output: 10, cacheRead: 0, cacheWrite: 0, usd: 0, unpricedTokens: 0 }]);
+    store.pruneSourceUsage(later(1));
+    expect(kept()).toBe('Max');
+    store.pruneSourceUsage(later(3), later(1)); // the reading goes; the change is kept longer
+    expect(kept()).toBe('Max');
+    store.pruneSourceUsage(later(3)); // the change goes; the practice run is kept with the cost days
+    expect(kept()).toBe('Max');
+    store.pruneCostDays(later(4).slice(0, 10));
+    store.pruneSourceUsage(later(3));
+    expect(kept()).toBeUndefined();
+    // Another deleted source of the account's, nothing naming it, younger than the cutoff: kept until the next prune past it.
+    store.insertAIProfile({ id: 'spare', ownerId: OWNER, name: 'Spare key', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/spare', createdAt: 'now' });
+    store.deleteAIProfile('spare');
+    store.pruneSourceUsage(iso(0));
+    expect(store.formerAIProfile('spare')?.name).toBe('Spare key');
+    store.pruneSourceUsage(later(1));
+    expect(store.formerAIProfile('spare')).toBeUndefined();
+  });
+
+  it('removing an account takes the tombstones of the sources it deleted, not another account\'s (HB-1179)', () => {
+    const store = world();
+    store.insertAIProfile({ id: 'theirs', ownerId: 'user-other', name: 'Their key', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/theirs', createdAt: 'now' });
+    store.setAgentAIProfile('kitchen', 'api');
+    store.setAgentAIProfile('attic', 'api');
+    store.deleteAIProfile('sub');
+    store.deleteAIProfile('theirs');
+    // Its readings gone (the tombstones younger than the cutoff stay).
+    store.pruneSourceUsage(iso(-H));
+    expect(store.formerAIProfile('sub')?.name).toBe('Max');
+    store.deleteLocalAccount(OWNER);
+    expect(store.formerAIProfile('sub')).toBeUndefined();
+    expect(store.formerAIProfile('theirs')?.name).toBe('Their key');
+  });
+
+  it('a removed account\'s own deleted agents\' readings and practice runs keep none of its tombstones (review of HB-1179)', () => {
+    const store = world();
+    const tombstone = (id: string) => (store as unknown as { db: Database.Database }).db
+      .prepare('SELECT owner_id FROM ai_profile_tombstones WHERE id = ?').get(id) as { owner_id: string | null } | undefined;
+    // The usual departure: its agents deleted first (their readings and practice runs stay, for the daily cost), then its sources, then the account.
+    store.addPracticeUsage([{ agentId: 'kitchen', run: 'run-1', model: 'claude-sonnet-5', profileId: 'sub', at: iso(H), day: iso(H).slice(0, 10), skill: 'recipes', status: 'ok', calls: 1, input: 10, output: 10, cacheRead: 0, cacheWrite: 0, usd: 0, unpricedTokens: 0 }]);
+    for (const a of ['den', 'kitchen', 'attic']) { store.setAgentState(a, 'DELETING'); store.setAgentState(a, 'DELETED'); store.scrubAgentResidue(a); }
+    store.deleteAIProfile('sub');
+    store.deleteAIProfile('api');
+    expect(tombstone('sub')).toEqual({ owner_id: OWNER });
+    store.deleteLocalAccount(OWNER);
+    expect(tombstone('sub')).toBeUndefined();
+    expect(tombstone('api')).toBeUndefined();
+    // Their readings stay, for the daily cost.
+    expect(store.latestTokenTotal('kitchen')).toBe(250);
+  });
+
+  it('a removed account\'s shared plan that another account\'s usage still names is kept, billed as a plan there, and goes with that usage (HB-1179 review)', () => {
+    const store = world();
+    const tombstoneOwner = (id: string) => ((store as unknown as { db: Database.Database }).db
+      .prepare('SELECT owner_id FROM ai_profile_tombstones WHERE id = ?').get(id) as { owner_id: string | null } | undefined)?.owner_id;
+    // Another account's agent ran on this account's shared plan, then moved to its own key.
+    const B = 'user-b';
+    store.insertAIProfile({ id: 'bkey', ownerId: B, name: 'B key', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/bkey', createdAt: 'now' });
+    store.insertAgent({ id: 'bee', ownerId: B, name: 'Bee', slug: 'bee', state: 'RUNNING', aiProfileId: 'bkey', hostId: 'h1', runtimeRef: 'mock://bee', persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' } as never);
+    store.addTokenSample('bee', 'sub', iso(-90 * MIN), 1_000);
+    store.addTokenSample('bee', 'sub', iso(-110 * MIN), 201_000);
+    store.setAgentAIProfile('kitchen', 'api');
+    store.setAgentAIProfile('attic', 'api');
+    store.deleteAIProfile('sub');
+    store.pruneSourceUsage(iso(-H)); // this account's own readings go; the other's, later, stay
+    store.deleteLocalAccount(OWNER);
+    expect(store.formerAIProfile('sub')?.name).toBe('Max');
+    expect(tombstoneOwner('sub')).toBeNull();
+    const v = computeUsagePeriod(store, B, 'hour', NOW + 2 * H);
+    expect(v.byBilling).toEqual({ included: 200_000, api: 0, local: 0 });
+    // Once that usage is gone, so is the tombstone.
+    store.pruneSourceUsage(new Date(Date.now() + 24 * H).toISOString());
+    expect(store.formerAIProfile('sub')).toBeUndefined();
+  });
+
   it('a few hours back: 6 hours in 15-minute bars counts the last hours, not the morning (2026-09-28)', () => {
     const v = computeUsagePeriod(world(), OWNER, '6h', NOW);
     expect(v.bucketMinutes).toBe(15);

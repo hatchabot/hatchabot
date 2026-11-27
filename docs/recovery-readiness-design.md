@@ -13,6 +13,10 @@ drill `scripts/restore-drill.sh` runs. There is no second backup engine.
   archive was written whole (a local `tar` that exited 0 or 1 and was renamed
   from `.part`; a runner's archive that passed `gzip -t`). A set from before
   this field is read as before: an archive that is there and not failed.
+  And **`replacing`**: the volumes left out on purpose because a restore, an
+  import, a move or another change was replacing their files (the next
+  backup takes them). They stay in `failedVolumes` too, so a reader from
+  before the list reads the set as before; a record without it has none.
 - **The drill** used to restore only the largest volume, into a container
   with the network on, no limits, and **the whole set mounted** (the database
   copy and `secret-key.env` included). Now each volume is checked and the
@@ -70,7 +74,9 @@ function of the sets, the drill records, the agents and the runners' answers.
   counts.
 - **Left out**: of the last 7 finished sets made after the agent was, how
   many do not hold it usably, and why: its machine was asleep (`skipped`),
-  its archive failed, its volume was missing, or the record does not say.
+  its files were being replaced (`replacing`: "its files were being replaced
+  (a restore, an import or a move): the next backup takes it"), its archive
+  failed, its volume was missing, or the record does not say.
 - **Its runner**: whether it answers now (the provider's cached probe, as
   the machine line uses).
 - **Last drill covering it**: the newest record that checked its volume:

@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import type { Agent, ChannelKind } from '../../domain/types.js';
 import { VOLUME_GONE, type RuntimeProvider } from '../../providers/provider.js';
@@ -5,7 +6,92 @@ import type { Store } from '../../store/store.js';
 import { ACCOUNT_SHAPE, ID_SHAPE } from '../channels/channelIds.js';
 import { approvePairing, listPairingRequests, PAIRING_DB, PAIRING_DB_JS, pairingStorePath } from './claim.js';
 import { CHANNEL_ACCOUNT } from '../../openclaw/configWriter.js';
+import { keyedLock, type KeyedLock } from '../../util/queues.js';
 import { beginDmPolicyAssertion, dmPolicyAsserted, forgetDmPolicy, rememberDmPolicy } from '../channels/dmPolicyMemo.js';
+
+/**
+ * Each agent's turns at its chat apps' access on its volume (HB-1554): the
+ * door (its DM policy and the config's allowFrom), a grant or a scrub of
+ * someone (the approval stores, the config's lists, the rooms' users), and
+ * the rest of each app's section of openclaw.json. Every one of these reads
+ * a file, changes it and writes it back whole, in a container of its own,
+ * so two of them at once on one agent could lose either's change: a door
+ * write that read the config before a removal's scrub and landed after it
+ * put the removed person back. One at a time per agent, in the order they
+ * were asked for; and a writer decides what to write in its turn, from the
+ * store as it is then, not as it was when it asked (writeDmPolicy).
+ *
+ * One lock per process, kept by its store: a test that starts a second
+ * process on the same agents (a restart) has a store of its own, and a
+ * write the first left hanging holds up nothing of the second's, as after
+ * a real restart. In memory (docs/architecture.md, "In-memory state,
+ * sorted"): what waits ends with the process, and nothing is owed for it.
+ */
+const channelConfigTurns = new WeakMap<object, KeyedLock>();
+
+/**
+ * The turns the code running now holds (channelConfigTurns), while each
+ * still runs. Not re-entrant: a turn that asked for its own agent's turn
+ * again would wait for itself, and every later write of that agent's chat
+ * apps behind it, until a restart. Refused instead (ChannelConfigTurnNested).
+ */
+const turnsHeld = new AsyncLocalStorage<ReadonlyArray<{ turns: KeyedLock; agentId: string; live: boolean }>>();
+
+/**
+ * How long each write of an owner's press waits for the agent's turn at its
+ * chat apps before it is refused (ChannelConfigBusyError): per write, so a
+ * press that writes each of several apps' doors, and looks again, can take a
+ * few times this.
+ */
+export const PRESS_WAIT_MS = 30_000;
+
+/** A press that waited `waitMs` for the agent's turn at its chat apps, refused: nothing of it was written. */
+export class ChannelConfigBusyError extends Error {
+  constructor(readonly userMessage: string) {
+    super(userMessage);
+    this.name = 'ChannelConfigBusyError';
+  }
+}
+
+/** A turn asked for inside the same agent's turn: a mistake in the code, refused rather than waiting for itself. */
+export class ChannelConfigTurnNested extends Error {
+  constructor(agentId: string) {
+    super(`A write of agent ${agentId}'s chat-app access asked for its turn inside its own turn: it would wait for itself (HB-1554).`);
+    this.name = 'ChannelConfigTurnNested';
+  }
+}
+
+/**
+ * `fn` in the agent's turn at its chat apps' access on its volume (see
+ * channelConfigTurns), once every earlier one has landed or failed. Not
+ * re-entrant: one asked for inside its own agent's turn is refused
+ * (ChannelConfigTurnNested), not left waiting for itself. `waitMs`: a
+ * press's longest wait (PRESS_WAIT_MS), then refused, with words
+ * (ChannelConfigBusyError), and `fn` never runs; with none it waits as long
+ * as the turns ahead take (each one's container is bounded by its timeout).
+ */
+export function inChannelConfigTurn<T>(store: Store, agentId: string, fn: () => Promise<T>, opts: { waitMs?: number } = {}): Promise<T> {
+  let turns = channelConfigTurns.get(store);
+  if (!turns) { turns = keyedLock({ refusal: () => new ChannelConfigBusyError('') }); channelConfigTurns.set(store, turns); }
+  const held = turnsHeld.getStore() ?? [];
+  if (held.some((h) => h.live && h.turns === turns && h.agentId === agentId)) {
+    // A mistake in the code, and most callers make any failure a write that
+    // did not take: said here, with where it was asked from, or nobody sees it.
+    const err = new ChannelConfigTurnNested(agentId);
+    console.error(`[chat-app turns] ${err.message}\n${err.stack ?? ''}`);
+    return Promise.reject(err);
+  }
+  const mine = { turns, agentId, live: true };
+  const inTurn = () => turnsHeld.run([...held, mine], async () => {
+    // Over once it settles: what it set off and left running is not in it.
+    try { return await fn(); } finally { mine.live = false; }
+  });
+  return turns.run(agentId, inTurn, opts.waitMs).catch((err: unknown) => {
+    if (!(err instanceof ChannelConfigBusyError) || err.userMessage) throw err;
+    const name = store.getAgent(agentId)?.name ?? 'this agent';
+    throw new ChannelConfigBusyError(`Another change to ${name}'s chat apps is still being written: try again in a minute.`);
+  });
+}
 
 // Agent-writable directories can already contain a staging file or symlink.
 // Create our own file exclusively, then publish only that file atomically.
@@ -111,10 +197,12 @@ export async function removeUnboundChannelAccess(
   id: string,
 ): Promise<boolean> {
   const kind = opts.kind ?? 'telegram';
-  const holder = kind === 'telegram'
-    ? deps.store.getActiveMembershipByChannelUser(opts.agentId, id)
-    : deps.store.getMemberByIdentity(opts.agentId, kind, id);
-  if (!holder) {
+  // Whose it is, and the scrub, in one turn: bound to somebody meanwhile, it is theirs to keep.
+  return inChannelConfigTurn(deps.store, opts.agentId, async () => {
+    const holder = kind === 'telegram'
+      ? deps.store.getActiveMembershipByChannelUser(opts.agentId, id)
+      : deps.store.getMemberByIdentity(opts.agentId, kind, id);
+    if (holder) return true;
     let removed = false;
     if (ID_SHAPE[kind].test(id) && ACCOUNT_SHAPE.test(opts.accountId)) {
       const script = allowlistScrubScript([{
@@ -126,8 +214,7 @@ export async function removeUnboundChannelAccess(
     }
     deps.log?.(removed ? 'member.unbound_approval_scrubbed' : 'member.unbound_approval_scrub_failed', { agentId: opts.agentId, kind });
     return removed;
-  }
-  return true;
+  });
 }
 
 async function refuseApprovedIdentity(deps: RevokeDeps, opts: AdmitOptions, id: string, message: string): Promise<never> {
@@ -476,8 +563,16 @@ export async function denyPairing(
  */
 export async function grantChannelAccess(
   deps: RevokeDeps,
-  opts: { agentId: string; runtimeRef: string; kind: ChannelKind; accountId: string; channelUserId: string },
-): Promise<void> {
+  opts: {
+    agentId: string; runtimeRef: string; kind: ChannelKind; accountId: string; channelUserId: string;
+    /**
+     * Whether they are still to be let in, asked in the grant's turn: false,
+     * nothing is written ('skipped'). A grant asked for while their removal
+     * scrubbed waited for it, and wrote them back after the flip (HB-1554).
+     */
+    onlyIf?: () => boolean;
+  },
+): Promise<'granted' | 'skipped'> {
   const log = deps.log ?? (() => {});
   if (!ID_SHAPE[opts.kind].test(opts.channelUserId) || !/^[A-Za-z0-9_]{1,64}$/.test(opts.accountId)) {
     throw new AdmitError('That chat id has an unexpected shape, so the allowlist was not touched.');
@@ -524,13 +619,21 @@ export async function grantChannelAccess(
       ${ROOM_USERS_ADD_JS}
       if (changed) writeAtomic(cfgPath, cfg);
     }'`;
-  forgetDmPolicy(opts.agentId); // the config's allowFrom is being written
-  const res = await deps.provider.execShellOnVolume(opts.runtimeRef, script);
+  const res = await inChannelConfigTurn(deps.store, opts.agentId, async () => {
+    if (opts.onlyIf && !opts.onlyIf()) return undefined;
+    forgetDmPolicy(opts.agentId); // the config's allowFrom is being written
+    return deps.provider.execShellOnVolume(opts.runtimeRef, script);
+  });
+  if (!res) {
+    log('member.grant_skipped', { agentId: opts.agentId, kind: opts.kind, what: 'door' });
+    return 'skipped';
+  }
   if (res.volumeMissing) throw new AdmitError(VOLUME_GONE);
   if (res.code !== 0) {
     throw new AdmitError('Adding them to the bot allowlist failed — try again in a moment.');
   }
   log('member.allowlist_granted', { agentId: opts.agentId, kind: opts.kind });
+  return 'granted';
 }
 
 /**
@@ -560,11 +663,23 @@ const ROOM_USERS_ADD_JS = `
  * Let somebody just admitted on Slack or Discord into the rooms too, live.
  * The DM door is OpenClaw's own approval (or grantChannelAccess); the rooms
  * are config only this writes. Best effort: a failure is logged, and the next
- * rebuild writes the rooms from the member list anyway.
+ * rebuild writes the rooms from the member list anyway. False: not added (the
+ * write failed, or `onlyIf` said no in its turn, logged as
+ * `member.grant_skipped`).
  */
 export async function grantRoomAccess(
   deps: RevokeDeps,
-  opts: { agentId: string; runtimeRef: string; kind: ChannelKind; channelUserId: string },
+  opts: {
+    agentId: string; runtimeRef: string; kind: ChannelKind; channelUserId: string;
+    /**
+     * Whether they are still to be let in, asked in the grant's turn: false,
+     * nothing is written. A grant asked for while their removal scrubbed
+     * waited for it, and put them back in the rooms after the flip (HB-1554).
+     * admitOtherChannel gives none: it grants before their row exists, and a
+     * grant it makes ends with a member listed or its approval taken back.
+     */
+    onlyIf?: () => boolean;
+  },
 ): Promise<boolean> {
   if (opts.kind === 'telegram' || !ID_SHAPE[opts.kind].test(opts.channelUserId)) return false;
   const t = { channel: opts.kind, id: opts.channelUserId };
@@ -579,7 +694,13 @@ export async function grantRoomAccess(
     ${ROOM_USERS_ADD_JS}
     if (changed) writeAtomic(cfgPath, cfg);
     console.log(changed ? "added" : "unchanged");'`;
-  const res = await deps.provider.execShellOnVolume(opts.runtimeRef, script).catch(() => ({ code: 1, stdout: '', stderr: '' }));
+  const res = await inChannelConfigTurn(deps.store, opts.agentId, async () => (
+    opts.onlyIf && !opts.onlyIf() ? undefined : deps.provider.execShellOnVolume(opts.runtimeRef, script)
+  )).catch(() => ({ code: 1, stdout: '', stderr: '' }));
+  if (!res) {
+    deps.log?.('member.grant_skipped', { agentId: opts.agentId, kind: opts.kind, what: 'rooms' });
+    return false;
+  }
   if (res.code !== 0) {
     deps.log?.('member.room_grant_failed', { agentId: opts.agentId, kind: opts.kind });
     return false;
@@ -617,8 +738,10 @@ export async function scrubChannelAllowlist(
       n += db.prepare("delete from channel_pairing_requests where channel_key = ? and lower(account_id) = lower(?)").run(t.channel, t.acct).changes;
     }
     console.log(String(n));'`;
-  forgetDmPolicy(opts.agentId);
-  const res = await deps.provider.execShellOnVolume(opts.runtimeRef, script);
+  const res = await inChannelConfigTurn(deps.store, opts.agentId, () => {
+    forgetDmPolicy(opts.agentId);
+    return deps.provider.execShellOnVolume(opts.runtimeRef, script);
+  });
   if (res.code !== 0) {
     log('channel.allowlist_scrub_failed', { agentId: opts.agentId, kind: opts.kind });
     return false;
@@ -653,8 +776,16 @@ export interface DmPolicyTarget {
    * OpenClaw's own credentials store — not to the config. Flipping the
    * policy alone therefore switched the door to "admit the empty list",
    * and the owner's messages were dropped in silence (a Mac, 2026-09-21).
+   *
+   * As the caller read it from the store (listAllowedChannelUserIds). Only
+   * the ones the store still admits in the write's turn are written: one
+   * removed while the write waited is never put back (HB-1554).
    */
   allowFrom?: string[];
+  /** An owner's press: its longest wait for the agent's turn (PRESS_WAIT_MS), then refused with ChannelConfigBusyError. */
+  waitMs?: number;
+  /** Whether it is still wanted, asked in the write's turn: false, nothing is written ('unchanged'). */
+  onlyIf?: () => boolean;
 }
 
 /**
@@ -671,7 +802,27 @@ export type DmPolicyOutcome = 'set' | 'unchanged' | 'no-account' | 'no-config' |
 export async function writeDmPolicy(deps: RevokeDeps, opts: DmPolicyTarget): Promise<DmPolicyOutcome> {
   const log = deps.log ?? (() => {});
   if (!/^[A-Za-z0-9_]{1,64}$/.test(opts.accountId)) return 'failed';
-  const admit = (opts.allowFrom ?? []).filter((id) => ID_SHAPE[opts.kind].test(id));
+  const asked = (opts.allowFrom ?? []).filter((id) => ID_SHAPE[opts.kind].test(id));
+  return inChannelConfigTurn(deps.store, opts.agentId, () => writeDmPolicyInTurn(deps, opts, asked, log), { waitMs: opts.waitMs });
+}
+
+/**
+ * writeDmPolicy in the agent's turn (channelConfigTurns), deciding there who
+ * it admits. A rest asked for while a removal's scrub ran read the person as
+ * still active, and its write, landing after the scrub, put their id back in
+ * the config's allowFrom: they could message the agent until its next
+ * rebuild (HB-1554). The scrub and the flip of their row are one turn, so a
+ * write in a later turn finds them revoked.
+ */
+async function writeDmPolicyInTurn(
+  deps: RevokeDeps, opts: DmPolicyTarget, asked: string[], log: (event: string, detail: Record<string, unknown>) => void,
+): Promise<DmPolicyOutcome> {
+  if (opts.onlyIf && !opts.onlyIf()) return 'unchanged';
+  const admitted = new Set(asked.length ? deps.store.listAllowedChannelUserIds(opts.agentId, opts.kind) : []);
+  const admit = asked.filter((id) => admitted.has(id));
+  // Nobody on the list now: the door is left as it is, as every rest leaves
+  // one with nobody on it (an allowlist of nobody admits nobody, the owner too).
+  if (opts.policy === 'allowlist' && asked.length && !admit.length) return 'unchanged';
   // Already asserted, and nothing since could have changed it: no container (review, 2026-09-29).
   if (dmPolicyAsserted(opts, opts.policy, admit)) return 'unchanged';
   const target = { channel: opts.kind, acct: opts.accountId, policy: opts.policy, admit };
@@ -753,51 +904,81 @@ export async function revokeMember(
   // last rebuild still admitted — the exact hole "Revoke for real" missed.
   // The credentials FILENAME is lowercased (OpenClaw's on-disk convention);
   // the config KEY keeps the case configWriter seeded.
-  const targets: Array<{ channel: string; acct: string; id: string; cred: string }> = [];
-  for (const kind of Object.keys(ids) as ChannelKind[]) {
-    const id = ids[kind]!;
-    const channel = store.getChannelForAgent(agentId, kind);
-    // A Telegram bot that is gone takes its account key with it (a restore
-    // gets a different bot). Discord and Slack always use one account key, and
-    // an archived agent gets the same bot back on restore with the volume's
-    // approvals intact — so scrub those even with no channel row (night review).
-    if (!channel && kind === 'telegram') continue;
-    const acct = kind === 'telegram' ? channel!.accountId : CHANNEL_ACCOUNT;
-    // Identities and account names only ever reach the script if they are the
-    // plain shapes the platforms issue.
-    if (!ID_SHAPE[kind].test(id) || !/^[A-Za-z0-9_]{1,64}$/.test(acct)) {
-      throw new RevokeError(
-        'That member has an unexpected chat id, so the bot allowlist was not touched and they ' +
-          'may still be able to chat. Delete the agent to be certain.',
-      );
+  type Target = { channel: string; acct: string; id: string; cred: string };
+  const targetsOf = (now: Partial<Record<ChannelKind, string>>): Target[] => {
+    const out: Target[] = [];
+    for (const kind of Object.keys(now) as ChannelKind[]) {
+      const id = now[kind]!;
+      const channel = store.getChannelForAgent(agentId, kind);
+      // A Telegram bot that is gone takes its account key with it (a restore
+      // gets a different bot). Discord and Slack always use one account key, and
+      // an archived agent gets the same bot back on restore with the volume's
+      // approvals intact — so scrub those even with no channel row (night review).
+      if (!channel && kind === 'telegram') continue;
+      const acct = kind === 'telegram' ? channel!.accountId : CHANNEL_ACCOUNT;
+      // Identities and account names only ever reach the script if they are the
+      // plain shapes the platforms issue.
+      if (!ID_SHAPE[kind].test(id) || !/^[A-Za-z0-9_]{1,64}$/.test(acct)) {
+        throw new RevokeError(
+          'That member has an unexpected chat id, so the bot allowlist was not touched and they ' +
+            'may still be able to chat. Delete the agent to be certain.',
+        );
+      }
+      out.push({ channel: kind, acct, id, cred: `/home/node/.openclaw/credentials/${kind}-${acct.toLowerCase()}-allowFrom.json` });
     }
-    targets.push({ channel: kind, acct, id, cred: `/home/node/.openclaw/credentials/${kind}-${acct.toLowerCase()}-allowFrom.json` });
-  }
-  if (!targets.length) {
-    store.revokeMembership(agentId, userId);
-    log('member.revoked', { agentId, userId });
-    return;
-  }
-  const script = allowlistScrubScript(targets);
-  forgetDmPolicy(agentId);
-  const res = await provider.execShellOnVolume(agent.runtimeRef, script);
-  if (res.volumeMissing) {
-    // No retry helps, and it may only be on another machine: never read as removed.
-    throw new RevokeError(`${VOLUME_GONE} They stay a member until the agent has its files back or is deleted.`);
-  }
-  if (res.code !== 0) {
-    // The row is still 'active' (we haven't flipped it), so "remove them
-    // again" genuinely retries the scrub. A rebuild would NOT help — both
-    // files live on the volume and a rebuild re-seeds config from members.
-    throw new RevokeError(
-      'Updating the bot allowlist failed, so they are still a member and may still be able to ' +
-        'chat. Remove them again to retry.',
-    );
-  }
+    return out;
+  };
+  // Each identity they are known by scrubbed, then the row flipped with no
+  // wait between the last look and the flip. One bound while a scrub ran (a
+  // window that opened for them meanwhile, its approval landing on their
+  // seat, still active) was on no scrub's list: let in for good, the row
+  // revoked (HB-1522 review). It is scrubbed in a round of its own. Once the
+  // row is revoked nothing binds to it, and an approval that lands then is
+  // taken back by its watch (claim.ts). A seat still gaining ids after three
+  // rounds stays a member, to be removed again: a guard only, not reached
+  // (three apps, and a bind only fills an empty one), so no test drives it.
+  // The rounds and the flip in one turn at the agent's chat-app access
+  // (channelConfigTurns), so no door write or grant lands in the middle: a
+  // rest asked for meanwhile read them as still active, and its write,
+  // landing after the scrub, put their id back on the agent's allowFrom
+  // (HB-1554). One asked for before runs first, and the scrub takes out
+  // what it wrote; one asked for after finds the row revoked.
+  const scrubbed = new Set<string>();
+  const channels: string[] = [];
+  const runtimeRef = agent.runtimeRef;
+  await inChannelConfigTurn(store, agentId, async () => {
+    for (let round = 0; ; round++) {
+      const targets = targetsOf(store.memberIdentities(agentId, userId)).filter((t) => !scrubbed.has(`${t.channel}:${t.id}`));
+      if (!targets.length) break;
+      if (round === 3) {
+        throw new RevokeError(
+          'They were let in again on a chat app while being removed, so they are still a member and may ' +
+            'still be able to chat. Remove them again to retry.',
+        );
+      }
+      const script = allowlistScrubScript(targets);
+      forgetDmPolicy(agentId);
+      const res = await provider.execShellOnVolume(runtimeRef, script);
+      if (res.volumeMissing) {
+        // No retry helps, and it may only be on another machine: never read as removed.
+        throw new RevokeError(`${VOLUME_GONE} They stay a member until the agent has its files back or is deleted.`);
+      }
+      if (res.code !== 0) {
+        // The row is still 'active' (we haven't flipped it), so "remove them
+        // again" genuinely retries the scrub. A rebuild would NOT help — both
+        // files live on the volume and a rebuild re-seeds config from members.
+        throw new RevokeError(
+          'Updating the bot allowlist failed, so they are still a member and may still be able to ' +
+            'chat. Remove them again to retry.',
+        );
+      }
+      for (const t of targets) { scrubbed.add(`${t.channel}:${t.id}`); if (!channels.includes(t.channel)) channels.push(t.channel); }
+    }
 
-  store.revokeMembership(agentId, userId);
+    store.revokeMembership(agentId, userId);
+  });
   log('member.revoked', { agentId, userId });
-  log('member.allowlist_scrubbed', { agentId, userId, channels: targets.map((t) => t.channel) });
+  if (channels.length) log('member.allowlist_scrubbed', { agentId, userId, channels });
 }
 
 

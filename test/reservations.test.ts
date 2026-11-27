@@ -222,6 +222,9 @@ describe('every take in src names what it is for', () => {
     const forgets = files.flatMap((f) => [...readFileSync(f, 'utf8').matchAll(/\bforgetReservation\s*\(/g)].map(() => f));
     // Its definition, and busy.ts's clearBusy, which only tests call (test/busy.test.ts).
     expect(forgets.sort()).toEqual([FACADE, MODULE].sort());
+    // Forgetting all of them is the tests' setup's alone (test/support/freshReservations.ts, HB-0873): only its definition is in src.
+    const forgetsAll = files.flatMap((f) => [...readFileSync(f, 'utf8').matchAll(/\bforgetAllReservationsForTests\s*\(/g)].map(() => f));
+    expect(forgetsAll).toEqual([MODULE]);
   });
 });
 

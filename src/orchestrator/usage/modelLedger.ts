@@ -5,6 +5,7 @@ import type { PendingConfirm } from '../../mgmt/pendingStore.js';
 import { HOUR_FIELDS, type HourField, type WindowModelStats } from './usage.js';
 import { modelKey, modelOption, priceMix, type TokenMix } from '../sources/modelOptions.js';
 import { scoreAgent, type StoredProfile } from './modelScorecard.js';
+import { runningModelOf } from './tokenHealth.js';
 import { effectiveModel } from '../lifecycle/provision.js';
 import { hourDays, machineTz, monthKey } from './budgets.js';
 
@@ -368,21 +369,25 @@ export interface GuardDeps {
   now?: number;
 }
 
-const fmtFig = (label: string, f: ModelFigures) =>
-  `${label} (${f.model}, ${f.days} day${f.days === 1 ? '' : 's'}): ${f.turns} turns, failed ${pct(f.rates.badTurn)}, `
+const fmtFig = (label: string, f: ModelFigures, model = f.model) =>
+  `${label} (${model}, ${f.days} day${f.days === 1 ? '' : 's'}): ${f.turns} turns, failed ${pct(f.rates.badTurn)}, `
   + `${f.malformed} malformed tool call${f.malformed === 1 ? '' : 's'}, tool failures ${pct(f.rates.toolFail)}, ${f.toolsPerTurn} tools per turn`;
 
 const BY_WORDS: Record<ModelChangeRow['by'], string> = { owner: 'you', agent: 'your Hatchabot agent (you confirmed it)', hatchabot: "Hatchabot's guard (you confirmed it)" };
 
-/** The switch-back card's text: what, why, and the numbers. */
-export function guardCardText(agentName: string, c: ModelChangeRow): string {
+/**
+ * The switch-back card's text: what, why, and the numbers. `back`: the old
+ * model as its source offers it now, which the card switches to: named so
+ * throughout, not in the spelling the ledger recorded (HB-1273).
+ */
+export function guardCardText(agentName: string, c: ModelChangeRow, back = c.from): string {
   const after = c.after as ModelFigures | undefined;
   const before = c.before as ModelFigures | undefined;
   const when = new Date(c.at).toISOString().slice(0, 16).replace('T', ' ') + 'Z';
   return [
-    `↩ Switch "${agentName}" back to ${c.from}`,
-    `Hatchabot's quality guard: since "${agentName}" moved from ${c.from} to ${c.to} on ${when} (by ${BY_WORDS[c.by]}), it does worse.`,
-    before ? fmtFig('Before', before) : `Before (${c.from}): no figures recorded.`,
+    `↩ Switch "${agentName}" back to ${back}`,
+    `Hatchabot's quality guard: since "${agentName}" moved from ${back} to ${c.to} on ${when} (by ${BY_WORDS[c.by]}), it does worse.`,
+    before ? fmtFig('Before', before, back) : `Before (${back}): no figures recorded.`,
     after ? fmtFig('After', after) : '',
     `Worse: ${(c.reasons ?? []).join('; ')}.`,
     'Nothing changes unless you Confirm. Cancel keeps it on ' + c.to + '; the guard will not ask again about this switch.',
@@ -418,7 +423,7 @@ export function fileGuardProposals(deps: GuardDeps): string[] {
       .some((p) => p.status === 'pending' && p.tool === 'set_model' && p.resolved?.agentId === agent.id);
     if (waiting) continue;
     const id = 'c_' + randomBytes(6).toString('base64url');
-    const summary = guardCardText(agent.name, c);
+    const summary = guardCardText(agent.name, c, back);
     const rec: PendingConfirm = {
       id, ownerId: agent.ownerId, chatId: 0, fromUserId: 0, messageId: 0,
       tool: 'set_model',
@@ -443,8 +448,9 @@ export function fileGuardProposals(deps: GuardDeps): string[] {
     }
     if (!claimed) continue;
     filed.push(id);
-    deps.log?.('model.guard_proposed', { agentId: agent.id, changeId: c.id, confirmId: id, from: c.to, to: c.from });
-    deps.push?.(agent.ownerId, `↩ Hatchabot suggests switching "${agent.name}" back to ${c.from}: it does worse on ${c.to}.`, (c.reasons ?? []).join('; '));
+    // The model the card switches to, as the card and its push name it (HB-1499).
+    deps.log?.('model.guard_proposed', { agentId: agent.id, changeId: c.id, confirmId: id, from: c.to, to: back });
+    deps.push?.(agent.ownerId, `↩ Hatchabot suggests switching "${agent.name}" back to ${back}: it does worse on ${c.to}.`, (c.reasons ?? []).join('; '));
   }
   return filed;
 }
@@ -625,8 +631,12 @@ export interface ModelCheck {
  */
 export function assessModelChange(store: Store, agent: Agent, profile: AIProfile | undefined, to: string, now = Date.now()): ModelCheck {
   const stored = store.modelProfiles([agent.id]).get(agent.id) as { profile: StoredProfile; at: string } | undefined;
-  const row = scoreAgent(agent, profile, stored, { now });
-  const from = profile ? effectiveModel(agent, profile) : row.model;
+  // While a switch of source waits for its rebuild, what its container runs
+  // (the source it was built with, and its model), as the scorecard has it
+  // (HB-1343): the evidence was billed and priced by the source chosen (HB-1498).
+  const running = agent.appliedProfileId && agent.appliedProfileId !== agent.aiProfileId ? runningModelOf(store, agent) : undefined;
+  const row = scoreAgent(agent, running?.profile ?? profile, stored, { now, ...(running ? { model: running.id } : {}) });
+  const from = running ? running.id : profile ? effectiveModel(agent, profile) : row.model;
   const mix = Object.values(stored?.profile.models ?? {}).reduce<TokenMix>((s, m) => ({ input: s.input + m.input, output: s.output + m.output, cacheRead: s.cacheRead + m.cacheRead, cacheWrite: s.cacheWrite + m.cacheWrite }), { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
   const unit: TokenMix = { input: 1e6, output: 1e5, cacheRead: 0, cacheWrite: 0 };
   const basis = mix.input + mix.output + mix.cacheRead + mix.cacheWrite > 0 ? mix : unit;

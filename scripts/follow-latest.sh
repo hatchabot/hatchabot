@@ -91,6 +91,12 @@ mkdir -p "$STATE"
 # it runs though prod is on the newest tag already (HB-0266).
 CUT="$STATE/upgrade-$(cd "$PROD" && printf %s "$PWD" | cksum | cut -d' ' -f1).from"
 CUT_FROM=""; [ ! -f "$CUT" ] || CUT_FROM="$(sed -n 's/^from //p' "$CUT" | sed -n 1p)"
+# No cut left to repair: the repair's clock (HB-1431; FILE.repair beside the
+# try record, scripts/follow-tries.sh) goes with it, here, before a tick
+# that is up to date or ahead ends without reading that record. Left, the
+# failures of a cut repaired by hand made the next cut's first failed repair
+# wait as long as the last one's (review of HB-1431).
+[ -f "$CUT" ] || rm -f "$STATE/follow-latest-tries.repair" 2>/dev/null || true
 # A failed fetch must not prevent the local rollback: its release and saved
 # dependencies are already here (HB-0686). Without a fresh tag list, only
 # that repair may run, never the cached newest release's code.
@@ -127,7 +133,19 @@ if ! { [ -r "$TRIES_HELPER" ] && . "$TRIES_HELPER" && declare -F tries_open trie
   note_try() { :; }
   forget_tries() { :; }
 fi
+# The repair's own clock (HB-1431), from a helper of before it: none, so a
+# repair that fails (7) is tried on every tick, as before, and said so
+# (REPAIR_EVERY_TICK).
+REPAIR_EVERY_TICK=""
+if ! declare -F repair_open repair_waiting note_repair forget_repair >/dev/null; then
+  REPAIR_EVERY_TICK=1
+  repair_open() { R_COUNT=0; R_LAST=0; }
+  repair_waiting() { return 1; }
+  note_repair() { :; }
+  forget_repair() { :; }
+fi
 tries_open "$STATE/follow-latest-tries" hatchabot-follow-latest-tries "$NEWEST"
+repair_open
 # disk_stop WHAT: a file of this tick's own it could not write (a full disk):
 # said, and counted as a try the disk failed, so the next ticks wait; under
 # set -e it ended the tick with no word, and every tick tried again
@@ -179,14 +197,16 @@ repair_cut() {
   if ! git -C "$PROD" show "$CUT_FROM:scripts/deploy-release.sh" > "$deploy" 2>/dev/null; then
     rm -f "$deploy"; echo "Could not read that release's deploy script. Deploy a release by hand: scripts/deploy-release.sh vX.Y.Z"; return 1
   fi
-  HATCHABOT_FOLLOW_KNOWS_5=1 HATCHABOT_FOLLOW_KNOWS_6=1 HATCHABOT_PROD_DIR="$PROD" bash "$deploy" "$CUT_FROM" || rc=$?
+  HATCHABOT_FOLLOW_KNOWS_5=1 HATCHABOT_FOLLOW_KNOWS_6=1 HATCHABOT_FOLLOW_KNOWS_7=1 HATCHABOT_PROD_DIR="$PROD" bash "$deploy" "$CUT_FROM" || rc=$?
   rm -f "$deploy"
   # 4: a deploy or upgrade holds the lock, and repairs it first. Routine, as
   # follow-channel.sh has it (tenth review). 5: the machine's disk, or a
   # folder it cannot write: a try the disk failed, so the next repair waits
   # (disk_waiting), never counted against the tag, nor its clock moved: no
   # try of the tag (note_try 2). 6: the release put back is not serving
-  # (said above), and nothing is counted (review of HB-1456).
+  # (said above), and nothing is counted (review of HB-1456). 7: the repair
+  # itself failed (a lock in the way): the next one waits on its own clock
+  # (repair_waiting), never counted against the tag (HB-1431).
   DISK_TRY=1
   if [ "$rc" = 4 ]; then echo "Another deploy or upgrade of $PROD is running; it puts ${CUT_FROM:-the previous release} back, or the next tick does."; rc=0; fi
   if [ "$rc" = 5 ]; then
@@ -194,14 +214,32 @@ repair_cut() {
     echo "Putting ${CUT_FROM:-the previous release} back could not go ahead on this machine's disk (see above); it will be tried again later. This does not count against $NEWEST."
   fi
   [ "$rc" != 6 ] || echo "$CUT_FROM is in $PROD again but not serving (above), and there was nothing more to do. This does not count against $NEWEST."
+  repair_ended "$rc"
   return "$rc"
+}
+# repair_ended RC: the repair's own clock after a deploy that ended RC
+# (HB-1431). 7: it stopped in its repair (said above which), before the tag
+# was touched: one more failed repair, said, and the next waits
+# (repair_waiting); it never counts against the tag. With no cut left, the
+# clock goes.
+repair_ended() {
+  if [ "$1" = 7 ]; then
+    note_repair
+    if [ -n "$REPAIR_EVERY_TICK" ]; then
+      echo "The repair did not go through (above), and $NEWEST was not touched: it is tried again on the next tick. This does not count against $NEWEST."
+    else
+      echo "The repair did not go through (above), and $NEWEST was not touched: it is tried again later, less and less often (an hour apart at most). This does not count against $NEWEST."
+    fi
+  elif [ ! -f "$CUT" ]; then forget_repair; fi
 }
 # not_repaired RC: said after a repair_cut that ended RC, but not after 6,
 # whose deploy said what comes next (back_down, kept_stop): past the cap it
-# is not tried again, and "it will be tried again" was untrue.
-not_repaired() { [ "$1" = 6 ] || echo "The repair did not finish (above); it will be tried again."; }
+# is not tried again, and "it will be tried again" was untrue; nor after 7,
+# said by repair_ended.
+not_repaired() { [ "$1" = 6 ] || [ "$1" = 7 ] || echo "The repair did not finish (above); it will be tried again."; }
 if [ "$FETCHED" = 0 ]; then
   ! disk_waiting || exit 0
+  ! repair_waiting || exit 0
   repair_cut || { [ ! -f "$CUT" ] || exit 1; }
   # The old deploy repairs before fetching. It can therefore report a fetch
   # failure after the repair succeeded; a removed record confirms it is done.
@@ -209,6 +247,7 @@ if [ "$FETCHED" = 0 ]; then
 fi
 if [ -n "$CUT_FROM" ] && [ "$(vernewer "$CUT_FROM" "$NEWEST")" = "$CUT_FROM" ]; then
   ! disk_waiting || exit 0
+  ! repair_waiting || exit 0
   repair_cut || exit 1
   exit 0
 fi
@@ -221,12 +260,16 @@ fi
 # record left (an index.lock in the way) ran every ten minutes, was set
 # aside after eight, and was tried again on the next tick; and a tag not yet
 # published was set aside after eighty minutes (HB-0637 and its review).
+# A repair that failed (7) waits on its own clock (repair_waiting), the
+# tag's deploy too, which would run it first: counted against the tag, a
+# repair that kept failing set the tag aside for good (HB-1431).
 FAILED="$STATE/follow-latest-failed"
 TAG_HELD=""
 if [ "$(cat "$FAILED" 2>/dev/null)" = "$NEWEST" ]; then TAG_HELD="was set aside, so it is not tried again; the next tag will be"
 elif tries_waiting; then TAG_HELD="is tried again later"; fi
 if [ -f "$CUT" ]; then
   ! disk_waiting || exit 0
+  ! repair_waiting || exit 0
   if [ -n "$TAG_HELD" ]; then
     if kept_record "$CUT"; then echo "$NEWEST $TAG_HELD. This tick sees to the release put back, and only that."
     else echo "$NEWEST $TAG_HELD. This tick repairs the deploy that was cut off, and only that."; fi
@@ -352,11 +395,12 @@ if ! err="$(git -C "$PROD" show "$NEWEST:scripts/deploy-release.sh" 2>&1 > "$dep
   exit 1
 fi
 echo "Following latest: ${CUR:-untagged} → $NEWEST"
-if HATCHABOT_FOLLOW_KNOWS_5=1 HATCHABOT_FOLLOW_KNOWS_6=1 HATCHABOT_PROD_DIR="$PROD" bash "$deploy" "$NEWEST"; then
-  rm -f "$FAILED" "$deploy"; forget_tries
+if HATCHABOT_FOLLOW_KNOWS_5=1 HATCHABOT_FOLLOW_KNOWS_6=1 HATCHABOT_FOLLOW_KNOWS_7=1 HATCHABOT_PROD_DIR="$PROD" bash "$deploy" "$NEWEST"; then
+  rm -f "$FAILED" "$deploy"; forget_tries; forget_repair
 else
   rc=$?
   rm -f "$deploy"
+  repair_ended "$rc"
   # Exit 1 = the release did not start and was rolled back: set aside at once.
   # 3 = the install step failed: tried again, less and less often. 5 = this
   # machine's disk (full, or a folder it cannot write): tried again the same
@@ -365,11 +409,15 @@ else
   # ends 0 and counts nothing, as follow-channel.sh's does (tenth review).
   # 6 = the release an earlier deploy put back is not serving, and it is
   # $NEWEST: nothing was tried, so nothing is counted (review of HB-1456).
+  # 7 = its repair of the deploy cut off before it failed, before $NEWEST was
+  # touched: the repair's own clock (repair_ended), nothing counted (HB-1431).
   if [ "$rc" = 4 ]; then
     echo "Another deploy or upgrade of $PROD is running; this tick leaves $NEWEST to it, or to the next tick."
     exit 0
   elif [ "$rc" = 6 ]; then
     echo "$NEWEST is in $PROD already but not serving (above), so there was nothing to deploy. This does not count against $NEWEST."
+  elif [ "$rc" = 7 ]; then
+    :
   elif [ "$rc" = 1 ]; then
     set_aside "$NEWEST" "Deploying $NEWEST failed and was rolled back." "It will not be retried; the next tag will be."
   elif [ "$rc" = 3 ] && [ $((T_COUNT + 1 - T_DISK)) -ge "$MAX_TRIES" ]; then

@@ -160,12 +160,15 @@ export function builtOn(lower: readonly string[] | undefined, upper: readonly st
  * names for it (`docker.io/library/node`, `docker.io/x/node`) said the short
  * way, and no tag `:latest`, as docker reads them.
  */
-function nodeRef(ref: string): { name: string; digest?: string } {
+function nodeRef(ref: string): { name: string; digest?: string; tagged: boolean } {
   const d = /@(sha256:[a-f0-9]{64})$/.exec(ref);
   const bare = (d ? ref.slice(0, d.index) : ref).replace(/^docker\.io\/(?:library\/)?/, '');
   const at = bare.lastIndexOf(':');
-  return { name: at > bare.lastIndexOf('/') ? bare : `${bare}:latest`, ...(d ? { digest: d[1] } : {}) };
+  const tagged = at > bare.lastIndexOf('/');
+  return { name: tagged ? bare : `${bare}:latest`, ...(d ? { digest: d[1] } : {}), tagged };
 }
+/** A Node named by its digest alone (`node@sha256:…`): that very image, of no tag and no line known by its name (HB-1448). */
+const byDigestOnly = (ref: string): boolean => { const r = nodeRef(ref); return !r.tagged && !!r.digest; };
 
 /** A Node image's line: its name without a digest, the version its major (`node:24.11.0-slim` is `node:24-slim`). */
 export function nodeLine(ref: string): string {
@@ -179,6 +182,15 @@ export function nodeLine(ref: string): string {
 const byHandValue = (i: BuildInputs, f: ByHand): string =>
   ({ node: i.node, 'channel-plugins': i.channelPlugins, plugins: i.plugins.join(','), 'plugin-install': i.pluginInstall, 'embed-plugin': i.embedPlugin })[f];
 /**
+ * A setting by hand as the words say it: a digest by its first 12 hex, as
+ * docker writes an id short. Two in full made a refusal's advice longer than
+ * an import's rolled-back reason keeps (HB-1333).
+ */
+const saidByHand = (i: BuildInputs, f: ByHand, most = Infinity): string => {
+  if (f === 'plugins' && i.plugins.length > most) return most < 1 ? counted(i.plugins.length, 'plugin') : `${i.plugins.slice(0, most).join(',')} and ${i.plugins.length - most} more`;
+  return byHandValue(i, f).replace(/@sha256:([a-f0-9]{12})[a-f0-9]{52}/g, '@sha256:$1…');
+};
+/**
  * A setting both set by hand is the same however written: the plugins in any
  * order, a Node by any of Docker Hub's names for it, its digest compared only
  * where both name one (round-2 review).
@@ -187,11 +199,24 @@ function sameByHand(d: BuildInputs, b: BuildInputs, h: ByHand): boolean {
   if (h === 'plugins') return sameSet(d.plugins, b.plugins);
   if (h === 'node') {
     const [x, y] = [nodeRef(d.node), nodeRef(b.node)];
+    // By its digest alone, it is that image: the same only by that digest
+    // (read as node:latest, it was the same as a `node:latest` that moves, HB-1448).
+    if (byDigestOnly(d.node) || byDigestOnly(b.node)) return !!x.digest && x.digest === y.digest && x.name.replace(/:[^:/]*$/, '') === y.name.replace(/:[^:/]*$/, '');
     return x.name === y.name && (!x.digest || !y.digest || x.digest === y.digest);
   }
   return byHandValue(d, h) === byHandValue(b, h);
 }
-const and = (xs: readonly string[]) => (xs.length ? xs.join(' and ') : 'none');
+const counted = (n: number, noun: string) => `${n} ${noun}${n === 1 ? '' : 's'}`;
+/**
+ * A list in words: each named, or, with `most`, the first `most` and how
+ * many more (HB-1333), or with none (`most` 0) only how many `noun`s, the
+ * last that fits an import's reason (HB-1333 review).
+ */
+const and = (xs: readonly string[], most = Infinity, noun = 'one') => {
+  if (!xs.length) return 'none';
+  if (most < 1) return counted(xs.length, noun);
+  return xs.length > most ? `${xs.slice(0, most).join(' and ')} and ${xs.length - most} more` : xs.join(' and ');
+};
 
 /**
  * The first way image `name`'s inputs `d` are not the base's `b`, or undefined
@@ -202,67 +227,172 @@ const and = (xs: readonly string[]) => (xs.length ? xs.join(' and ') : 'none');
  * then laid on). `base` names `b` in the words (Install image: this machine's
  * image, HB-1189).
  */
-export function inputsDiffer(name: string, d: BuildInputs, b: BuildInputs, base = 'the base'): string | undefined {
+export function inputsDiffer(name: string, d: BuildInputs, b: BuildInputs, base = 'the base', most = Infinity): string | undefined {
   if (d.openclaw !== b.openclaw) return `${name} runs OpenClaw ${d.openclaw}, not ${b.openclaw}`;
   if (d.engine !== b.engine) {
     return d.engine === 'baked'
       ? `${name} has its own memory search engine, and ${base} is engine-free`
       : `${name} is engine-free, and ${base} has its own memory search engine`;
   }
-  if (nodeLine(d.node) !== nodeLine(b.node)) return `${name} is built on ${nodeLine(d.node)}, not ${nodeLine(b.node)}`;
+  // A Node set by hand by its digest alone has no line by its name: it is compared as a setting by hand (sameByHand).
+  const digestByHand = (i: BuildInputs) => i.byHand.includes('node') && byDigestOnly(i.node);
+  if (!digestByHand(d) && !digestByHand(b) && nodeLine(d.node) !== nodeLine(b.node)) return `${name} is built on ${nodeLine(d.node)}, not ${nodeLine(b.node)}`;
   const onlyB = b.byHand.find((h) => !d.byHand.includes(h));
-  if (onlyB) return `${base} was built with ${onlyB} set by hand (${byHandValue(b, onlyB)}), and ${name} was not`;
+  if (onlyB) return `${base} was built with ${onlyB} set by hand (${saidByHand(b, onlyB, most)}), and ${name} was not`;
   const onlyD = d.byHand.find((h) => !b.byHand.includes(h));
-  if (onlyD) return `${name} was built with ${onlyD} set by hand (${byHandValue(d, onlyD)}), and ${base} was not`;
+  if (onlyD) return `${name} was built with ${onlyD} set by hand (${saidByHand(d, onlyD, most)}), and ${base} was not`;
   for (const h of b.byHand) {
-    if (!sameByHand(d, b, h)) return `${name} was built with ${h} set by hand to ${byHandValue(d, h)}, and ${base} to ${byHandValue(b, h)}`;
+    if (!sameByHand(d, b, h)) return `${name} was built with ${h} set by hand to ${saidByHand(d, h, most)}, and ${base} to ${saidByHand(b, h, most)}`;
   }
-  if (!sameSet(d.channels, b.channels)) return `${name} has ${and(d.channels)} built in, and ${base} has ${and(b.channels)}`;
-  if (!sameSet(d.plugins, b.plugins)) return `${name} bakes the plugins ${and(d.plugins)}, and ${base} ${and(b.plugins)}`;
+  if (!sameSet(d.channels, b.channels)) return `${name} has ${and(d.channels, most, 'messaging plugin')} built in, and ${base} has ${and(b.channels, most, 'messaging plugin')}`;
+  if (!sameSet(d.plugins, b.plugins)) {
+    return `${name} bakes ${most < 1 && d.plugins.length ? and(d.plugins, most, 'plugin') : `the plugins ${and(d.plugins, most)}`}, and ${base} ${and(b.plugins, most, 'plugin')}`;
+  }
   if (d.pluginInstall !== b.pluginInstall) return `${name} installs messaging plugins by ${d.pluginInstall}, and ${base} by ${b.pluginInstall}`;
   if (d.packages.length && !sameSet(d.packages, b.packages)) {
-    return `${name} has ${and(d.packages)} added, and ${base} ${b.packages.length ? `has ${and(b.packages)}` : 'does not'}`;
+    return `${name} has ${and(d.packages, most, 'package')} added, and ${base} ${b.packages.length ? `has ${and(b.packages, most, 'package')}` : 'does not'}`;
   }
   return undefined;
+}
+
+/** What a build from Settings sets that a base may differ by: its Node, when known, and its messaging plugins. */
+export interface SettingsBuild { node?: string; channels: string[] }
+
+/**
+ * What this release's build from Settings would set for OpenClaw `openclaw`,
+ * by `dockerfile` (docker/Dockerfile.runtime's text), whose defaults the
+ * build script passes on: its messaging plugins always; its Node for the
+ * Dockerfile's own OpenClaw, and for another none (the script takes the
+ * lowest Node line that version asks for, which only the build finds out).
+ * The machine's `:latest` was asked, and it may be a hand build or an older
+ * release's image (HB-1323). Undefined: the Dockerfile says neither.
+ */
+export function settingsBuild(openclaw: string, dockerfile: string | undefined): SettingsBuild | undefined {
+  const arg = (name: string) => dockerfile && new RegExp(`^ARG ${name}=(\\S*)`, 'm').exec(dockerfile)?.[1];
+  const channels = arg('CHANNEL_PLUGINS'), node = arg('NODE_IMAGE');
+  if (typeof channels !== 'string') return undefined;
+  return { channels: channels ? channels.split(',') : [], ...(node && arg('OPENCLAW_VERSION') === openclaw ? { node } : {}) };
+}
+
+/** The image to build for a base built from `w`, in words: its OpenClaw, its engine, its packages (buildAdvice). */
+export function imageWhat(w: BuildInputs, most = Infinity, packagesSaid = false): string {
+  const with_ = !w.packages.length ? '' : ` with ${packagesSaid ? "the base's packages" : and(w.packages, most, 'package')}`;
+  return `${w.engine === 'none' ? 'an engine-free image' : 'an image'} of OpenClaw ${w.openclaw}${with_}`;
+}
+
+/**
+ * How a base built from `w` is built again on a machine of this release:
+ * from Settings, by hand (settings by hand, scripts/build-runtime-image.sh),
+ * or not at all from here (a build from Settings would have another Node or
+ * messaging plugins), as buildAdvice says it.
+ */
+export function buildWay(w: BuildInputs, settings: SettingsBuild | undefined): 'settings' | 'by hand' | undefined {
+  if (w.byHand.length) return 'by hand';
+  if (settings && ((settings.node && nodeLine(settings.node) !== nodeLine(w.node)) || !sameSet(settings.channels, w.channels))) return undefined;
+  return 'settings';
+}
+
+/**
+ * Where a build from Settings is made, for `where` (HB-1515): Settings builds
+ * on this machine only, and a runner gets an image built here only as this
+ * machine's default, copied by Install image (or Update image, as the
+ * runner's row offers it after a Check, only when the runner's image is
+ * missing or runs another OpenClaw: said, HB-1515 re-review). "Build … on <runner> (Settings
+ * → Advanced → Runtime images)" pointed its owner at a build that never runs
+ * there. `here`: `where` is this machine, by its host's kind, never by its
+ * name: the local host's name is "This machine (<hostname>)", and a move back
+ * here was told to install it on itself (HB-1515 review).
+ */
+export function settingsBuildOn(what: string, where: string, here: boolean): string {
+  return here
+    ? `${what} on this machine (Settings → Advanced → Runtime images)`
+    : `${what} on this machine (Settings → Advanced → Runtime images), make it this machine's default and copy it to ${where} (Settings → Hosts → Check, then Install image or Update image, offered when its image is missing or runs another OpenClaw)`;
 }
 
 /**
  * What to do when nothing on `where` stands for a base built from `w`: the
  * words after the first difference (HB-0986 review). Settings builds an
  * OpenClaw, its engine and packages, with this release's Node and messaging
- * plugins, as `here` (that machine's default image) has them: a base with
- * settings by hand is built by hand, and one whose Node or plugins built in
- * a build from Settings would not match is not offered one.
+ * plugins (`settings`, settingsBuild): a base with settings by hand is built
+ * by hand, and one whose Node or plugins built in a build from Settings would
+ * not match is not offered one. `room`: the characters the words may take
+ * (an import's rolled-back reason keeps only so many): the settings by hand
+ * are named in full, first first, while they fit, and the rest counted
+ * (HB-1333); the first difference, said before these words, names one.
+ * `most`: each list (packages, plugins, messaging plugins) names that many
+ * at most and counts the rest, or with 0 only counts, which the caller
+ * lowers until all fits. `packagesSaid`: the first difference named the
+ * base's packages, so they are not named again (HB-1333 review). `here`:
+ * `where` is this machine (settingsBuildOn).
  */
-export function buildAdvice(w: BuildInputs, here: BuildInputs | undefined, where: string, yours: string): string {
-  const what = `${w.engine === 'none' ? 'an engine-free image' : 'an image'} of OpenClaw ${w.openclaw}${w.packages.length ? ` with ${and(w.packages)}` : ''}`;
+export function buildAdvice(w: BuildInputs, settings: SettingsBuild | undefined, where: string, here: boolean, room = Infinity, most = Infinity, packagesSaid = false): string {
+  const yours = here ? "this machine's" : "that machine's";
+  const what = imageWhat(w, most, packagesSaid);
   const tail = `, then try again, or run it on ${yours} default image`;
   if (w.byHand.length) {
-    return `. Build ${what} on ${where} with ${w.byHand.map((h) => `${h} set by hand to ${byHandValue(w, h) || 'none'}`).join(' and ')}, as its base was (scripts/build-runtime-image.sh)${tail}`;
+    const set = w.byHand.map((h) => `${h} set by hand to ${saidByHand(w, h, most) || 'none'}`);
+    const words = (k: number) => {
+      const more = set.length - k;
+      const named = more ? [...set.slice(0, k), `${more}${k ? ' more' : ''} setting${more > 1 ? 's' : ''} set by hand`] : set;
+      return `. Build ${what} on ${where} with ${named.join(' and ')}, as its base was (scripts/build-runtime-image.sh)${tail}`;
+    };
+    for (let k = set.length; k > 0; k--) { const said = words(k); if (said.length <= room) return said; }
+    return words(0);
   }
-  const cannot = !here ? undefined
-    : !here.byHand.includes('node') && nodeLine(here.node) !== nodeLine(w.node) ? `it would be built on ${nodeLine(here.node)}, not ${nodeLine(w.node)}`
-    : !sameSet(here.channels, w.channels) ? `it would have ${and(here.channels)} built in, not ${and(w.channels)}`
+  const cannot = !settings ? undefined
+    : settings.node && nodeLine(settings.node) !== nodeLine(w.node) ? `it would be built on ${nodeLine(settings.node)}, not ${nodeLine(w.node)}`
+    : !sameSet(settings.channels, w.channels) ? `it would have ${and(settings.channels, most, 'messaging plugin')} built in, not ${and(w.channels, most, 'messaging plugin')}`
     : undefined;
-  if (cannot) return `; an image built there from Settings would not be either (${cannot}), so run it on ${yours} default image`;
-  return `. Build ${what} on ${where} (Settings → Advanced → Runtime images)${tail}`;
+  if (cannot) return `; an image built ${here ? 'there from Settings' : 'from Settings on this machine and installed there'} would not be either (${cannot}), so run it on ${yours} default image`;
+  return `. Build ${settingsBuildOn(what, where, here)}${tail}`;
 }
 
-/** What a recipe needs of the image it is built on: these inputs, or these very layers. */
+/** What a recipe needs of the image it is built on: these inputs, or these very layers, and how the base runs. */
 export interface BaseWanted {
   inputs?: BuildInputs;
   /** The base's chain ID. */
   layers?: string;
+  /** How the base runs (runConfigId): its user, entrypoint, command, environment, volumes, working folder, ONBUILD steps, shell and stop signal (HB-1330). */
+  config?: string;
 }
 
-/** Whether image `t` stands for the base: `same` when its layers are the base's own. */
-export function standsFor(t: ImageTagInfo, want: BaseWanted): { ok: true; same: boolean } | { ok: false; why: string } {
-  if (want.layers && chainId(t.layers) === want.layers) return { ok: true, same: true };
+/**
+ * Whether image `t` stands for the base: `same` when its layers are the
+ * base's own. By its layers or by what it was built from, it must also run
+ * as the base does (HB-1330): one built FROM the base that adds no layer
+ * (only USER root, an ENV, another ENTRYPOINT) has the base's layers and
+ * labels, and stood for it. Not said on either side (a recipe or file from
+ * before it, a listing that did not say) is not compared, as before.
+ */
+export function standsFor(t: ImageTagInfo, want: BaseWanted, most = Infinity): { ok: true; same: boolean } | { ok: false; why: string; runsOtherwise?: true; packages?: true } {
+  // Built as the base was, by its layers or its inputs, and only how it runs differs: said apart (HB-1330 review).
+  const runs = want.config && t.config && t.config !== want.config
+    ? { ok: false as const, why: `${t.tag} does not run as the base does: ${RUNS_OTHERWISE} differ`, runsOtherwise: true as const }
+    : undefined;
+  if (want.layers && chainId(t.layers) === want.layers) return runs ?? { ok: true, same: true };
   if (!want.inputs) return { ok: false, why: `${t.tag} is not the same image` };
   const mine = effectiveInputs(t);
   if (!mine) return { ok: false, why: `${t.tag} does not say what it was built from` };
-  const why = inputsDiffer(t.tag, mine, want.inputs);
-  return why ? { ok: false, why } : { ok: true, same: false };
+  const why = inputsDiffer(t.tag, mine, want.inputs, 'the base', most);
+  // The packages are inputsDiffer's last test: the same but for them, the words named the base's (`packages`).
+  if (why) return { ok: false, why, ...(inputsDiffer(t.tag, { ...mine, packages: want.inputs.packages }, want.inputs) ? {} : { packages: true as const }) };
+  return runs ?? { ok: true, same: false };
+}
+
+/** What runConfigId compares, in words. */
+export const RUNS_OTHERWISE = 'its user, entrypoint, command, environment, volumes, working folder or the rest of how it runs';
+
+/**
+ * `s` in at most `room` characters: whole, or cut at the end of a word with
+ * "…" (HB-1333 review), as an import's rolled-back reason, which keeps only
+ * so many, would otherwise cut it in the middle of one.
+ */
+export function fitWords(s: string, room: number): string {
+  if (s.length <= room) return s;
+  if (room < 1) return '';
+  const cut = s.slice(0, room - 1);
+  const sp = cut.lastIndexOf(' ');
+  return `${(sp > 0 ? cut.slice(0, sp) : cut).replace(/[\s,.;:(]+$/, '')}…`;
 }
 
 /** A derived image, by its name or its label: never a base. */
@@ -277,13 +407,15 @@ export function isDerived(t: Pick<ImageTagInfo, 'tag' | 'derived'>): boolean {
  * followed (HB-0986 review); else one with the base's own layers before one
  * built the same way; within each, the default (`:latest`) when the base was
  * the source's default, a version's own tag, then by name. None: why not,
- * said of the default image (or the first).
+ * said of the default image (or the first), as `near`, or, when an image
+ * is built as the base was and only runs otherwise, of the first such
+ * (`otherwise`): building that image again gives the same (HB-1330 review).
  */
 export function pickStandIn(
   tags: readonly ImageTagInfo[],
   want: BaseWanted,
   o: { repo: string; prefer?: string; followsDefault?: boolean },
-): { image: ImageTagInfo } | { why: string } {
+): { image: ImageTagInfo } | { why: string; near?: ImageTagInfo; otherwise?: ImageTagInfo } {
   const latest = `${o.repo}:latest`;
   const rank = (t: ImageTagInfo) => [t.tag === o.prefer ? 0 : 1, o.followsDefault && t.tag === latest ? 0 : 1, VERSION_TAG.test(t.tag.slice(o.repo.length + 1)) ? 0 : 1];
   const order = tags
@@ -293,6 +425,8 @@ export function pickStandIn(
     .map(({ t }) => ({ t, s: standsFor(t, want) }));
   const pick = order.find((j) => j.t.tag === o.prefer && j.s.ok) ?? order.find((j) => j.s.ok && j.s.same) ?? order.find((j) => j.s.ok);
   if (pick) return { image: pick.t };
+  const otherwise = order.find((j) => !j.s.ok && j.s.runsOtherwise);
+  if (otherwise && !otherwise.s.ok) return { why: otherwise.s.why, otherwise: otherwise.t };
   const near = order.find((j) => j.t.tag === latest) ?? order[0];
-  return { why: near && !near.s.ok ? near.s.why : 'it has no runtime image yet' };
+  return near && !near.s.ok ? { why: near.s.why, near: near.t } : { why: 'it has no runtime image yet' };
 }

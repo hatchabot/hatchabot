@@ -4,6 +4,7 @@ import type { Store } from '../../store/store.js';
 import { keyedLock, semaphore, sixAtATime } from '../../util/queues.js';
 import { isBusy } from './busy.js';
 import { snapshotModels } from '../usage/modelLedger.js';
+import { CLASS_SOURCE, CLASS_SOURCE_CHEAPEST, machineTz, monthKey } from '../usage/budgets.js';
 import { operationRefusal } from './operations.js';
 import { effectiveModel } from './provision.js';
 import type { Kept, MemoryLimits } from './memoryLimits.js';
@@ -81,6 +82,15 @@ export const classKey = (c: ClassTarget, unpin: boolean): string => JSON.stringi
 export type ClassCheck = { since: Since; for: string; on?: string; error: string } | {
   since: Since; for: string; on?: string; switching: boolean; target: AIProfile; imageChange: boolean; unpin: boolean;
   dropPin: boolean; modelWaitsForRebuild: boolean; pin?: string | null;
+  /**
+   * A class with only a source, over its budget's cheaper model that source
+   * does not keep: its owner's own model (the switch's fromModel), which the
+   * new source offers and its runtime there can run, put back in place of
+   * the source's default, as a class keeps the pin of an agent no budget
+   * switched (HB-1477 review). The next pass after the rebuild switches it
+   * down again.
+   */
+  ownBack?: string;
 };
 /** A class's machine-login Max source for an agent on a runner: refused at its check and again at its write. */
 const CLASS_RUNNER = "the class's machine-login Max source can't reach an agent on a runner — use a setup-token source";
@@ -427,6 +437,7 @@ export function createClassChanges(deps: ClassChangesDeps): ClassChanges {
     // (finalModelCheck; a class with only a source skipped it, HB-0556).
     let modelWaitsForRebuild = false;
     let dropPin = false;
+    let ownBack: string | undefined;
     const rebuildOn = unpin ? null : (cls.image ?? agent.image ?? null);
     if (cls.model) {
       if (switching || imageChange) {
@@ -442,9 +453,16 @@ export function createClassChanges(deps: ClassChangesDeps): ClassChanges {
       const runtime = heard(await finalModelCheck(agent, target, { switching, rebuildOn }));
       if (runtime.problem) return { since, for: key, ...kept(), error: runtime.problem };
       dropPin = !!runtime.dropPin;
+      // On the cheaper model its budget switched it to, which the new source
+      // drops: its owner's own model comes back if the new source offers it
+      // and runs it there, not the source's default (HB-1477 review).
+      const cheap = switching && agent.model ? store.openCheaperPause(agent.id) : undefined;
+      const own = cheap && cheap.toModel === agent.model ? cheap.fromModel : undefined;
+      if (own && own !== agent.model && (dropPin || modelOverrideProblem(target, agent.model!)) && !modelOverrideProblem(target, own)
+        && !heard(await finalModelCheck(agent, target, { pin: own, rebuildOn })).problem) ownBack = own;
     }
     return {
-      since, for: key, ...kept(), switching, target, imageChange, unpin, dropPin, modelWaitsForRebuild,
+      since, for: key, ...kept(), switching, target, imageChange, unpin, dropPin, modelWaitsForRebuild, ...(ownBack ? { ownBack } : {}),
       // Its own model, which the checks above and the write read (a class without one).
       ...(!cls.model && (switching || imageChange) ? { pin: agent.model ?? null } : {}),
     };
@@ -459,7 +477,7 @@ export function createClassChanges(deps: ClassChangesDeps): ClassChanges {
   const classWrote = new Map<string, Since>();
   const applyClassToAgent: ClassChanges['applyClassToAgent'] = (agent, cls, check, opts) => {
     if ('error' in check) return { rebuild: false, error: check.error };
-    const { switching, imageChange, unpin, dropPin, modelWaitsForRebuild } = check;
+    const { switching, imageChange, unpin, dropPin, modelWaitsForRebuild, ownBack } = check;
     // The source as it is now, for the checks that read only the store.
     const target = store.getAIProfile(check.target.id) ?? check.target;
     if (cls.model) {
@@ -496,7 +514,11 @@ export function createClassChanges(deps: ClassChangesDeps): ClassChanges {
       if (!store.setAgentClassIf(agent.id, opts.from, cls.id)) return 'changed' as const;
       if (switching) {
         store.setAgentAIProfile(agent.id, cls.aiProfileId!);
-        if (pin && !cls.model && (dropPin || modelOverrideProblem(target, pin))) store.setAgentModel(agent.id, null);
+        if (pin && !cls.model && (dropPin || modelOverrideProblem(target, pin))) {
+          // Its owner's own model, checked above, while the switch it came from is still the one open (HB-1477 review).
+          const cheap = ownBack ? store.openCheaperPause(agent.id) : undefined;
+          store.setAgentModel(agent.id, cheap?.toModel === pin && cheap.fromModel === ownBack && !modelOverrideProblem(target, ownBack!) ? ownBack! : null);
+        }
       }
       // On the cheaper model its budget switched it to (its source kept):
       // the class's model is the one that comes back when that ends.
@@ -505,9 +527,25 @@ export function createClassChanges(deps: ClassChangesDeps): ClassChanges {
       // restart between the two leaves it for the next process to tell
       // (modelRuntime.ts applyOwed), not for some later rebuild (HB-0809).
       if (cls.model && !(!switching && pin && pin !== cls.model && store.setCheaperPauseFrom(agent.id, pin, cls.model))) store.setAgentModel(agent.id, cls.model, { apply: !switching && !modelWaitsForRebuild });
+      // The class's model is the cheaper one its budget switched it to: it is
+      // what comes back when that switch ends, not the model the switch came
+      // from, which would take it off its class's model (HB-1477 review).
+      if (cls.model && pin === cls.model) store.setCheaperPauseFrom(agent.id, pin, cls.model);
       if (imageChange) store.setAgentImage(agent.id, unpin ? null : cls.image!);
       // Its model waits for the image that can run it: kept with the write, or let go with it.
       if (cls.model && modelWaitsForRebuild) store.setAgentHold(agent.id, 'model-waits-image', cls.model); else store.clearAgentHold(agent.id, 'model-waits-image');
+      // Moved to another source off the cheaper model its budget switched it
+      // to: that switch ends as its class's doing. Left open, the next pass
+      // took the new model for its owner's and left it there until the 1st,
+      // over its budget. Closed so, the next pass judges it again on the new
+      // source, once its rebuild is done, and what this wrote is what comes
+      // back at the 1st (HB-1477).
+      const cheap = switching && pin ? store.openCheaperPause(agent.id) : undefined;
+      if (cheap?.toModel === pin && (store.getAgent(agent.id)!.model ?? null) !== pin) store.resumeBudgetPause(agent.id, cheap.month, new Date().toISOString(), CLASS_SOURCE);
+      // Judged on the source its class moved it to before, with nothing
+      // cheaper there: moved again, it is judged again on this one, and its
+      // Usage says it waits for that, not that it is on the cheapest (HB-1477 review).
+      if (switching) store.retagBudgetPause(agent.id, monthKey(Date.now(), machineTz()), CLASS_SOURCE_CHEAPEST, CLASS_SOURCE);
       return 'wrote' as const;
     });
     if (wrote === 'changed') return { rebuild: false, changed: true };

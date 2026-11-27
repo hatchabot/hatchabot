@@ -317,6 +317,12 @@ function reportFromHash() {
 }
 addEventListener('hashchange', reportFromHash);
 
+// ---- the page's start: its panels made windows, then initV2 ----------------------------------
+// Status is retired (Chris, 2026-10-05): Usage and Resources are header buttons
+// opening their own panels; Activity is the home screen's last section; Health's
+// machine facts (runners, backups, OpenClaw) are the machine line under it, its
+// problems Alerts on the Hatchabot agent's tile; Tools went to Bulk actions
+// (Rebuild all) and Settings → Hosts (memory search for every agent).
 function v2ConvertPanels() {
   // recoveryDlg: a secret shown once stays until it is saved — no Back arrow.
   // bpDlg: the sign-in panel is the console's kind of window, the agent's browser filling it.
@@ -359,13 +365,6 @@ function v2ConvertPanels() {
     }
   }
 }
-// ---- Status retired (Chris, 2026-10-05) ----------------------------------------------------
-// Usage and Resources are header buttons opening their own panels; Activity is
-// the home screen's last section; Health's machine facts (runners, backups,
-// OpenClaw) are the machine line under it, its problems Alerts on the
-// Hatchabot agent's tile; Tools went to Bulk actions (Rebuild all) and
-// Settings → Hosts (memory search for every agent).
-
 
 function initV2() {
   $('v2Ver').textContent = `Hatchabot v${window.HATCHABOT_VERSION ?? '?'}${DEV ? ' · dev' : ''}`;

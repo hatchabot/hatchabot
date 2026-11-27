@@ -18,9 +18,9 @@ import { DEFAULT_PREFIX, dockerNames } from '../../providers/dockerNames.js';
 import type { Store } from '../../store/store.js';
 import { moveCopyFolder } from '../../store/folderMark.js';
 import { forgetDmPolicy } from '../channels/dmPolicyMemo.js';
-import { allowlistScrubScript, DROP_CHAT_ACCOUNTS_SCRIPT, keepOnlyTelegramAccountScript, RESTORED_ACCESS_SCRIPT, revokedScrubTargets } from '../members/members.js';
+import { allowlistScrubScript, DROP_CHAT_ACCOUNTS_SCRIPT, inChannelConfigTurn, keepOnlyTelegramAccountScript, RESTORED_ACCESS_SCRIPT, revokedScrubTargets } from '../members/members.js';
 import { beginOperation, handleFor, rethrowIfCrash, type OpHandle } from '../lifecycle/operations.js';
-import { queueRemovalsSince } from '../google/googleConnections.js';
+import { queueRemovalsSince, removeQueuedOnVolume } from '../google/googleConnections.js';
 import { processAlive } from '../../domain/processAlive.js';
 
 // A dated backup directory is exactly `YYYY-MM-DD`, matching what the script
@@ -69,8 +69,16 @@ export interface BackupSet {
   complete?: boolean;
   /** The run is still writing this set. */
   running?: boolean;
-  /** Volumes that failed to archive. */
+  /** Volumes that failed to archive, and those left out while their files were replaced (`replacing`). */
   failedVolumes?: string[];
+  /**
+   * Of `failedVolumes`, those left out on purpose because a restore, an
+   * import, a move or another change was replacing their files: the next
+   * backup takes them (HB-1205). Kept in `failedVolumes` too, so a reader
+   * from before the list reads the set as before. Absent in a record from
+   * before v2.193.0.
+   */
+  replacing?: string[];
   /** Volumes no agent uses, left out of the set (a leftover to remove by hand). */
   orphans?: string[];
   /** When the run started (ISO), from the record. */
@@ -99,7 +107,7 @@ export interface BackupSet {
   foreign?: boolean;
 }
 
-type SetRecord = Pick<BackupSet, 'complete' | 'running' | 'failedVolumes' | 'orphans' | 'startedAt' | 'finishedAt' | 'missing' | 'skipped' | 'captured'>;
+type SetRecord = Pick<BackupSet, 'complete' | 'running' | 'failedVolumes' | 'replacing' | 'orphans' | 'startedAt' | 'finishedAt' | 'missing' | 'skipped' | 'captured'>;
 
 /** A run that has said "running" this long without a verdict was killed. */
 const RUN_STALE_MS = 6 * 3600_000;
@@ -125,6 +133,7 @@ export function readSetStatus(dir: string, now = Date.now()): SetRecord {
     ...(startedAt ? { startedAt } : {}),
     ...(finishedAt ? { finishedAt } : {}),
     failedVolumes: names(r.failedVolumes),
+    ...(Array.isArray(r.replacing) ? { replacing: names(r.replacing) } : {}),
     orphans: names(r.orphans, 500),
     ...(Array.isArray(r.missing) ? { missing: names(r.missing) } : {}),
     ...(Array.isArray(r.skipped) ? { skipped: names(r.skipped) } : {}),
@@ -1059,15 +1068,20 @@ async function restartAfterRestore(deps: RestoreDeps, agentId: string, runtimeRe
  * Throws when the part that matters for safety could not be done. Its
  * Google accounts follow today's attachments when it starts (afterStart);
  * one taken off it since the copy was made (`copiedAt`) is queued to come
- * off again first, as nothing else would name it (HB-1085).
+ * off again, as nothing else would name it (HB-1085), and is taken off its
+ * volume here early, while it is stopped: at the start's sync alone, the
+ * restored account could be used for the seconds before it (HB-1207). It
+ * stays queued either way: the start's sync takes it off and confirms it.
  */
 async function applyCurrentSettingsOver(deps: RestoreDeps, agentId: string, runtimeRef: string, copiedAt: number): Promise<string[]> {
   const { store, provider } = deps;
   const log = deps.log ?? (() => {});
   const undone: string[] = [];
   queueRemovalsSince(store, agentId, Number.isFinite(copiedAt) ? copiedAt : 0);
+  await removeQueuedOnVolume({ store, provider, log }, { id: agentId, runtimeRef, image: store.getAgent(agentId)?.image });
   // The tasks Hatchabot made on it (the weekly review) are the copy's now:
-  // its next build makes one again that the copy cannot hold (HB-1123).
+  // its next build makes one again that the copy cannot hold (HB-1123), and
+  // looks first by its id for one recorded after the copy (HB-1317).
   store.matchManagedCronsToCopy(agentId, Number.isFinite(copiedAt) ? copiedAt : 0);
   try {
     const seen = await provider.execShellOnVolume(runtimeRef, RESTORED_ACCESS_SCRIPT, { readOnly: true });
@@ -1092,12 +1106,15 @@ async function applyCurrentSettingsOver(deps: RestoreDeps, agentId: string, runt
       // current bot stays; the rest follows at its next rebuild.
       log('restore.reapply_partial', { agentId, error: String(err).slice(0, 200) });
       store.setAgentCuratedSkillsApplied(agentId, undefined);
-      const res = await provider.execShellOnVolume(runtimeRef, keepOnlyTelegramAccountScript(store.getChannelForAgent(agentId, 'telegram')?.accountId));
+      // Each write of the chat apps' config in the agent's turn at it, as every
+      // other is: a door write landing in its middle wrote back what this took
+      // out (HB-1554).
+      const res = await inChannelConfigTurn(store, agentId, () => provider.execShellOnVolume(runtimeRef, keepOnlyTelegramAccountScript(store.getChannelForAgent(agentId, 'telegram')?.accountId)));
       if (res.code !== 0) throw new Error(`dropping the old bot failed: ${res.stderr.slice(-200)}`);
       // Slack and Discord too: that night's tokens must not run either, and
       // without the build they can't be told from today's (B023). Google
       // accounts are matched to today's attachments when it starts (afterStart).
-      const chat = await provider.execShellOnVolume(runtimeRef, DROP_CHAT_ACCOUNTS_SCRIPT);
+      const chat = await inChannelConfigTurn(store, agentId, () => provider.execShellOnVolume(runtimeRef, DROP_CHAT_ACCOUNTS_SCRIPT));
       if (chat.code !== 0) throw new Error(`turning off Slack and Discord failed: ${chat.stderr.slice(-200)}`);
       const hasChat = !!(store.getChannelForAgent(agentId, 'slack') || store.getChannelForAgent(agentId, 'discord'));
       undone.push(
@@ -1109,7 +1126,7 @@ async function applyCurrentSettingsOver(deps: RestoreDeps, agentId: string, runt
   }
   const { targets } = revokedScrubTargets(store, agentId);
   if (targets.length) {
-    const res = await provider.execShellOnVolume(runtimeRef, allowlistScrubScript(targets));
+    const res = await inChannelConfigTurn(store, agentId, () => provider.execShellOnVolume(runtimeRef, allowlistScrubScript(targets)));
     if (res.code !== 0) throw new Error(`removing people again failed: ${res.stderr.slice(-200)}`);
   }
   return undone;

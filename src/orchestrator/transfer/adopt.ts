@@ -627,6 +627,9 @@ export function findExistingBot(
  */
 export type PollState = 'busy' | 'quiet' | 'unknown';
 
+/** How long a look at a bot's poll may take (botPollState). A bot hand-over's post waits this before its token check (HB-1427). */
+export const POLL_STATE_DEADLINE_MS = 5000;
+
 /**
  * NOTE ON WHAT THIS CAN PROVE: 'quiet' is not 'safe'. Telegram answers 409 only
  * when a getUpdates call is in flight at that instant, so a poller resting
@@ -642,7 +645,7 @@ export async function botPollState(
   try {
     const res = await fetchImpl(
       `https://api.telegram.org/bot${botToken}/getUpdates?limit=1&timeout=0`,
-      { signal: AbortSignal.timeout(5000) },
+      { signal: AbortSignal.timeout(POLL_STATE_DEADLINE_MS) },
     );
     if (res.status === 409) return 'busy';
     const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error_code?: number };

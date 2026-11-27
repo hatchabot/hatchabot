@@ -106,6 +106,17 @@ zram_bytes() {
 # What one of this script's own files ($CONF, $STATE) says NAME is ('' for
 # nothing), read in a subshell so none of its other names leak in. conf_value FILE NAME
 conf_value() { [ -f "$1" ] || return 0; ( unset "$2"; . "$1" >/dev/null 2>&1; printf '%s' "${!2:-}" ) || true; }
+# The command that sets up again what $CONF says, so a rerun changes nothing
+# but the files this script writes (a zram0 is not made again at another size).
+again() {
+  local m z p
+  m="$(conf_value "$CONF" MODE)" z="$(conf_value "$CONF" ZRAM_SIZE)" p="$(conf_value "$CONF" POOL)"
+  if [ "$m" = zram ]; then
+    printf 'sudo %s --zram%s' "$0" "$( [ "${z:-0}" = 0 ] || printf ' --zram-size %s' "$z")"
+  else
+    printf 'sudo %s%s%s' "$0" "${p:+ --pool $p}" "$( [ "$(conf_value "$CONF" SHRINKER)" != Y ] || printf ' --keep-shrinker')"
+  fi
+}
 human() { awk -v b="$1" 'BEGIN { if (b>=1073741824) printf "%.1f GB", b/1073741824; else printf "%d MB", b/1048576 }'; }
 
 # zram refuses a reset (EBUSY) while anything holds the device: udev probing
@@ -173,6 +184,13 @@ status() {
   else
     note "boot unit: not installed (nothing is re-applied at boot)"
   fi
+  # A helper this script's release did not write: one written before 2.193.0
+  # turned zswap off in zram mode beside a disk swap that came back (HB-1459),
+  # and it stays until this script writes it again. Its own path aside (SELF:
+  # where the script was run from, helper_state's `path`).
+  if [ -f "$HELPER" ] && [ "$(helper_state)" = other ]; then
+    note "boot helper: $HELPER was written by another release of this script, and does what that one did at boot. To bring it up to date, run this again with the same settings: $(again)"
+  fi
   # In the order Hatchabot judges it (src/domain/swap.ts, parseSwapProbe),
   # so the two never disagree: zram alone; zram with disk swap needs zswap;
   # zswap's shrinker writes agents' cold memory to disk early. The verdict is
@@ -199,16 +217,20 @@ status() {
   fi
 }
 
-if [ "$ACTION" = status ]; then status; exit 0; fi
-[ "$(id -u)" = 0 ] || [ "$DRY" = 1 ] || die "run it as root: sudo $0 ${*:-}"
-
 # The helper the boot unit runs: re-applies $CONF. Also what `enable` runs now.
-# Its paths written into it as they are named above.
+# Its paths written into it as they are named above, and this script's own
+# path as it was run (SELF), for the journal to name in a fix (HB-1459):
+# quoted for sh in an assignment of its own (SELF_Q), since bash before 4.3
+# (and BASH_COMPAT=42) reads that substitution inside double quotes its own
+# way, and a path with a ' left the helper a quote it never closed.
+SELF="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
+SELF_Q=${SELF//\'/\'\\\'\'}
 HELPER_BODY="#!/bin/sh
 # Written by Hatchabot scripts/enable-compressed-swap.sh: re-applies compressed
 # swap at boot from $CONF. Undo: that script --undo.
 set -u
-CONF='$CONF' ZS='$ZS' ZRAM='$ZRAM' SWAPS='$SWAPS'
+CONF='$CONF' ZS='$ZS' ZRAM='$ZRAM' SWAPS='$SWAPS' FSTAB='$FSTAB'
+SELF='$SELF_Q'
 "'. "$CONF"
 if [ "$MODE" = zswap ]; then
   modprobe "$COMPRESSOR" 2>/dev/null || true
@@ -218,7 +240,18 @@ if [ "$MODE" = zswap ]; then
   [ -w "$ZS/shrinker_enabled" ] && echo "$SHRINKER" > "$ZS/shrinker_enabled"
   echo Y > "$ZS/enabled"
 else
-  [ -w "$ZS/enabled" ] && echo N > "$ZS/enabled"
+  # zswap goes off only with zram the one swap: a disk swap beside it (one
+  # back through fstab since --zram, which refuses one) would be left
+  # uncompressed, the state Hatchabot gives agents no swap in (HB-1459). Then
+  # zswap is left as it is, and the journal says so and what to do.
+  DISK=$(awk '"'"'NR>1 && $1 !~ /^\/dev\/zram[0-9]+$/ {printf "%s%s", (n++ ? " " : ""), $1}'"'"' "$SWAPS")
+  if [ -n "$DISK" ] && [ -r "$ZS/enabled" ]; then
+    echo "zram: a disk swap is on beside zram ($DISK), so zswap is left as it is (enabled=$(cat "$ZS/enabled")): turned off, that swap would be uncompressed, and Hatchabot gives agents no swap on a machine like that. To fix it, turn that swap off (swapoff $DISK, and take its line out of $FSTAB), or use zswap in front of it instead: sudo $SELF, without --zram." >&2
+  elif [ -n "$DISK" ]; then
+    echo "zram: a disk swap is on beside zram ($DISK), and this kernel has no zswap to compress in front of it: that swap is uncompressed, and Hatchabot gives agents no swap on a machine like that. To fix it, turn that swap off: swapoff $DISK, and take its line out of $FSTAB." >&2
+  else
+    [ -w "$ZS/enabled" ] && echo N > "$ZS/enabled"
+  fi
   if ! grep -q "^/dev/zram0 " "$SWAPS"; then
     modprobe zram num_devices=1 || { echo "zram: module missing (linux-modules-extra-$(uname -r))" >&2; exit 1; }
     [ "$(cat "$ZRAM/disksize")" = 0 ] || echo 1 > "$ZRAM/reset"
@@ -229,6 +262,16 @@ else
   fi
 fi
 '
+# helper_state: the installed helper against HELPER_BODY: same; path, when
+# only its SELF= line differs (this release's, written from another
+# checkout); other (another release's, or none).
+helper_state() {
+  local have
+  have="$(cat "$HELPER" 2>/dev/null)" || { echo other; return 0; }
+  if [ "$have" = "$(printf '%s\n' "$HELPER_BODY")" ]; then echo same
+  elif [ "$(printf '%s\n' "$have" | grep -v '^SELF=')" = "$(printf '%s\n' "$HELPER_BODY" | grep -v '^SELF=')" ]; then echo path
+  else echo other; fi
+}
 UNIT_BODY="[Unit]
 Description=Hatchabot: compressed swap (zswap or zram) for agents
 Documentation=https://github.com/hatchabot/hatchabot/blob/main/docs/features.md
@@ -242,6 +285,9 @@ ExecStart=$HELPER
 
 [Install]
 WantedBy=multi-user.target"
+
+if [ "$ACTION" = status ]; then status; exit 0; fi
+[ "$(id -u)" = 0 ] || [ "$DRY" = 1 ] || die "run it as root: sudo $0 ${*:-}"
 
 # A compressor the kernel has: zstd (best ratio on agent memory, ~3.6:1 measured), else lz4, else the current.
 best_compressor() {
@@ -268,7 +314,28 @@ enable() {
     # before anything changes, with the two ways that work.
     local disk_swaps; disk_swaps="$(awk 'NR>1 && $1 !~ /^\/dev\/zram[0-9]+$/ {printf "%s%s", (n++ ? " " : ""), $1}' "$SWAPS")"
     if [ -n "$disk_swaps" ]; then
-      say "Nothing changed: --zram needs every disk swap off, and $disk_swaps is on."
+      # Set up in zram mode already, the boot helper is the one thing written:
+      # one an older release wrote turns zswap off at boot beside such a swap,
+      # and this refusal was the only answer a rerun had for it (HB-1459).
+      # One that differs only in the script's path is this release's, and
+      # says so: it did what the note below says already.
+      local helper_was; helper_was="$(helper_state)"
+      if [ "$(conf_value "$CONF" MODE)" = zram ] && [ "$helper_was" != same ]; then
+        write "$HELPER" "$HELPER_BODY"
+        run chmod 0755 "$HELPER"
+        if [ "$DRY" = 1 ] && [ "$helper_was" = path ]; then
+          say "Dry run: only the script's path in the boot helper would change (to $SELF), and nothing else: --zram needs every disk swap off, and $disk_swaps is on."
+        elif [ "$DRY" = 1 ]; then
+          say "Dry run: the boot helper would be brought up to date, and nothing else changed: --zram needs every disk swap off, and $disk_swaps is on."
+        elif [ "$helper_was" = path ]; then
+          say "Only the script's path in the boot helper changed (it names $SELF now); nothing else changed: --zram needs every disk swap off, and $disk_swaps is on."
+        else
+          say "The boot helper is brought up to date; nothing else changed: --zram needs every disk swap off, and $disk_swaps is on."
+          note "At boot it now leaves zswap as it is while a disk swap is on beside zram, and says so in the journal."
+        fi
+      else
+        say "Nothing changed: --zram needs every disk swap off, and $disk_swaps is on."
+      fi
       note "zram turns zswap off, so that swap would be uncompressed, and Hatchabot gives agents no swap on a machine like that."
       note "Either:"
       note "• use zswap instead, which compresses in front of that swap: run this again without --zram; or"

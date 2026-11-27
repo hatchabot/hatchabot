@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
@@ -62,7 +62,6 @@ async function world() {
   return { store, provider, f };
 }
 
-afterEach(() => clearBusy('a1'));
 
 describe('busy agents answer 409 on lifecycle routes', () => {
   for (const call of [

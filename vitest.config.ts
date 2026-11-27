@@ -9,8 +9,9 @@ export default defineConfig({
     // a run from here found four of them and ran 17,836 tests, theirs mid-edit
     // (2026-10-23). review-artifacts holds audit probes, not tests.
     exclude: [...configDefaults.exclude, '.claude/**', 'review-artifacts/**'],
-    // No test reaches the real Telegram (test/support/noTelegram.ts, HB-1437).
-    setupFiles: ['test/support/ownDataFolder.ts', 'test/support/noTelegram.ts'],
+    // No test reaches the real Telegram (test/support/noTelegram.ts, HB-1437),
+    // and each starts with no agent held (test/support/freshReservations.ts, HB-0873).
+    setupFiles: ['test/support/ownDataFolder.ts', 'test/support/noTelegram.ts', 'test/support/freshReservations.ts'],
     // Thirty seconds for every test, not Vitest's five. CI's runners share this
     // machine with other projects' jobs (load average 40 to 80), and a test
     // that loads src/api/routes.ts or runs real scripts then takes 6 to 9 s.

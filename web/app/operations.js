@@ -118,10 +118,9 @@ async function saveEmbedMode() {
   } catch (e) { f.fail(e); }
 }
 
-/** Pin (or clear) the runtime image. Empty input = back to the fleet default. */
 /** Pin (or clear) the runtime image AND rebuild onto it now, the way `hatchabot image try` does — a pin that
  *  waited for "the next rebuild" looked as if it had taken effect while the agent still ran the old image
- *  (Chris, 2026-09-24). A stopped agent picks it up when it starts. */
+ *  (Chris, 2026-09-24). A stopped agent picks it up when it starts. Empty input = back to the fleet default. */
 async function saveImagePin() {
   const v = $('editImage').value.trim();
   // The agent pinned is the one rebuilt, even when another agent's sheet opened meanwhile (audit #047).
@@ -157,11 +156,7 @@ async function v2SetAgentPolicy(id, body) {
   catch (e) { toast(e.message, 6000); await refresh(false); }
 }
 
-/**
- * On-demand memory checkpoint: the agent summarises the current conversation
- * into MEMORY.md now. The manual form of the pre-switch checkpoint — for before
- * an archive, before /new, or any reset you see coming. Resets nothing.
- */
+/** Download the agent's chat history, every conversation in its transcripts, as one markdown file. */
 async function downloadHistory(id, name) {
   toast(`Reading "${name}"'s chat history…`, 5000);
   try {
@@ -305,6 +300,11 @@ async function recoverContext(id, name) {
     toast(`Recovering ${r.messages} messages from ${r.conversations} earlier conversation${r.conversations > 1 ? 's' : ''} — "${name}" will confirm in its chat when it's saved them.`, 10000);
   } catch (e) { toast(e.message, 9000); }
 }
+/**
+ * On-demand memory checkpoint: the agent summarises the current conversation
+ * into MEMORY.md now. The manual form of the pre-switch checkpoint — for before
+ * an archive, before /new, or any reset you see coming. Resets nothing.
+ */
 async function checkpointAgent(id, name) {
   toast(`Saving "${name}"'s conversation to memory… (~20s)`, 6000);
   try {
@@ -501,15 +501,26 @@ function agentAttention(a) {
   if (a.spike) out.push({ key: 'spike:' + a.spike.at, icon: '⚠', sev: 80, rec: 'spike:' + a.id,
     why: `it used ${fmtTokens(a.spike.tokens)} tokens in the last 24 hours${a.spike.usual >= 1e6 ? ` — about ${Math.round(a.spike.tokens / a.spike.usual)}× its usual day` : ''} (Usage → Recommended)` });
   // Budgets (budgets.ts): from 80%, and a pause; keyed on the month, level and
-  // amount, so a cleared line comes back at 100% or with a new budget.
+  // amount, so a cleared line comes back at 100% or with a new budget, and when a
+  // class's move to another source ends its switch (HB-1477 review).
   // Only a budget at 100% (paused, moved, or over) is an Alert; 80% is a Recommended item (v2.158.0).
   // A pause of a month that is over, still owed its start (HB-1011): no Recommended item, since nothing is left to raise.
   if (a.budget?.line && a.budget.paused?.ended) out.push({ key: `budget-owed:${a.budget.paused.ended.month}`, icon: '⏸', sev: 85, why: a.budget.line });
-  else if (a.budget?.line && (a.budget.level === 100 || a.budget.paused || a.budget.downgraded)) out.push({ key: `budget:${a.budget.month}:${a.budget.level}:${a.budget.usd}${a.budget.paused ? ':p' : ''}`, icon: a.budget.paused ? '⏸' : '💵', sev: 85, rec: 'budget:' + a.id, why: a.budget.line + ' (Usage → Recommended)' });
+  // A switch to a cheaper model of a month that is over, its own model not back yet (HB-1496): nothing to raise either.
+  else if (a.budget?.line && a.budget.downgraded?.ended) out.push({ key: `budget-switch-owed:${a.budget.downgraded.ended.month}`, icon: '💵', sev: 85, why: a.budget.line });
+  else if (a.budget?.line && (a.budget.level === 100 || a.budget.paused || a.budget.downgraded)) out.push({ key: `budget:${a.budget.month}:${a.budget.level}:${a.budget.usd}${a.budget.paused ? ':p' : ''}${a.budget.classMovedSource ? ':class-' + a.budget.classMovedSource : ''}`, icon: a.budget.paused ? '⏸' : '💵', sev: 85, rec: 'budget:' + a.id, why: a.budget.line + ' (Usage → Recommended)' });
   // It can still reach something it should not (access overview: Sharing → Access).
   if (a.accessAlert?.line) out.push({ key: a.accessAlert.key, icon: '🔑', why: a.accessAlert.line });
   // "Tell me every $X" steps are the information the owner asked for: their message, the tooltip and Usage say them, not Alerts (v2.158.0).
   if (a.budgetPaused && !a.budget?.paused) out.push({ key: 'mbudget-pause:' + a.budgetPaused.at, icon: '⏸', sev: 85, why: a.budgetPaused.ended && a.budgetPaused.line ? a.budgetPaused.line : a.budgetPaused.staysStopped ? "this Hatchabot's monthly budget is used up, and it was stopped by hand: it stays stopped until you start it" : "paused by this Hatchabot's monthly budget — it starts again on the 1st, when the machine's budget is raised, or when you start it" });
+  // Moved to a cheaper model by this Hatchabot's budget, until the 1st (HB-1422). Only the machine's owner can raise that budget.
+  // On its class's own model (the cheaper one), there is nothing to switch back to: only that it is over (HB-1477 review).
+  // One of a month that is over, its own model not back yet, says so (HB-1496).
+  if (a.budgetCheaper?.ended && a.budgetCheaper.line) out.push({ key: `mbudget-cheaper-owed:${a.budgetCheaper.ended.month}:${a.budgetCheaper.to}`, icon: '💵', sev: 85, why: a.budgetCheaper.line });
+  else if (a.budgetCheaper?.classModel) out.push({ key: `mbudget-cheaper:class:${a.budgetCheaper.to}`, icon: '💵', sev: 85,
+    why: `On ${String(a.budgetCheaper.to).replace(/^.*\//, '')}, its class's model: this Hatchabot is over its monthly budget` });
+  else if (a.budgetCheaper) out.push({ key: `mbudget-cheaper:${a.budgetCheaper.until}:${a.budgetCheaper.to}`, icon: '💵', sev: 85,
+    why: `On ${String(a.budgetCheaper.to).replace(/^.*\//, '')} until ${a.budgetCheaper.until}: this Hatchabot's monthly budget moved it — ${myAccount?.hostOwner ? 'raise that budget to switch back now' : "ask the machine's owner"}` });
   if (a.machineBudget?.line && a.machineBudget.level === 100) out.push({ key: `mbudget:${a.machineBudget.month}:${a.machineBudget.level}:${a.machineBudget.usd}`, icon: '💵', sev: 85, rec: 'budget:machine', why: 'This Hatchabot (every agent): ' + a.machineBudget.line.replace(/^Over /, 'over ').replace(/^Used /, 'used ') + ' (Usage → Recommended)' });
   if (a.ops && v2Mine(a)) out.push(...v2MachineAlerts());
   if (a.selfRestarts) out.push({ key: 'restart:' + a.selfRestarts, icon: '↻', why: `its process quit and was started again ${a.selfRestarts === 1 ? 'once' : `${a.selfRestarts} times`} since the last rebuild — the Setup log has when and the exit code; Resources shows its memory against the cap` });

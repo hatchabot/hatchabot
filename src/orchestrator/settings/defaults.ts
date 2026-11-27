@@ -39,7 +39,8 @@ export interface DefaultsDeps {
   /** A running agent's managed AGENTS.md sections brought up to date; never rejects. */
   syncDocsHeld: (agent: Agent) => Promise<void>;
   /** An agent's file ceiling on each of its apps, or on one, set live. */
-  applyFilesCap: (agent: Agent, only?: ChannelKindForFiles) => Promise<{ applied: number; gone: boolean }>;
+  /** `skipped`: nothing to write to (being set up, rebuilt, moved or deleted), which says nothing of its machine. */
+  applyFilesCap: (agent: Agent, only?: ChannelKindForFiles) => Promise<{ applied: number; gone: boolean; skipped?: true }>;
   /** This machine's memory search service. */
   embedder: () => { readonly enabled: boolean; readonly external: string | undefined; restart(): Promise<unknown> };
 }
@@ -127,7 +128,7 @@ export function createDefaults(deps: DefaultsDeps): Defaults {
           const r = await applyFilesCap(a, kind);
           applied += r.applied;
           if (r.gone) volumeGone.push(a.name);
-          else if (!r.applied && a.hostId !== local && store.listChannelsForAgent(a.id).some((c) => c.kind === kind)) unreachable.add(a.hostId);
+          else if (!r.applied && !r.skipped && a.hostId !== local && store.listChannelsForAgent(a.id).some((c) => c.kind === kind)) unreachable.add(a.hostId);
         }
       }
       trace()('machine.default_set', { key: spec.key, value: checked.value || 'off', applied, ...(notApplied ? { notApplied } : {}) });

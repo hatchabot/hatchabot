@@ -14,11 +14,15 @@ import {
   selfPathReplacements,
   applyReplacements,
   rewriteWorkspaceFiles,
+  sourceTaskFingerprint,
 } from '../src/orchestrator/transfer/cronImport.js';
 import { WORKSPACE_DIR_TEMPLATE } from '../src/openclaw/configWriter.js';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { retargetImplicitCrons } from '../src/orchestrator/schedules/crons.js';
+
+/** A carried record's fingerprint, for the copy it names (HB-1200). */
+const carriedFp = (copyId: string) => expect.stringMatching(new RegExp(`^1:[0-9a-f]{16}:${copyId}$`));
 
 describe('cronAddArgs', () => {
   it('maps a cron-schedule agentTurn job to a disabled `cron add`', () => {
@@ -179,10 +183,9 @@ describe('self-path rewriting', () => {
 
   // HB-0629: the agent reads its files while the pass runs; one written in
   // place could be read cut short (emptied, then filled).
-  it('replaces each file it changes whole, through a file of its own, keeping its mode; a link is written through', async () => {
+  it('replaces each file it changes whole, through a file of its own, keeping its mode; a link to a file in the workspace is written through', async () => {
     const { json, script, to } = await rewritePass();
     const dir = mkdtempSync(join(tmpdir(), 'acl-rw-'));
-    const outside = mkdtempSync(join(tmpdir(), 'acl-rw-target-'));
     try {
       mkdirSync(join(dir, 'memory'));
       writeFileSync(join(dir, 'SOUL.md'), 'Read /source/agent/notes.md.');
@@ -191,10 +194,12 @@ describe('self-path rewriting', () => {
       writeFileSync(join(dir, 'AGENTS.md'), 'Nothing to re-point here.');
       writeFileSync(join(dir, 'USER.md'), 'Read-only, in /source/agent/user.');
       chmodSync(join(dir, 'USER.md'), 0o444);
-      writeFileSync(join(outside, 'shared.md'), 'Shared from /source/agent/shared.');
-      symlinkSync(join(outside, 'shared.md'), join(dir, 'TOOLS.md'));
+      // A file in the workspace the walk does not read by its own name, and a link to it that it does.
+      mkdirSync(join(dir, 'shared'));
+      writeFileSync(join(dir, 'shared', 'tools.notes'), 'Shared from /source/agent/shared.');
+      symlinkSync(join('shared', 'tools.notes'), join(dir, 'TOOLS.md'));
       const ino = (p: string) => statSync(p).ino;
-      const before = { soul: ino(join(dir, 'SOUL.md')), day: ino(join(dir, 'memory', 'day.md')), agents: ino(join(dir, 'AGENTS.md')), shared: ino(join(outside, 'shared.md')) };
+      const before = { soul: ino(join(dir, 'SOUL.md')), day: ino(join(dir, 'memory', 'day.md')), agents: ino(join(dir, 'AGENTS.md')), shared: ino(join(dir, 'shared', 'tools.notes')) };
       execFileSync(process.execPath, ['-e', script], { env: { PAIRS: json, WSDIR: dir } });
       expect(readFileSync(join(dir, 'SOUL.md'), 'utf8')).toBe(`Read ${to}/notes.md.`);
       expect(readFileSync(join(dir, 'memory', 'day.md'), 'utf8')).toBe(`Kept in ${to}/memory.`);
@@ -208,16 +213,95 @@ describe('self-path rewriting', () => {
       expect(statSync(join(dir, 'USER.md')).mode & 0o777).toBe(0o444);
       // One with nothing to change is left alone.
       expect(ino(join(dir, 'AGENTS.md'))).toBe(before.agents);
-      // A link stays a link, and what it points at is written as before.
+      // A link stays a link, and what it points at, in the workspace, is written as before.
       expect(lstatSync(join(dir, 'TOOLS.md')).isSymbolicLink()).toBe(true);
-      expect(readFileSync(join(outside, 'shared.md'), 'utf8')).toBe(`Shared from ${to}/shared.`);
-      expect(ino(join(outside, 'shared.md'))).toBe(before.shared);
+      expect(readFileSync(join(dir, 'shared', 'tools.notes'), 'utf8')).toBe(`Shared from ${to}/shared.`);
+      expect(ino(join(dir, 'shared', 'tools.notes'))).toBe(before.shared);
       // Nothing of its own is left behind.
-      expect(readdirSync(dir).sort()).toEqual(['AGENTS.md', 'SOUL.md', 'TOOLS.md', 'USER.md', 'memory']);
+      expect(readdirSync(dir).sort()).toEqual(['AGENTS.md', 'SOUL.md', 'TOOLS.md', 'USER.md', 'memory', 'shared']);
       expect(readdirSync(join(dir, 'memory'))).toEqual(['day.md']);
+      expect(readdirSync(join(dir, 'shared'))).toEqual(['tools.notes']);
     } finally {
       rmSync(dir, { recursive: true, force: true });
-      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  // HB-1501: the adopt never copies a link, so one in the workspace is the
+  // agent's own; what it points at outside the workspace is not the
+  // workspace's to re-point.
+  it('leaves a link to a file outside the workspace as it is, however it gets there, and writes through one that comes back in (HB-1501)', async () => {
+    const { json, script, to } = await rewritePass();
+    const base = mkdtempSync(join(tmpdir(), 'acl-rw-'));
+    const dir = join(base, 'ws');
+    const outside = join(base, 'elsewhere');
+    try {
+      mkdirSync(join(dir, 'memory'), { recursive: true });
+      mkdirSync(outside);
+      const text = 'Shared from /source/agent/shared.';
+      writeFileSync(join(outside, 'shared.md'), text);
+      writeFileSync(join(outside, 'notes.txt'), text);
+      writeFileSync(join(outside, 'kept.json'), text);
+      writeFileSync(join(dir, 'kept.notes'), text);
+      // Outside, by its absolute path, by a relative one, and through a link in the workspace that leads out.
+      symlinkSync(join(outside, 'shared.md'), join(dir, 'TOOLS.md'));
+      symlinkSync(join('..', '..', 'elsewhere', 'notes.txt'), join(dir, 'memory', 'notes.txt'));
+      symlinkSync(join(outside, 'kept.json'), join(dir, 'memory', 'out'));
+      symlinkSync('out', join(dir, 'memory', 'chain.json'));
+      // Out and back in: its real path is in the workspace.
+      symlinkSync(join('..', 'ws', 'kept.notes'), join(outside, 'back'));
+      symlinkSync(join(outside, 'back'), join(dir, 'BACK.md'));
+      const ino = (p: string) => statSync(p).ino;
+      const before = { shared: ino(join(outside, 'shared.md')), kept: ino(join(dir, 'kept.notes')) };
+      // The workspace reached through a link of its own: its real path is what counts.
+      symlinkSync(dir, join(base, 'ws-link'));
+      execFileSync(process.execPath, ['-e', script], { env: { PAIRS: json, WSDIR: join(base, 'ws-link') } });
+      for (const name of ['shared.md', 'notes.txt', 'kept.json']) expect(readFileSync(join(outside, name), 'utf8'), name).toBe(text);
+      expect(ino(join(outside, 'shared.md'))).toBe(before.shared);
+      for (const link of ['TOOLS.md', join('memory', 'notes.txt'), join('memory', 'chain.json'), 'BACK.md']) expect(lstatSync(join(dir, link)).isSymbolicLink(), link).toBe(true);
+      expect(readFileSync(join(dir, 'kept.notes'), 'utf8')).toBe(`Shared from ${to}/shared.`);
+      expect(ino(join(dir, 'kept.notes'))).toBe(before.kept);
+      expect(readdirSync(dir).sort()).toEqual(['BACK.md', 'TOOLS.md', 'kept.notes', 'memory']);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('removes the new file a killed pass left behind, and only that (HB-1467)', async () => {
+    const { json, script, to } = await rewritePass();
+    const dir = mkdtempSync(join(tmpdir(), 'acl-rw-'));
+    try {
+      mkdirSync(join(dir, 'memory'));
+      writeFileSync(join(dir, 'SOUL.md'), 'Read /source/agent/notes.md.');
+      // A pass killed between making its new file and renaming it over the old one.
+      writeFileSync(join(dir, '.hb-0123456789ab'), 'Read /opt/half-writ');
+      writeFileSync(join(dir, 'memory', '.hb-ba9876543210'), '');
+      // Not one of its names: kept.
+      writeFileSync(join(dir, '.hb-notes'), 'kept');
+      writeFileSync(join(dir, '.hb-0123456789AB'), 'kept');
+      mkdirSync(join(dir, '.hb-aaaaaaaaaaaa'));
+      execFileSync(process.execPath, ['-e', script], { env: { PAIRS: json, WSDIR: dir } });
+      expect(readFileSync(join(dir, 'SOUL.md'), 'utf8')).toBe(`Read ${to}/notes.md.`);
+      expect(readdirSync(dir).sort()).toEqual(['.hb-0123456789AB', '.hb-aaaaaaaaaaaa', '.hb-notes', 'SOUL.md', 'memory']);
+      expect(readdirSync(join(dir, 'memory'))).toEqual([]);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('tries another name for its new file when the one it drew is taken, rather than leave the file as it was (HB-1467)', async () => {
+    const { json, script, to } = await rewritePass();
+    const dir = mkdtempSync(join(tmpdir(), 'acl-rw-'));
+    const elsewhere = mkdtempSync(join(tmpdir(), 'acl-rw-pre-'));
+    try {
+      writeFileSync(join(dir, 'SOUL.md'), 'Read /source/agent/notes.md.');
+      // The first name it draws is taken (by a folder: no pass removes that one).
+      mkdirSync(join(dir, '.hb-abababababab'));
+      const pre = join(elsewhere, 'draw.cjs');
+      writeFileSync(pre, 'const c=require("crypto");const r=c.randomBytes;let n=0;c.randomBytes=(k)=>n++===0?Buffer.alloc(k,0xab):r(k);');
+      execFileSync(process.execPath, ['-r', pre, '-e', script], { env: { PAIRS: json, WSDIR: dir } });
+      expect(readFileSync(join(dir, 'SOUL.md'), 'utf8')).toBe(`Read ${to}/notes.md.`);
+      expect(readdirSync(dir).sort()).toEqual(['.hb-abababababab', 'SOUL.md']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(elsewhere, { recursive: true, force: true });
     }
   });
 
@@ -489,8 +573,8 @@ describe('readOpenclawCrons + workspace resolution', () => {
     store.insertHost({ id: 'h1', ownerId: 'o', kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
     store.insertAIProfile({ id: 'p1', ownerId: 'o', name: 'AI', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p1', createdAt: 'now' });
     store.insertAgent({ id: 'a1', ownerId: 'o', name: 'Tech', slug: 'tech', state: 'PROVISIONING', aiProfileId: 'p1', hostId: 'h1', persona: 'x', sharedMemory: false, createdAt: 'now', updatedAt: 'now' });
-    // A database from before the table: the next start makes it.
-    if (opts.before) { db.exec('DROP TABLE adopt_carried_tasks'); store = new Store(db); }
+    // A database from before the table (v2.190.0, whose schema was step 112): the next start makes it, and runs the steps since.
+    if (opts.before) { db.exec('DROP TABLE adopt_carried_tasks'); db.pragma('user_version = 112'); store = new Store(db); }
     // The older release writes the agent and nothing of this table.
     if (opts.rolledBack) { db.prepare('DELETE FROM adopt_carried_tasks WHERE agent_id = ?').run('a1'); store = new Store(db); }
     let made = 0;
@@ -642,8 +726,8 @@ describe('readOpenclawCrons + workspace resolution', () => {
       expect(adds()[0]).toEqual(expect.arrayContaining(['--json', '--session-key', 'agent:tech:main']));
       expect(adds()[1]).toEqual(expect.arrayContaining(['--json', '--account', 'kitchenbot']));
       expect(store.carriedTasks('a1')).toEqual([
-        { sourceAgent: 'garden-advisor', sourceId: 's0', copyId: 'c1' },
-        { sourceAgent: 'garden-advisor', sourceId: 's1', copyId: 'c2' },
+        { sourceAgent: 'garden-advisor', sourceId: 's0', copyId: 'c1', fingerprint: carriedFp('c1') },
+        { sourceAgent: 'garden-advisor', sourceId: 's1', copyId: 'c2', fingerprint: carriedFp('c2') },
       ]);
       // Adopted again with the two it carried there beside the others: neither is added twice (B37).
       list([...others, copyOf('c1', bound, adds()[0]!), copyOf('c2', sent, adds()[1]!)]);
@@ -759,7 +843,7 @@ describe('readOpenclawCrons + workspace resolution', () => {
       list([{ id: 'x1', enabled: false, ...task, sessionTarget: 'current', sessionKey: 'agent:tech:main' }]);
       expect(await adopt()).toEqual({ total: 1, carried: 1, failed: 0 });
       expect(adds()).toHaveLength(0);
-      expect(store.carriedTasks('a1')).toEqual([{ sourceAgent: 'garden-advisor', sourceId: 's0', copyId: 'x1' }]);
+      expect(store.carriedTasks('a1')).toEqual([{ sourceAgent: 'garden-advisor', sourceId: 's0', copyId: 'x1', fingerprint: carriedFp('x1') }]);
       // An agent made since is not one of them; a deleted agent's rows go with it.
       store.insertAgent({ id: 'a2', ownerId: 'o', name: 'Garden', slug: 'garden', state: 'PROVISIONING', aiProfileId: 'p1', hostId: 'h1', persona: 'x', sharedMemory: false, createdAt: 'now', updatedAt: 'now' });
       expect(store.mayHoldUnrecordedCarriedTasks('a2')).toBe(false);
@@ -777,7 +861,7 @@ describe('readOpenclawCrons + workspace resolution', () => {
       list([{ id: 'x1', enabled: false, ...task }]);
       expect(await adopt()).toEqual({ total: 1, carried: 1, failed: 0 });
       expect(adds()).toHaveLength(0);
-      expect(store.carriedTasks('a1')).toEqual([{ sourceAgent: 'garden-advisor', sourceId: 's0', copyId: 'x1' }]);
+      expect(store.carriedTasks('a1')).toEqual([{ sourceAgent: 'garden-advisor', sourceId: 's0', copyId: 'x1', fingerprint: carriedFp('x1') }]);
       // One this release made is not taken for an older release's at a start.
       store.insertAgent({ id: 'a2', ownerId: 'o', name: 'Garden', slug: 'garden', state: 'PROVISIONING', aiProfileId: 'p1', hostId: 'h1', persona: 'x', sharedMemory: false, createdAt: 'now', updatedAt: 'now' });
       new Store(db);
@@ -792,7 +876,7 @@ describe('readOpenclawCrons + workspace resolution', () => {
       provider.execResponses.set('cron add', { code: 0, stderr: '', stdout: 'Added.\n' });
       list([]);
       expect(await adopt()).toEqual({ total: 1, carried: 1, failed: 0 });
-      expect(store.carriedTasks('a1')).toEqual([{ sourceAgent: 'garden-advisor', sourceId: 's0' }]);
+      expect(store.carriedTasks('a1')).toEqual([{ sourceAgent: 'garden-advisor', sourceId: 's0', fingerprint: carriedFp('') }]);
       // Its owner deleted it: the next adopt adds it again.
       list([]);
       expect(await adopt()).toEqual({ total: 1, carried: 1, failed: 0 });
@@ -801,7 +885,7 @@ describe('readOpenclawCrons + workspace resolution', () => {
       list([{ id: 'x2', enabled: false, ...task }]);
       expect(await adopt()).toEqual({ total: 1, carried: 1, failed: 0 });
       expect(adds()).toHaveLength(2);
-      expect(store.carriedTasks('a1')).toEqual([{ sourceAgent: 'garden-advisor', sourceId: 's0', copyId: 'x2' }]);
+      expect(store.carriedTasks('a1')).toEqual([{ sourceAgent: 'garden-advisor', sourceId: 's0', copyId: 'x2', fingerprint: carriedFp('x2') }]);
     });
 
     it('in one run, a copy matched to one task is not then matched to a second alike but for its conversation', async () => {
@@ -814,7 +898,7 @@ describe('readOpenclawCrons + workspace resolution', () => {
         expect(await adopt(), name).toEqual({ total: 2, carried: 2, failed: 0 });
         expect(adds(), name).toHaveLength(1);
         expect(adds()[0], name).toEqual(expect.arrayContaining(['--session-key', 'agent:tech:main']));
-        expect(store.carriedTasks('a1'), name).toContainEqual({ sourceAgent: 'garden-advisor', sourceId: `s${order.indexOf(b)}`, copyId: 'xb' });
+        expect(store.carriedTasks('a1'), name).toContainEqual({ sourceAgent: 'garden-advisor', sourceId: `s${order.indexOf(b)}`, copyId: 'xb', fingerprint: carriedFp('xb') });
       }
     });
 
@@ -897,7 +981,102 @@ describe('readOpenclawCrons + workspace resolution', () => {
       list([{ ...copyOf('c1', task, adds()[0]!), sessionTarget: 'current', sessionKey: 'agent:tech:main' }]);
       expect(await adopt()).toEqual({ total: 1, carried: 1, failed: 0 });
       expect(adds()).toHaveLength(1);
-      expect(store.carriedTasks('a1')).toEqual([{ sourceAgent: 'garden-advisor', sourceId: 's0', copyId: 'c1' }]);
+      expect(store.carriedTasks('a1')).toEqual([{ sourceAgent: 'garden-advisor', sourceId: 's0', copyId: 'c1', fingerprint: carriedFp('c1') }]);
+    });
+
+    // HB-1200, as the owner chose: a task edited in the old workspace since it
+    // was carried keeps its copy as it was, and the adopt says how many.
+    describe('a source task edited since it was carried (HB-1200)', () => {
+      /** The source task with that id, as its store now holds it. */
+      const rewrite = (file: string, id: string, job: object) => {
+        const s = new Database(join(root, file));
+        try { s.prepare('UPDATE cron_jobs SET job_json = ? WHERE job_id = ?').run(JSON.stringify(job), id); } finally { s.close(); }
+      };
+      const daily = { name: 'Daily brief', schedule: { kind: 'cron', expr: '0 8 * * *', tz: 'America/Toronto' }, payload: { kind: 'agentTurn', message: 'Write the brief' }, sessionTarget: 'isolated', delivery: { mode: 'announce' } };
+      const hourly = { name: 'Water check', ...brief, sessionTarget: 'isolated', delivery: { mode: 'none' } };
+      const once = { name: 'Seed order', schedule: { kind: 'at', at: '2026-12-01T12:00:00Z' }, payload: { kind: 'systemEvent', message: 'Order the seeds' }, sessionTarget: 'main' };
+
+      it('is not brought again, and counted, adopt after adopt; one not edited is not', async () => {
+        const { store, adopt, adds, list } = await adoptWorld('edited.sqlite', [daily, hourly, once]);
+        list([]);
+        expect(await adopt()).toEqual({ total: 3, carried: 3, failed: 0 });
+        list([copyOf('c1', daily, adds()[0]!), copyOf('c2', hourly, adds()[1]!), copyOf('c3', once, adds()[2]!)]);
+        // Adopted again, nothing edited: nothing said.
+        expect(await adopt()).toEqual({ total: 3, carried: 3, failed: 0 });
+        // Its prompt edited, and its schedule.
+        rewrite('edited.sqlite', 's0', { ...daily, payload: { ...daily.payload, message: 'Write a shorter brief' } });
+        rewrite('edited.sqlite', 's1', { ...hourly, schedule: { kind: 'every', everyMs: 7_200_000 } });
+        expect(await adopt()).toEqual({ total: 3, carried: 3, failed: 0, changed: 2 });
+        expect(await adopt()).toEqual({ total: 3, carried: 3, failed: 0, changed: 2 });
+        expect(adds()).toHaveLength(3);
+        // Its name, its description, its time of day, its zone, its kind: each is an edit.
+        for (const job of [{ ...once, name: 'Seed orders' }, { ...once, description: 'Before the catalogue closes' },
+          { ...once, schedule: { kind: 'at', at: '2026-12-02T12:00:00Z' } },
+          { ...once, payload: { kind: 'agentTurn', message: 'Order the seeds' } }]) {
+          rewrite('edited.sqlite', 's2', job);
+          expect(await adopt(), JSON.stringify(job)).toEqual({ total: 3, carried: 3, failed: 0, changed: 3 });
+        }
+        rewrite('edited.sqlite', 's0', { ...daily, schedule: { ...daily.schedule, tz: 'America/Halifax' } });
+        rewrite('edited.sqlite', 's2', once);
+        expect(await adopt()).toEqual({ total: 3, carried: 3, failed: 0, changed: 2 });
+        expect(adds()).toHaveLength(3);
+      });
+
+      it('what OpenClaw stamps on it, where it runs and who it goes to, and its time written as a number, are no edit', async () => {
+        const { adopt, adds, list } = await adoptWorld('stamped.sqlite', [daily, once]);
+        list([]);
+        expect(await adopt()).toEqual({ total: 2, carried: 2, failed: 0 });
+        list([copyOf('c1', daily, adds()[0]!), copyOf('c2', once, adds()[1]!)]);
+        rewrite('stamped.sqlite', 's0', { ...daily, id: 's0', enabled: true, state: { lastRunAtMs: 1_764_590_400_000, nextRunAtMs: 1_764_676_800_000, lastStatus: 'ok' },
+          updatedAtMs: 1_764_590_400_000, sessionTarget: 'current', sessionKey: 'agent:garden-advisor:main', delivery: { mode: 'announce', channel: 'telegram', to: CHAT } });
+        rewrite('stamped.sqlite', 's1', { ...once, schedule: { kind: 'at', atMs: Date.parse(once.schedule.at) }, payload: { kind: 'systemEvent', text: 'Order the seeds' } });
+        expect(await adopt()).toEqual({ total: 2, carried: 2, failed: 0 });
+        expect(adds()).toHaveLength(2);
+      });
+
+      it('the fingerprint: a description is part of it, and an agent turn is one kind however it is written (HB-1200 review)', () => {
+        const turn = { name: 'Daily brief', scheduleKind: 'cron', scheduleExpr: '0 8 * * *', payloadMessage: 'Write the brief' } as const;
+        expect(sourceTaskFingerprint({ ...turn, description: 'For the kitchen' })).not.toBe(sourceTaskFingerprint({ ...turn, description: 'For the garden' }));
+        expect(sourceTaskFingerprint({ ...turn, description: 'For the kitchen' })).not.toBe(sourceTaskFingerprint(turn));
+        const kinds = [undefined, 'agentTurn', 'message'].map((payloadKind) => sourceTaskFingerprint({ ...turn, payloadKind }));
+        expect(new Set(kinds).size).toBe(1);
+        expect(sourceTaskFingerprint({ ...turn, payloadKind: 'systemEvent' })).not.toBe(kinds[0]);
+        expect(sourceTaskFingerprint({ ...turn, payloadKind: 'command' })).not.toBe(kinds[0]);
+        expect(sourceTaskFingerprint({ ...turn, payloadKind: 'command' })).not.toBe(sourceTaskFingerprint({ ...turn, payloadKind: 'systemEvent' }));
+      });
+
+      it('a record from before these were kept, or one an older release gave another copy since, is never counted', async () => {
+        const { db, store, adopt, adds, list } = await adoptWorld('older-records.sqlite', [daily, hourly]);
+        list([]);
+        expect(await adopt()).toEqual({ total: 2, carried: 2, failed: 0 });
+        // s0's record from before the fingerprint; s1's copy replaced by an older release, which leaves the column as it was.
+        db.prepare(`UPDATE adopt_carried_tasks SET fingerprint = NULL WHERE source_id = 's0'`).run();
+        db.prepare(`UPDATE adopt_carried_tasks SET copy_id = 'c9' WHERE source_id = 's1'`).run();
+        list([copyOf('c1', daily, adds()[0]!), copyOf('c9', hourly, adds()[1]!)]);
+        rewrite('older-records.sqlite', 's0', { ...daily, name: 'Morning brief' });
+        rewrite('older-records.sqlite', 's1', { ...hourly, name: 'Water the beds' });
+        expect(await adopt()).toEqual({ total: 2, carried: 2, failed: 0 });
+        expect(adds()).toHaveLength(2);
+        expect(store.carriedTasks('a1').map((k) => k.fingerprint)).toEqual([undefined, carriedFp('c2')]);
+      });
+
+      it('one whose copy is gone is added as it is now, and is not counted after', async () => {
+        const { store, adopt, adds, list } = await adoptWorld('edited-gone.sqlite', [daily]);
+        list([]);
+        expect(await adopt()).toEqual({ total: 1, carried: 1, failed: 0 });
+        const was = store.carriedTasks('a1')[0]!.fingerprint;
+        const now = { ...daily, payload: { ...daily.payload, message: 'Write a shorter brief' } };
+        rewrite('edited-gone.sqlite', 's0', now);
+        // Its owner deleted the copy: the task comes over as it is now.
+        list([]);
+        expect(await adopt()).toEqual({ total: 1, carried: 1, failed: 0 });
+        expect(adds()).toHaveLength(2);
+        expect(adds()[1]).toEqual(expect.arrayContaining(['--message', 'Write a shorter brief']));
+        expect(store.carriedTasks('a1')).toEqual([{ sourceAgent: 'garden-advisor', sourceId: 's0', copyId: 'c2', fingerprint: carriedFp('c2') }]);
+        expect(store.carriedTasks('a1')[0]!.fingerprint!.split(':')[1]).not.toBe(was!.split(':')[1]);
+        list([copyOf('c2', now, adds()[1]!)]);
+        expect(await adopt()).toEqual({ total: 1, carried: 1, failed: 0 });
+      });
     });
   });
 });

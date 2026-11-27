@@ -132,10 +132,16 @@ else bad "index: $(echo "$idx" | tr '\n' ' ' | head -c 160) · status: $(echo "$
 
 step "ask: it answers (one real model turn on the candidate)"
 # When it began: the practice turn below holds the usage reader to seeing it.
-# By the container's clock, which the transcripts' times come from; the
-# machine's when it gives none in milliseconds (a date without %N).
+# By the container's clock, which the transcripts' times come from: in
+# milliseconds, 13 digits; to the second from a date without %N (busybox,
+# musl), which printed seconds alone were read as milliseconds, 1000 times too
+# early (HB-1453); the machine's clock when it gives neither.
 ASK_AT="$(docker exec "$CONTAINER" date +%s%3N 2>/dev/null)"
-case "$ASK_AT" in ''|*[!0-9]*) ASK_AT="$(node -e 'process.stdout.write(String(Date.now()))')" ;; esac
+case "$ASK_AT" in
+  [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+  [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ASK_AT="${ASK_AT}000" ;;
+  *) ASK_AT="$(node -e 'process.stdout.write(String(Date.now()))')" ;;
+esac
 r=$($HB ask "$NAME" "Reply with exactly this token and nothing else: PING-$NONCE" 2>&1)
 echo "$r" | grep -q "PING-$NONCE" && ok || bad "reply: $(echo "$r" | head -c 200)"
 
@@ -152,10 +158,15 @@ P_OC="$(sed -n "s/^export const PRACTICE_OPENCLAW = '\([^']*\)';.*/\1/p" "$ROOT/
 if [ -x "$ROOT/node_modules/.bin/tsx" ]; then
   out="$(cd "$ROOT" && node_modules/.bin/tsx scripts/practice-check.ts "$CONTAINER" "$SLUG" "$VERSION" ${ASK_AT:+--ask-at "$ASK_AT"} 2>&1)"; rc=$?
   last="$(printf '%s\n' "$out" | tail -n 1)"
-  # Its verdict is its last line when it ends with one (0 holds, 1 does not, 3 could not tell); anything else stopped it.
-  case "$rc" in
-    0|1|3) PRACTICE="$last" ;;
-    *) why="${last:0:300}"; PRACTICE="Practice stays on OpenClaw ${P_OC:-the release it runs on}: could not check: the practice check stopped (${why:-exit $rc})" ;;
+  # Its verdict is its last line when it ends with one, which starts "Practice " (0 holds, 1 does not,
+  # 3 could not tell); anything else stopped it. A throw exits 1 too, its last line Node's version
+  # (HB-1453): the error's own line says why.
+  case "$rc:$last" in
+    [013]:Practice\ *) PRACTICE="$last" ;;
+    *) why="$(printf '%s\n' "$out" | grep -E '^[A-Za-z]*(Error|Exception)( \[[A-Z_]+\])?(:|$)' | tail -n 1)"
+       [ -n "$why" ] || why="$(printf '%s\n' "$out" | grep -v -e '^Node\.js v' -e '^[[:space:]]*$' | tail -n 1)"
+       why="${why:0:300}"
+       PRACTICE="Practice stays on OpenClaw ${P_OC:-the release it runs on}: could not check: the practice check stopped (${why:-exit $rc})"; rc=stopped ;;
   esac
   [ "$rc" = 0 ] && { ok; echo "  $PRACTICE"; } || warn "$PRACTICE"
 else

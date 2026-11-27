@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { Store } from '../src/store/store.js';
+import { eventLabel } from '../src/orchestrator/health/eventLabels.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { HOUR_FIELDS, USAGE_READER_SCRIPT, type HourField, type WindowModelStats } from '../src/orchestrator/usage/usage.js';
@@ -337,6 +338,39 @@ describe('the quality guard\'s switch-back card', () => {
     expect(restarted.getMgmtProposal<PendingConfirm>(filed[0]!)).toMatchObject({ tool: 'set_model', source: 'guard', resolved: { agentId: 'a1', guardOf: row.id } });
   });
 
+  it('a claim a release before 2.191.0 left without its card is let go of at the next start, and the next pass files the card (HB-1178)', () => {
+    const now = T0 + 8 * DAY;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(now);
+    try {
+      const { store, row } = switched(turnsAfter(10, { failed: 3, malformed: 3 }), now);
+      evaluateModelChanges(store, now);
+      // What a release before 2.191.0 could leave: the claim, then the process ended before its card.
+      expect(store.claimModelChangeGuard(row.id, 'c_lostcard')).toBe(true);
+      // One judged more than a week ago, whose card may have been pruned since; and one the guard is done with.
+      for (const [id, claim, judged] of [['mc_old', 'c_pruned', now - 10 * DAY], ['mc_none', 'none:moved-on', now - DAY]] as const) {
+        store.addModelChange({ id, agentId: 'a1', ownerId: OWNER, from: 'claude-opus-4-8', to: 'claude-haiku-4-5', at: iso(judged - 7 * DAY), by: 'owner', via: 'app', source: 'model', outcome: 'pending' });
+        store.setModelChangeOutcome(id, 'worse', undefined, ['failed turns'], iso(judged));
+        store.claimModelChangeGuard(id, claim);
+      }
+      expect(fileGuardProposals({ store, now })).toEqual([]);
+      // The upgrade: the next start, over the same database.
+      const db = (store as unknown as { db: Database.Database }).db;
+      const upgraded = new Store(db);
+      // Was: claimed for good, with no card.
+      expect(upgraded.getModelChange(row.id)!.guardProposalId).toBeFalsy();
+      expect(upgraded.getModelChange('mc_old')!.guardProposalId).toBe('c_pruned');
+      expect(upgraded.getModelChange('mc_none')!.guardProposalId).toBe('none:moved-on');
+      const filed = fileGuardProposals({ store: upgraded, now });
+      expect(filed).toHaveLength(1);
+      expect(upgraded.getMgmtProposal<PendingConfirm>(filed[0]!)).toMatchObject({ tool: 'set_model', source: 'guard', resolved: { agentId: 'a1', guardOf: row.id } });
+      // A claim whose card is there is left as it is at the start after.
+      expect(new Store(db).getModelChange(row.id)!.guardProposalId).toBe(filed[0]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('an asleep agent: its verdict and card come from its last reading, and it stays asleep', () => {
     const now = T0 + 8 * DAY;
     const { store } = switched(turnsAfter(10, { failed: 3 }), T0 + 2 * DAY);
@@ -403,6 +437,33 @@ describe('the quality guard\'s switch-back card', () => {
     expect(filed).toHaveLength(1);
     expect(store.getModelChange(row.id)!.guardProposalId).toBe(filed[0]);
     expect(store.getMgmtProposal<PendingConfirm>(filed[0]!)!.resolved).toMatchObject({ agentId: 'a1', model: 'claude-opus-4-8', guardOf: row.id });
+  });
+
+  it('the card and its push name the old model in the spelling the source offers, the one it switches to (HB-1273)', () => {
+    const now = T0 + 8 * DAY;
+    const { store } = switched(turnsAfter(10, { failed: 3, malformed: 3 }), now, { from: 'anthropic/claude-opus-4-8' });
+    evaluateModelChanges(store, now);
+    const pushed: string[] = [];
+    const filed = fileGuardProposals({ store, now, push: (_owner, headline) => pushed.push(headline) });
+    const summary = store.getMgmtProposal<PendingConfirm>(filed[0]!)!.summary!;
+    // Was: "anthropic/claude-opus-4-8" in the title, the reason and the push, while the card's action switched to "claude-opus-4-8".
+    expect(summary).not.toContain('anthropic/');
+    expect(summary.split('\n')[0]).toBe('↩ Switch "Agent a1" back to claude-opus-4-8');
+    expect(summary).toContain('moved from claude-opus-4-8 to claude-haiku-4-5');
+    expect(pushed).toEqual(['↩ Hatchabot suggests switching "Agent a1" back to claude-opus-4-8: it does worse on claude-haiku-4-5.']);
+  });
+
+  it("the activity entry names the model the card switches to, in the source's spelling (HB-1499)", () => {
+    const now = T0 + 8 * DAY;
+    const { store } = switched(turnsAfter(10, { failed: 3, malformed: 3 }), now, { from: 'anthropic/claude-opus-4-8' });
+    evaluateModelChanges(store, now);
+    const logged: Array<{ event: string; detail: Record<string, unknown> }> = [];
+    const filed = fileGuardProposals({ store, now, log: (event, detail) => logged.push({ event, detail }) });
+    const entry = logged.find((l) => l.event === 'model.guard_proposed')!;
+    // Was: "anthropic/claude-opus-4-8", the ledger's spelling, while the card switches to "claude-opus-4-8".
+    expect(entry.detail).toMatchObject({ to: 'claude-opus-4-8', from: 'claude-haiku-4-5' });
+    expect(entry.detail.to).toBe(store.getMgmtProposal<PendingConfirm>(filed[0]!)!.resolved!.model);
+    expect(eventLabel(entry.event, entry.detail)).toBe('Hatchabot suggests switching back to claude-opus-4-8: it did worse on claude-haiku-4-5');
   });
 
   it('confirming the card switches back, and the ledger says Hatchabot\'s guard did it; no container is read for any of it', async () => {
@@ -594,6 +655,25 @@ describe('a set_model card states the evidence, and a downgrade\'s risks', () =>
     });
     const c = assessModelChange(store, agent, source, 'claude-haiku-4-5', now);
     expect(c.warnings).toEqual(['Recent errors: 3 failed turns in the last 7 days (not rate limits).']);
+  });
+
+  it('during a switch of source, its evidence is what its container runs: the source it was built with, and that model (HB-1498)', () => {
+    const w = baseStore();
+    w.add('a1', 'plan');
+    // Saved onto the Max plan, still running Opus 4.8 on the key until its rebuild.
+    w.store.setAgentApplied('a1', 'key', 'claude-opus-4-8');
+    w.store.setModelProfile('a1', profile(now, { 'claude-opus-4-8': hourly({ [now - 9 * DAY]: { calls: 500, input: 5e6, output: 5e5, turns: 100 } }, { first: now - 20 * DAY }) }), iso(now - HOUR));
+    const c = assessModelChange(w.store, w.store.getAgent('a1')!, w.store.getAIProfile('plan')!, 'claude-haiku-4-5', now);
+    // Was: "now claude-sonnet-5" (the plan's default), its turns on it none, and "room in the plan, not money".
+    expect(c).toMatchObject({ from: 'claude-opus-4-8', to: 'claude-haiku-4-5', downgrade: true });
+    expect(c.evidence).toMatch(/^Evidence \(.* days, now claude-opus-4-8\): 100 turns/);
+    expect(c.evidence).not.toContain('a Claude plan');
+    expect(c.warnings.some((x) => x.startsWith('Thin evidence'))).toBe(false);
+    // Rebuilt onto the plan: the plan's, as before.
+    w.store.setAgentApplied('a1', 'plan', 'claude-sonnet-5');
+    const after = assessModelChange(w.store, w.store.getAgent('a1')!, w.store.getAIProfile('plan')!, 'claude-haiku-4-5', now);
+    expect(after.from).toBe('claude-sonnet-5');
+    expect(after.evidence).toContain('(a Claude plan: room in the plan, not money)');
   });
 
   it('only rate limits: no error warning; and an upgrade carries no warnings at all', () => {

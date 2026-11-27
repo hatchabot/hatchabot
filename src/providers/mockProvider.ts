@@ -305,8 +305,10 @@ export class MockProvider implements RuntimeProvider {
   /** What the mock image claims to run; tests set a 2026.8+ version to see the port paths. */
   imageOpenclawVersion = 'mock';
   async currentImageInfo(image?: string): Promise<RuntimeInfo> {
-    // A named tag answers with that tag's id from `tags` (tests set them); the default answers 'mock-image'.
-    const known = image ? this.tags.find((t) => t.tag === image) : this.tags.find((t) => t.tag === 'hatchabot-runtime:latest');
+    // A named tag answers with that tag's id from `tags` (tests set them), and none named is
+    // the provider's image, as the real providers read it (HB-1557); one not in `tags` answers 'mock-image'.
+    const ref = image ?? this.image;
+    const known = this.tags.find((t) => t.tag === ref);
     return { imageId: known?.imageId ?? 'mock-image', openclawVersion: known?.openclawVersion ?? this.imageOpenclawVersion, channels: this.imageChannels, embedEngine: this.imageEmbedEngine, plugins: this.imagePlugins, pluginInstall: this.imagePluginInstall };
   }
 
@@ -364,6 +366,8 @@ export class MockProvider implements RuntimeProvider {
       tag, imageId: `built-${tag}`,
       ...(from?.buildInputs ? { buildInputs: from.buildInputs } : {}),
       ...(from?.layers ? { layers: [...from.layers, own] } : {}),
+      // How it runs: the base's, as a recipe's build (its lines end USER node) leaves it.
+      ...(from?.config ? { config: from.config } : {}),
       ...(extra !== undefined ? { extraPackages: extra.split(' ').filter(Boolean) } : {}),
       ...(labels['org.hatchabot.derived'] ? { derived: labels['org.hatchabot.derived'] } : {}),
       ...(labels['org.hatchabot.recipe'] ? { recipe: labels['org.hatchabot.recipe'] } : {}),

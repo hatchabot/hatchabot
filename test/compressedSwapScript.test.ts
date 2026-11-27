@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { scriptEnv, systemPathWithout } from './helpers/scriptEnv.js';
@@ -54,6 +54,10 @@ interface Fixture {
   swapoffFails?: boolean;
   /** swapon returns 0 but no device comes on (the kernel did not take it). */
   swaponIgnored?: boolean;
+  /** A folder of the made-up machine the script is run from (it is in the root itself otherwise). */
+  scriptDir?: string;
+  /** More of the environment the script and the helper run with (BASH_COMPAT, say). */
+  env?: Record<string, string>;
 }
 
 function machine(f: Fixture = {}) {
@@ -122,13 +126,19 @@ exit 0`);
   shim('uname', 'case "$1" in -r) echo 6.8.0-fixture ;; *) echo Linux ;; esac');
   shim('id', 'echo 0');
   const sys = systemPathWithout(join(root, 'sysbin'), UNREACHABLE);
-  const script = join(root, 'enable-compressed-swap.sh');
+  const script = join(root, f.scriptDir ?? '', 'enable-compressed-swap.sh');
+  mkdirSync(dirname(script), { recursive: true });
   writeFileSync(script, sandboxed(p), { mode: 0o755 });
-  const run = (...args: string[]) => spawnSync('bash', [script, ...args], { encoding: 'utf8', env: scriptEnv(home, `${bin}:${sys}`), input: '' });
+  const env = scriptEnv(home, `${bin}:${sys}`, f.env);
+  const run = (...args: string[]) => spawnSync('bash', [script, ...args], { encoding: 'utf8', env, input: '' });
+  /** The boot helper the script wrote, as the boot unit runs it (sh), in the same made-up machine. */
+  const helper = () => spawnSync('sh', [p.HELPER], { encoding: 'utf8', env, input: '' });
+  /** /proc/swaps as a boot leaves it: these devices in use, and only these. */
+  const bootSwaps = (devices: string[]) => put(p.SWAPS, ['Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority', ...devices.map((d) => swapLine(d))].join('\n') + '\n');
   const read = (file: string) => (existsSync(file) ? readFileSync(file, 'utf8') : undefined);
   const log = () => readFileSync(calls, 'utf8').split('\n').filter(Boolean);
   const swaps = () => readFileSync(p.SWAPS, 'utf8').split('\n').slice(1).filter(Boolean).map((l) => l.split(/\s+/)[0]);
-  return { root, p, zram, run, read, log, swaps, shim };
+  return { root, p, zram, script, run, read, log, swaps, shim, helper, bootSwaps };
 }
 
 describe('enable-compressed-swap.sh runs on a made-up machine only', () => {
@@ -494,5 +504,143 @@ describe('a swap file a later run makes is undone with the rest (HB-1113)', () =
     const m = machine({ swaps: ['/dev/vdb2'], state: 'PREV_ZSWAP_ENABLED=N\nPREV_ZRAM0=0\nMADE_SWAPFILE=0\n' });
     expect(m.run('--yes').status).toBe(0);
     expect(m.read(m.p.STATE)).toBe('PREV_ZSWAP_ENABLED=N\nPREV_ZRAM0=0\nMADE_SWAPFILE=0\n');
+  });
+});
+
+describe('the boot helper in zram mode beside a disk swap that came back (HB-1459)', () => {
+  it('zswap is left as it is, and the journal says a disk swap is on beside zram and how to fix it; with zram alone it goes off as before', () => {
+    // Set up with zram as the one swap (--zram refuses a disk swap): the helper turns zswap off.
+    const m = machine({ zswap: { enabled: 'Y' } });
+    const set = m.run('--zram', '--yes');
+    expect(set.status, set.stdout + set.stderr).toBe(0);
+    expect(m.read(join(m.p.ZS, 'enabled'))?.trim()).toBe('N');
+    expect(m.swaps()).toEqual(['/dev/zram0']);
+    // A boot: zram0 not made yet, the swap file back through fstab, zswap as the kernel's command line has it.
+    m.bootSwaps([m.p.SWAPFILE]);
+    writeFileSync(join(m.p.ZS, 'enabled'), 'Y\n');
+    const boot = m.helper();
+    expect(boot.status, boot.stdout + boot.stderr).toBe(0);
+    expect(m.read(join(m.p.ZS, 'enabled'))?.trim()).toBe('Y');
+    // The script by the path it was run from, so the fix can be pasted as it is.
+    expect(boot.stderr).toContain(`zram: a disk swap is on beside zram (${m.p.SWAPFILE}), so zswap is left as it is (enabled=Y): turned off, that swap would be uncompressed, and Hatchabot gives agents no swap on a machine like that. To fix it, turn that swap off (swapoff ${m.p.SWAPFILE}, and take its line out of ${m.p.FSTAB}), or use zswap in front of it instead: sudo ${realpathSync(m.script)}, without --zram.`);
+    // zram0 is made as before.
+    expect(m.swaps()).toEqual([m.p.SWAPFILE, '/dev/zram0']);
+    // Off already, it stays off, and is said the same way.
+    m.bootSwaps([m.p.SWAPFILE]);
+    writeFileSync(join(m.p.ZS, 'enabled'), 'N\n');
+    const off = m.helper();
+    expect(m.read(join(m.p.ZS, 'enabled'))?.trim()).toBe('N');
+    expect(off.stderr).toContain('so zswap is left as it is (enabled=N)');
+    // The next boot with zram alone: zswap goes off, and nothing is said.
+    m.bootSwaps([]);
+    writeFileSync(join(m.p.ZS, 'enabled'), 'Y\n');
+    const alone = m.helper();
+    expect(alone.status, alone.stdout + alone.stderr).toBe(0);
+    expect(m.read(join(m.p.ZS, 'enabled'))?.trim()).toBe('N');
+    expect(alone.stderr).not.toContain('disk swap');
+    expect(m.swaps()).toEqual(['/dev/zram0']);
+  });
+
+  it('a kernel with no zswap: the journal gives the one fix there is, and suggests no zswap (review of HB-1459)', () => {
+    const m = machine();
+    expect(m.run('--zram', '--yes').status).toBe(0);
+    m.bootSwaps([m.p.SWAPFILE]);
+    rmSync(m.p.ZS, { recursive: true });
+    const boot = m.helper();
+    expect(boot.status, boot.stdout + boot.stderr).toBe(0);
+    expect(boot.stderr).toContain(`zram: a disk swap is on beside zram (${m.p.SWAPFILE}), and this kernel has no zswap to compress in front of it: that swap is uncompressed, and Hatchabot gives agents no swap on a machine like that. To fix it, turn that swap off: swapoff ${m.p.SWAPFILE}, and take its line out of ${m.p.FSTAB}.`);
+    expect(boot.stderr).not.toContain('enabled=');
+    expect(boot.stderr).not.toContain('without --zram');
+  });
+
+  it('a setup made before: --status says its boot helper is another release\'s, and --zram, refused beside the disk swap, writes the helper alone (review of HB-1459)', () => {
+    const m = machine({ zswap: { enabled: 'Y' } });
+    expect(m.run('--zram', '--zram-size', '2G', '--yes').status).toBe(0);
+    const fresh = m.read(m.p.HELPER)!;
+    expect(fresh).toMatch(/^SELF='/m);
+    expect(m.run('--status').stdout).not.toContain('boot helper:');
+    // As a release before 2.193.0 wrote it: zswap off in zram mode whatever else is on, and no FSTAB=.
+    const older = fresh.replace(/ FSTAB='[^']*'/, '').replace(/^SELF=.*\n/m, '').replace(/  DISK=[\s\S]*?\n  fi\n/, '  [ -w "$ZS/enabled" ] && echo N > "$ZS/enabled"\n');
+    expect(older).not.toContain('FSTAB');
+    writeFileSync(m.p.HELPER, older, { mode: 0o755 });
+    const conf = m.read(m.p.CONF);
+    // A boot since: the swap file came back through fstab beside zram0.
+    m.bootSwaps([m.p.SWAPFILE, '/dev/zram0']);
+    const status = m.run('--status');
+    expect(status.stdout).toContain(`boot helper: ${m.p.HELPER} was written by another release of this script, and does what that one did at boot. To bring it up to date, run this again with the same settings: sudo ${m.script} --zram --zram-size 2147483648`);
+    // A dry run writes nothing, and says what it would.
+    const dry = m.run('--zram', '--zram-size', '2G', '--dry-run');
+    expect(dry.status).toBe(1);
+    expect(dry.stdout).toContain(`Dry run: the boot helper would be brought up to date, and nothing else changed: --zram needs every disk swap off, and ${m.p.SWAPFILE} is on.`);
+    expect(m.read(m.p.HELPER)).toBe(older);
+    // Refused as before, with only the helper written.
+    const before = m.log().length;
+    const r = m.run('--zram', '--zram-size', '2G', '--yes');
+    expect(r.status, r.stdout + r.stderr).toBe(1);
+    expect(r.stdout).toContain(`The boot helper is brought up to date; nothing else changed: --zram needs every disk swap off, and ${m.p.SWAPFILE} is on.`);
+    expect(r.stdout).toContain('At boot it now leaves zswap as it is while a disk swap is on beside zram, and says so in the journal.');
+    expect(m.read(m.p.HELPER)).toBe(fresh);
+    expect(m.read(m.p.CONF)).toBe(conf);
+    expect(m.read(join(m.p.ZS, 'enabled'))?.trim()).toBe('N');
+    expect(m.swaps()).toEqual([m.p.SWAPFILE, '/dev/zram0']);
+    // Asked nothing that changes the machine: no swapon, swapoff, modprobe or systemctl.
+    expect(m.log().slice(before).filter((c) => !/^(uname|id|hostname) /.test(c))).toEqual([]);
+    expect(m.run('--status').stdout).not.toContain('boot helper:');
+    // Up to date now: refused with nothing written, as any other.
+    const again = m.run('--zram', '--yes');
+    expect(again.stdout).toContain(`Nothing changed: --zram needs every disk swap off, and ${m.p.SWAPFILE} is on.`);
+    expect(again.stdout).not.toContain('boot helper');
+  });
+
+  it('run from a path with a \' in it, under bash 4.2\'s rules too: the helper still parses, and its journal line names that path (review of HB-1459)', () => {
+    for (const env of [undefined, { BASH_COMPAT: '42' }]) {
+      const m = machine({ scriptDir: "it's a folder", env });
+      const set = m.run('--zram', '--yes');
+      expect(set.status, set.stdout + set.stderr).toBe(0);
+      const parse = spawnSync('sh', ['-n', m.p.HELPER], { encoding: 'utf8' });
+      expect(parse.status, `${JSON.stringify(env)} ${parse.stderr}`).toBe(0);
+      m.bootSwaps([m.p.SWAPFILE]);
+      const boot = m.helper();
+      expect(boot.status, boot.stdout + boot.stderr).toBe(0);
+      expect(boot.stderr).toContain(`or use zswap in front of it instead: sudo ${realpathSync(m.script)}, without --zram.`);
+      expect(m.script).toContain("it's a folder");
+    }
+  });
+
+  it('a helper of this release written from another checkout: --status says nothing of it, and a refused --zram says only the script\'s path in it changed (review of HB-1459)', () => {
+    const m = machine();
+    expect(m.run('--zram', '--yes').status).toBe(0);
+    const fresh = m.read(m.p.HELPER)!;
+    const elsewhere = fresh.replace(/^SELF=.*$/m, "SELF='/made/up/other/checkout/scripts/enable-compressed-swap.sh'");
+    expect(elsewhere).not.toBe(fresh);
+    writeFileSync(m.p.HELPER, elsewhere, { mode: 0o755 });
+    m.bootSwaps([m.p.SWAPFILE, '/dev/zram0']);
+    expect(m.run('--status').stdout).not.toContain('boot helper:');
+    const dry = m.run('--zram', '--dry-run');
+    expect(dry.stdout).toContain(`Dry run: only the script's path in the boot helper would change (to ${realpathSync(m.script)}), and nothing else: --zram needs every disk swap off, and ${m.p.SWAPFILE} is on.`);
+    expect(m.read(m.p.HELPER)).toBe(elsewhere);
+    const r = m.run('--zram', '--yes');
+    expect(r.status, r.stdout + r.stderr).toBe(1);
+    expect(r.stdout).toContain(`Only the script's path in the boot helper changed (it names ${realpathSync(m.script)} now); nothing else changed: --zram needs every disk swap off, and ${m.p.SWAPFILE} is on.`);
+    expect(r.stdout).not.toContain('brought up to date');
+    expect(r.stdout).not.toContain('At boot it now leaves');
+    expect(m.read(m.p.HELPER)).toBe(fresh);
+  });
+
+  it('set up in zswap mode, or not at all: --zram refused beside a disk swap writes no helper (review of HB-1459)', () => {
+    for (const conf of [undefined, 'MODE=zswap\nCOMPRESSOR=zstd\nPOOL=30\nSHRINKER=N\nZRAM_SIZE=0\n']) {
+      const m = machine({ swaps: ['/dev/vdb2'], conf });
+      const r = m.run('--zram', '--yes');
+      expect(r.status, r.stdout + r.stderr).toBe(1);
+      expect(r.stdout).toContain('Nothing changed: --zram needs every disk swap off, and /dev/vdb2 is on.');
+      expect(m.read(m.p.HELPER)).toBeUndefined();
+    }
+  });
+
+  it('--status gives the zswap settings to run again with: its pool, and the shrinker kept where it was (review of HB-1459)', () => {
+    const m = machine({ swaps: ['/dev/vdb2'] });
+    expect(m.run('--pool', '30', '--keep-shrinker', '--yes').status).toBe(0);
+    writeFileSync(m.p.HELPER, '#!/bin/sh\n# an older one\n', { mode: 0o755 });
+    expect(m.run('--status').stdout).toContain(`To bring it up to date, run this again with the same settings: sudo ${m.script} --pool 30 --keep-shrinker`);
   });
 });

@@ -50,7 +50,9 @@
 //    finally runs (not in a branch, a loop, a catch or an optional call there): `f.hold()`
 //    with `f.done()`, and `const end = sheetPress()` with `end(…)`. Else an answer that
 //    throws, or a done skipped (`finally { if (f.shown()) f.done(); }`), leaves the press
-//    counted and the button off for its agent until the page is loaded again.
+//    counted and the button off for its agent until the page is loaded again. A list save
+//    (`f.redraws('data')`) is held the same way, to `f.done()`: one never ended is out for
+//    good, and the list's legacy × refused for its agent (f.busy) until a reload (HB-1485).
 //
 // "After an await" is in source order, within the function the await is in. What this does
 // not see, so a review must:
@@ -102,7 +104,7 @@ const NOT_FILLERS = {
 };
 /** Reads run later on purpose, for whichever agent is shown then (rule 5), and why. */
 const LATE_READS = {
-  renderEditMembers: 'run once a member is removed (kickAndList: .then): the members of the agent shown then, read again and drawn only while its forms are',
+  // None now: a members list read again once a member is removed (kick) or web chat shared goes through the press's handle (HB-1487).
 };
 /** Async functions whose form has a guard of its own, not a handle's (rule 2), and why. */
 const OWN_GUARD = {
@@ -113,10 +115,9 @@ const OWN_GUARD = {
  * function → that button → why it stays the agent's. Any other element they turn is held to the rule.
  */
 const OWN_BUTTON = {
-  loadWebChatPeople: { tgShareBtn: "the share button is armed by its sharing read, only while that read is still current (current()), and only on the agent's own list" },
-  shareWebChatWith: { tgShareBtn: "the share button is given back only while the sharing read it was pressed on is current (target.current()): another agent's list is another read" },
+  // None now: the web chat's Share button is held and set through the handles too (HB-1489).
 };
-const ownButton = (top, id) => Object.hasOwn(OWN_BUTTON, top) && Object.hasOwn(OWN_BUTTON[top], id);
+const ownButtonIn = (table) => (top, id) => Object.hasOwn(table, top) && Object.hasOwn(table[top], id);
 /** The page's list of the forms' buttons a press may hold (rule 7). */
 const BUTTONS_LIST = 'SHEET_BUTTONS';
 /** The handle that makes a hold and its end (rule 8: it keeps the end for f.done()), and the calls that turn an element's attribute (rule 6). */
@@ -148,7 +149,10 @@ function holdsNotGivenBack(fn) {
     if (/^(?:For|ForIn|ForOf|While|DoWhile|Switch)Statement$/.test(n.type)) { children(n, (k) => scan(k, null, maybe)); return; }
     if (n.type === 'CallExpression') {
       const c = n.callee;
-      if (c.type === 'MemberExpression' && !c.computed && c.property.name === 'hold') holds.push({ n, kind: 'hold', name: c.object.type === 'Identifier' ? c.object.name : decl });
+      // A list save (`.redraws`) is ended by `f.done()` too.
+      if (c.type === 'MemberExpression' && !c.computed && (c.property.name === 'hold' || c.property.name === 'redraws')) {
+        holds.push({ n, kind: 'hold', via: c.property.name, name: c.object.type === 'Identifier' ? c.object.name : decl });
+      }
       if (c.type === 'Identifier' && c.name === 'sheetPress') holds.push({ n, kind: 'press', name: decl });
       const sure = inFinally === 'sure' && !n.optional && !(c.type === 'MemberExpression' && c.optional);
       if (sure && c.type === 'MemberExpression' && !c.computed && c.property.name === 'done' && c.object.type === 'Identifier') ends.add(`hold ${c.object.name}`);
@@ -357,10 +361,12 @@ function analyse(scripts, formIds) {
 
 /**
  * @param {{ name: string, code: string }[]} scripts the page's scripts (web/app/)
- * @param {{ formIds?: string[] }} [opts] the edit dialog's element ids (sheetFormIds)
+ * @param {{ formIds?: string[], ownButtons?: Record<string, Record<string, string>>, lateReads?: Record<string, string> }} [opts] the edit dialog's element ids (sheetFormIds); and, for a test, the exemptions in place of the page's (OWN_BUTTON, LATE_READS)
  * @returns {string[]} what is wrong, one line each
  */
-export function sheetStateProblems(scripts, { formIds = [] } = {}) {
+export function sheetStateProblems(scripts, { formIds = [], ownButtons = OWN_BUTTON, lateReads = LATE_READS } = {}) {
+  // The exemptions: the page's own tables, or a test's (both are empty for the page now, HB-1487, HB-1489).
+  const ownButton = ownButtonIn(ownButtons);
   const { parsed, fns, deferring, fillers } = analyse(scripts, formIds);
   const draws = (name) => name === 'sheetFill' || fillers.has(name);
   // A top-level function handed by name to a call that runs it later runs later, all of it.
@@ -434,7 +440,7 @@ export function sheetStateProblems(scripts, { formIds = [] } = {}) {
           say(a, ctx, `hands ${a.name}, which draws into the edit forms, to a call that runs it later: they may be another agent's by then. Draw in the handle's f.draw / f.fill`);
         }
       });
-      if (c.type === 'Identifier' && (c.name === 'sheetSave' || c.name === 'sheetRead') && after && !ctx.guarded && !(c.name === 'sheetRead' && ctx.top in LATE_READS)) {
+      if (c.type === 'Identifier' && (c.name === 'sheetSave' || c.name === 'sheetRead') && after && !ctx.guarded && !(c.name === 'sheetRead' && ctx.top in lateReads)) {
         say(n, ctx, `takes its handle (${c.name}) ${ctx.late ? 'in a function that runs later' : 'after an await'}: it is for the agent shown by then, not the one pressed for. Take it at the press, before the first await`);
       }
       if (c.type === 'Identifier' && ONLY_IN[c.name] && ctx.top !== ONLY_IN[c.name] && ctx.top !== c.name) {
@@ -450,6 +456,10 @@ export function sheetStateProblems(scripts, { formIds = [] } = {}) {
       const scanFns = (n) => { if (FN.test(n.type)) left.push(...holdsNotGivenBack(n)); else children(n, scanFns); };
       scanFns(st);
       for (const h of left) {
+        if (h.via === 'redraws') {
+          say(h.n, startCtx(top), `saves a list (.redraws) that no finally of its own ends (${h.name ?? 'f'}.done(), in no branch of it): an answer that throws, or an end skipped, leaves the save out for good, and the list's legacy × refused for its agent until the page is loaded again`, 'HB-1485');
+          continue;
+        }
         say(h.n, startCtx(top), `holds a button (${h.kind === 'hold' ? '.hold' : 'sheetPress'}) that no finally of its own gives back (${h.kind === 'hold' ? `${h.name ?? 'f'}.done()` : `${h.name ?? 'its end'}(…)`}, in no branch of it): an answer that throws, or a give-back skipped, leaves the press counted and the button off for its agent until the page is loaded again`, 'HB-1484');
       }
     }

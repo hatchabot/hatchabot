@@ -210,7 +210,9 @@ async function loadEditFile() {
   } catch (e) {
     r.fill(['editFile', 'editContent'], () => { // the file chosen stays, with nothing in it to save
       $('editContent').value = '';
-      $('editErr').textContent = `${e.message} — nothing to save until it loads.`;
+      // Under the forms while they are in sight, else in a toast with its name: written in the shared error box out of
+      // sight, nobody saw it (HB-1487).
+      r.fail(new Error(`${e.message} — nothing to save until it loads.`));
     });
   }
 }
@@ -319,8 +321,8 @@ async function savePeers() {
   // Never PUT from an unloaded/failed list: that would silently revoke every grant.
   if (peersLoadedFor !== f.id || !peersCurrent?.()) { toast('Peer list not loaded yet — reopen the tab.'); return; }
   if ($('peerSaveBtn').disabled) return;
-  // The list it was pressed on, still the one read (its handle's mine, a sharing read: loadPeers).
-  const current = peersCurrent;
+  // The list it was pressed on, still the one read (its handle's mine, a sharing read: loadPeers); the page still its person's.
+  const current = peersCurrent, page = sharingPage();
   const ids = [...document.querySelectorAll('.peerCb:checked')].map(cb => cb.dataset.id);
   const acts = [...document.querySelectorAll('.peerAct:checked')].map(cb => cb.dataset.id).filter(id => ids.includes(id));
   if (acts.length && !confirm(
@@ -330,13 +332,20 @@ async function savePeers() {
   f.hold('peerSaveBtn');
   try {
     await api(`/v1/agents/${f.id}/peers`, { method: 'PUT', body: { peerIds: ids, allowActions: acts } });
-    if (!current()) return;
-    f.saved();
-    // The call-agent tool + peer manifest are installed on rebuild, so offer it.
-    if (ids.length) {
-      const name = agents.find(x => x.id === f.id)?.name || 'this agent';
+    // Saved, however late: said (with its name under another agent's sheet), and its rebuild offered, as on its own
+    // sheet (HB-1486). It said nothing once its list was not the one read, and the grant waited for a rebuild unasked.
+    if (!page()) return;
+    if (current()) f.saved();
+    // The call-agent tool + peer manifest are installed on rebuild, so offer it: only for an agent still listed as
+    // the person's own (one deleted meanwhile, or no longer theirs, is not theirs to rebuild; HB-1486 review).
+    const a = v2Find(f.id);
+    if (ids.length && (!a || !v2Mine(a))) {
+      f.say('Saved.');
+    } else if (ids.length) {
+      const name = a.name || 'this agent';
       if (confirm(`Saved. Rebuild "${name}" now so it can consult ${ids.length} peer${ids.length > 1 ? 's' : ''}?\n\nThe call-agent tool is installed on rebuild (memory kept, briefly offline). Without a rebuild the grant is saved but the agent can't call them yet.`)) {
         const r = await api(`/v1/agents/${f.id}/rebuild`, { method: 'POST', body: { stoppedWaits: true } });
+        if (!page()) return; // the page another person's while it answered: nothing said, nothing closed
         f.say(r?.atNextStart ? 'Saved. It is not running, so it stays that way: it can consult them from its next start.' : 'Rebuilding so it can consult its peers…');
         f.draw(() => editDlg.close());
       } else {
@@ -346,7 +355,7 @@ async function savePeers() {
       f.say('Saved — no peers.');
     }
     await refresh(false);
-  } catch (e) { if (current()) f.fail(e); }
+  } catch (e) { if (page()) f.fail(e); }
   finally { f.done(); } // on again only while its list is the one read (SHEET_BUTTONS)
 }
 
@@ -390,15 +399,21 @@ async function renderConnections() {
 
 /** Real calls at Google from inside this agent, for one account. */
 async function testAgentGmail(btn, email, i) {
-  // Its answer goes under its row while the forms are still its agent's (another's list is drawn over the row).
-  const f = sheetSave(), out = $(`connGmailOut${i}`);
+  // Its answer goes under its row while the forms are still its agent's (another's list is drawn over the row); otherwise,
+  // or out of sight, it is said in a toast with its agent's name, as the folder and search tests (HB-1486).
+  // Nothing once the page is another person's, or signed out (HB-1486 review).
+  const f = sheetSave(), out = $(`connGmailOut${i}`), page = sharingPage();
   btn.disabled = true;
   out.textContent = 'Testing…';
+  let said;
   try {
     const r = await api(`/v1/agents/${f.id}/connections/${encodeURIComponent(email)}/test`, { method: 'POST' });
-    f.draw(() => { out.textContent = `${r.ok ? '✓' : '⚠'} ${r.detail}`; });
-  } catch (e) { f.draw(() => { out.textContent = `⚠ ${e.message}`; }); }
+    said = `${r.ok ? '✓' : '⚠'} ${r.detail}`;
+  } catch (e) { said = `⚠ ${e.message}`; }
   finally { btn.disabled = false; }
+  if (!page()) return;
+  const drawn = f.draw(() => { if (!out?.isConnected) return false; out.textContent = said; return true; });
+  if (!drawn || !f.shown()) f.say(said, 9000);
 }
 
 async function attachConnection() {
@@ -484,7 +499,7 @@ async function loadConnections() {
       </details>`;
   } catch (e) { $('connClientBox').innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
   try {
-    const { connections } = await api('/v1/connections');
+    const { connections, ending } = await api('/v1/connections');
     platformConnections = connections;
     $('connVault').innerHTML = connections.length ? connections.map(c => {
       const agents = c.attachedTo ?? [];
@@ -511,7 +526,43 @@ async function loadConnections() {
       </div>`;
     }).join('')
       : 'None yet — press Connect above. Each person connects their own accounts from their own login.';
+    renderConnEnding(ending);
   } catch (e) { $('connVault').innerHTML = esc(e.message); }
+}
+
+/**
+ * Removed accounts whose access is still being ended at Google, and those
+ * Hatchabot gave up on, to remove by hand until marked done (HB-1336): they
+ * were in the server log and a chat message only.
+ */
+function renderConnEnding(ending) {
+  const el = $('connEnding');
+  const rows = ending || [];
+  el.hidden = !rows.length;
+  if (!rows.length) { el.innerHTML = ''; return; }
+  const day = (iso) => esc(String(iso || '').slice(0, 10));
+  // A token a reconnect with another Google Cloud project's client replaced (HB-1396): the account stays connected.
+  const what = (x) => x.replaced ? 'the access it gave the OAuth client used before it was connected again' : 'its access';
+  // Not only removed accounts: a reconnected one's replaced token is listed too (HB-1396).
+  el.innerHTML = `<h4 style="margin:16px 0 4px">Access still being ended</h4>` + rows.map(x => x.givenUpAt ? `
+    <div class="pair conn-given-up" style="flex-wrap:wrap;gap:6px;align-items:flex-start;color:var(--warn)">
+      <span class="grow">⚠ <b class="pii">${esc(x.email)}</b> — Hatchabot asked Google ${esc(String(x.tries))} times from ${day(x.since)} to end ${what(x)}, and Google never confirmed it. It stopped asking on ${day(x.givenUpAt)} and deleted its copy of the token.
+        <span class="sub">Remove the access by hand: in that Google Account, Security → Your connections to third-party apps &amp; services${x.replaced ? ' (the app of that earlier client, not the one connected now)' : ''}.${x.lastAnswer ? ` Its last answer: ${esc(x.lastAnswer)}.` : ''}</span></span>
+      <button data-id="${esc(x.id)}" ${onAction('click', 'dismissConnEnding', [{ $: 'el' }])}>Done — I removed it</button>
+    </div>` : `
+    <div class="sub conn-ending" style="display:flex;gap:6px;align-items:baseline">
+      <span>·</span>
+      <span class="grow"><b class="pii" style="font-weight:600">${esc(x.email)}</b> — ${x.replaced ? `connected again with another OAuth client ${day(x.since)}` : `removed ${day(x.since)}`}${x.since ? ` (${ago(x.since)})` : ''}; ${x.copyLeft
+        // Google's part is done; only the secret store kept Hatchabot's copy (HB-1336 review).
+        ? `Google's part is done, but Hatchabot's copy of its token could not be deleted yet${x.lastAnswer ? ` (${esc(x.lastAnswer)}${x.lastTriedAt ? `, ${ago(x.lastTriedAt)}` : ''})` : ''}. Hatchabot tries again every ten minutes.`
+        : `ending ${what(x)} at Google is not confirmed yet${x.lastAnswer ? ` (${esc(x.lastAnswer)}${x.lastTriedAt ? `, ${ago(x.lastTriedAt)}` : ''})` : ''}. Hatchabot tries again every ten minutes, for at least a week.`}</span>
+    </div>`).join('');
+}
+
+async function dismissConnEnding(btn) {
+  try { await api(`/v1/connections/ending/${encodeURIComponent(btn.dataset.id)}`, { method: 'DELETE' }); }
+  catch (e) { toast(e.message, 10000); }
+  await loadConnections();
 }
 
 async function saveOAuthClient() {
@@ -553,8 +604,15 @@ async function startGoogleConnect() {
 async function removeConnection(id, email) {
   if (!confirm(`Remove ${email} from this server?\n\nEvery agent it's attached to loses access, and the token is revoked at Google.`)) return;
   try {
-    await api(`/v1/connections/${id}`, { method: 'DELETE' });
-    toast(`${email} removed and revoked.`);
+    const r = await api(`/v1/connections/${id}`, { method: 'DELETE' });
+    const later = r?.pendingOn ? ` ${r.pendingOn} agent${r.pendingOn === 1 ? '' : 's'} not running now lose${r.pendingOn === 1 ? 's' : ''} it at the next start.` : '';
+    // Connected again while this ran (HB-1202): the newer consent stays, listed, and off its agents.
+    toast(r?.connectedAgain
+      ? `${email} was connected again while it was being removed, so the new connection stays (listed below). It is off the agents it was attached to: attach it again where it is wanted.${later}`
+      : r?.stillEnding
+        // Not confirmed by Google (HB-1336): listed below while Hatchabot asks again.
+        ? `${email} removed, and off its agents. Ending its access at Google is not confirmed yet: Hatchabot tries again, and it is listed below until it is.${later}`
+        : `${email} removed and revoked.${later}`, r?.connectedAgain || r?.stillEnding || later ? 10000 : undefined);
     await loadConnections();
   } catch (e) { toast(e.message, 10000); }
 }
@@ -576,6 +634,7 @@ async function disconnectAccount(email) {
   } catch (e) { f.fail(e, 10000); }
 }
 
+// ---- the agent sheet's edit sections: snapshots, its model and source, data, environment values ----
 /** An agent's settings are one sheet; its tabs hold the editDlg sections. */
 function openEdit(id, name, tab = 'def') {
   return openV2Agent(id, V2_TAB_FOR_EDIT[tab] ?? 'personality');
@@ -728,7 +787,8 @@ function localClashWarning(chosen, exceptAgentId) {
 function renderModelPicker(menu, def, override) {
   sheetFill(['editModel'], () => {
     const row = $('modelRow');
-    if (!menu?.length) { row.style.display = 'none'; return; }
+    // No menu (a local source): hidden, and with none of the last agent's models left in it (HB-1487): '' is no pin.
+    if (!menu?.length) { row.style.display = 'none'; $('editModel').innerHTML = '<option value="" selected>Source default</option>'; return; }
     row.style.display = '';
     // A pin no longer on the menu (source edited under it) must not silently
     // read as "Source default" — surface it as an explicit, selected option so
@@ -894,7 +954,7 @@ async function addGitSource() {
   if (!repoUrl) return;
   const isPublic = $('repoPublic').checked;
   const access = isPublic ? 'ro' : $('repoAccess').value;
-  const f = sheetSave('repoAccess').hold('repoAddBtn');
+  const f = sheetSave('repoAccess').hold('repoAddBtn').redraws('data');
   try {
     const updated = await api(`/v1/agents/${f.id}/data-sources`, { method: 'POST', body: { kind: 'git', access, repoUrl, public: isPublic } });
     f.draw(() => {
@@ -977,14 +1037,37 @@ function forAgent(forId, latest = null) {
  * the press (v2SheetSaving). Not for a save whose success draws its controls again: that drawing
  * notes them. f.hold(button) turns the forms' button off while its request is out, and f.done(),
  * in its finally, gives it back (sheetPress): returns f.
+ * f.redraws(list): the save's answer is the agent's whole `list` (its folders and repos, 'data';
+ * its variables, 'env'), and its f.draw and f.fill draw nothing once a later save of that list
+ * for the agent has answered first: else an older list was drawn over the newer (HB-1485). Out
+ * until f.done(); f.busy(list) says whether a save of it is out for the agent. Returns f.
  */
 function sheetSave(...where) {
   const f = forAgent(editAgentId), saved = v2SheetSaving(...where), ends = [];
   f.saved = () => saved(f.id);
   f.hold = (button) => { ends.push(sheetPress(button, f.id)); return f; };
   f.done = () => { for (const end of ends.splice(0)) end(f.mine()); };
+  f.busy = (list) => (sheetListSaves.get(`${list} ${f.id}`)?.out ?? 0) > 0;
+  f.redraws = (list) => {
+    const key = `${list} ${f.id}`, s = sheetListSaves.get(key) ?? { pressed: 0, answered: 0, out: 0 };
+    sheetListSaves.set(key, s);
+    const gen = ++s.pressed;
+    s.out++;
+    let out = true;
+    // None out: no older answer can come, and the list starts again.
+    ends.push(() => { if (!out) return; out = false; if (--s.out === 0 && sheetListSaves.get(key) === s) sheetListSaves.delete(key); });
+    // Its answer is newer than any of the list's answered so far: worked out once, when it is first drawn.
+    let newest;
+    const answered = () => { if (newest === undefined) { newest = gen > s.answered; s.answered = Math.max(s.answered, gen); } return newest; };
+    const { draw, fill } = f;
+    f.draw = (fn) => (answered() ? draw(fn) : undefined);
+    f.fill = (where, fn) => (answered() ? fill(where, fn) : undefined);
+    return f;
+  };
   return f;
 }
+/** Per agent and list its saves draw again (f.redraws): how many were pressed, the newest answered, and how many are out. */
+const sheetListSaves = new Map();
 /**
  * The forms' buttons are shared too (HB-1484): one Rename, one Use this, one Add serve every agent.
  * A press turns its button off while its request is out; given back by hand in its finally, A's
@@ -1023,6 +1106,8 @@ const SHEET_BUTTONS = {
   connAttachBtn: () => !$('connAttachPick').value,
   // Its list of peers not loaded, or read again since: a save from it would revoke every grant.
   peerSaveBtn: (id) => peersLoadedFor !== id || !peersCurrent?.(),
+  // Nobody of this agent's to share it with read, or that read not the latest (loadWebChatPeople, HB-1489).
+  tgShareBtn: (id) => sharePeopleFor?.id !== id || !sharePeopleFor.current(),
 };
 /** The hint a button shows while its lock holds, and none while it does not: set with the lock, never by hand. */
 const SHEET_HINTS = { modelBtn: MODEL_WAITS_ON_SOURCE };
@@ -1126,7 +1211,7 @@ async function addDataSource() {
   if (!p) return;
   const access = $('pathAccess').value;
   if (access === 'rw' && !confirm(`Give the agent WRITE access to ${p}?\n\nIt can change or delete files there, and anyone who can message it can trigger that. Only do this for data you're comfortable it editing.`)) return;
-  const f = sheetSave('pathAccess').hold('pathAddBtn');
+  const f = sheetSave('pathAccess').hold('pathAddBtn').redraws('data');
   try {
     const updated = await api(`/v1/agents/${f.id}/data-sources`, { method: 'POST', body: { kind: 'folder', access, path: p } });
     f.draw(() => {
@@ -1147,13 +1232,14 @@ async function setDataAccess(id, access) {
       !confirm(`Mark "${src.mountName}" writable?\n\nThis tells the agent it may change and commit in that checkout. Whether a PUSH is accepted is set by the deploy key's permission on the repo host — grant the key write access there too.`)) return;
   if (src.kind === 'folder' && access === 'rw' &&
       !confirm(`Let this agent WRITE to ${src.hostPath}?\n\nIt runs without permission prompts and is reachable by everyone in it, so one bad instruction could change or delete files here.`)) return;
-  const f = sheetSave();
+  const f = sheetSave().redraws('data');
   try {
     const updated = await api(`/v1/agents/${f.id}/data-sources/${id}`, { method: 'PATCH', body: { access } });
     f.draw(() => renderDataList(updated.dataSources));
     f.say(`${src.mountName} is now ${access === 'rw' ? 'writable' : 'read-only'} — Rebuild to apply it.`, 9000);
     await refresh(false);
   } catch (e) { f.fail(e); }
+  finally { f.done(); }
 }
 
 async function removeDataSource(id) {
@@ -1163,8 +1249,13 @@ async function removeDataSource(id) {
   const repoNote = src.kind === 'git'
     ? ` Its copy in the agent (~/.openclaw/${src.mountName}) is deleted, with any changes not pushed${src.repoUrl && !/^https?:/.test(src.repoUrl) ? ', and so is its deploy key' : ''}.`
     : '';
-  if (!confirm(`Remove ${src.kind === 'folder' ? 'the folder' : 'the repo'} “${src.mountName}” from this agent?${repoNote}`)) return;
   const f = sheetSave();
+  // A legacy folder's removal sends the whole list left, worked out from the list drawn: with another change to it still
+  // out, that list is not yet the agent's, and a second quick × sent back the folder the first removed (HB-1485). api()
+  // has no time limit: a change whose request never ends keeps this refused until the page is loaded again.
+  if (src.legacy && f.busy('data')) { f.say('Wait for the last change to its folders to be saved, then press × again.', 9000); return; }
+  if (!confirm(`Remove ${src.kind === 'folder' ? 'the folder' : 'the repo'} “${src.mountName}” from this agent?${repoNote}`)) return;
+  f.redraws('data');
   try {
     let updated;
     if (src.legacy) {
@@ -1184,6 +1275,7 @@ async function removeDataSource(id) {
       : 'Removed — Rebuild to apply it', rk || later ? 15000 : undefined);
     await refresh(false);
   } catch (e) { f.fail(e); }
+  finally { f.done(); }
 }
 
 function renderEnvList(vars) {
@@ -1201,7 +1293,7 @@ async function addEnvVar() {
   const value = $('envValue').value;
   if (!name || !value) { toast('Both a name and a value are needed.'); return; }
   $('editErr').textContent = '';
-  const f = sheetSave().hold('envAddBtn'); // its list is drawn only in its own forms, as the Data tab's (HB-0584)
+  const f = sheetSave().hold('envAddBtn').redraws('env'); // its list is drawn only in its own forms, as the Data tab's (HB-0584)
   try {
     const updated = await api(`/v1/agents/${f.id}/env`, { method: 'POST', body: { name, value } });
     // Emptied by the Add, as filled: a draft kept from before (and noted then) does not count as an edit.
@@ -1215,11 +1307,12 @@ async function addEnvVar() {
 async function removeEnvVar(id, name) {
   if (!confirm(`Remove ${name}? The agent loses this variable on its next rebuild.`)) return;
   $('editErr').textContent = '';
-  const f = sheetSave(); // removed from the agent pressed for: its list only is drawn again
+  const f = sheetSave().redraws('env'); // removed from the agent pressed for: its list only is drawn again
   try {
     const updated = await api(`/v1/agents/${f.id}/env/${encodeURIComponent(id)}`, { method: 'DELETE' });
     f.draw(() => renderEnvList(updated.envVars));
     f.say(`${name} removed — Rebuild to apply it.`, 9000);
     await refresh(false);
   } catch (e) { f.fail(e); }
+  finally { f.done(); }
 }

@@ -245,10 +245,18 @@ function sharingRead(el, id = null) {
     && (!id || view === sharingView) && sharingReads.get(el) === read && el.isConnected
     && (!id || (forAgent(id).mine() && !!v2Find(id) && v2Mine(v2Find(id)))); // the sheet's forms still its agent's (HB-0644)
 }
+/**
+ * The page still the person's it was for at the press, signed in, and its sharing not put away since (sharingForget):
+ * a sharing answer that comes back late is said only then, with its agent's name (HB-1486), never under the next person.
+ */
+function sharingPage() {
+  const epoch = sharingEpoch, person = pagePerson;
+  return () => epoch === sharingEpoch && person === pagePerson && !pagePersonAway && !pageSignedOut;
+}
 function sharingForget() {
   sharingEpoch++; sharePeopleFor = null; v2AccessCache = null; members = {};
   peersLoadedFor = null; peersCurrent = null; $('peerSaveBtn').disabled = true;
-  sendOpening = null; sendAgentId = null; inboxShares = []; updateInboxBadge(0);
+  sendOpening = null; sendAgentId = null; inboxShares = []; inboxNext = null; inboxTotal = 0; updateInboxBadge(0);
   for (const id of ['tgMemberList', 'tgKnownPeople', 'tgSharePerson', 'agentPeerList', 'v2Access', 'accessMapOut', 'sendScan', 'accountEmails', 'inboxBody']) { const el = $(id); if (el) el.textContent = ''; }
   for (const id of ['sendToEmail', 'sendMessage']) $(id).value = '';
   for (const dlg of [sendAgentDlg, inboxDlg]) if (dlg.open) dlg.close();
@@ -312,6 +320,7 @@ async function loadAccessMap() {
   }).join('');
 }
 
+// ---- the security posture and the CLI tokens (Settings → Security) ---------------------
 const POSTURE_DOT = { ok: '🟢', info: '🔵', warn: '🟡', critical: '🔴' };
 const EXPOSURE_DOT = { high: '🔴', medium: '🟡', low: '🟢' };
 async function loadPosture() {
@@ -411,6 +420,7 @@ async function revokeCliToken(id, label) {
   catch (e) { toast(e.message); }
 }
 
+// ---- the fleet's media and web search keys (Settings → AI sources) ----------------------
 async function loadMediaKey() {
   if (myAccount.hostOwner === false) return; // hidden from them: paintMachineOwnerOnly
   try {
@@ -631,6 +641,7 @@ async function removeSearchKey() {
   catch (e) { toast(e.message, 10000); }
 }
 
+// ---- Telegram bots: the inventory and the bot pool (Settings → Messaging, Telegram) -------
 let botInvLast = null; // the last live census, for the BotFather comparison
 
 /**
@@ -686,22 +697,33 @@ async function loadBotInventory() {
       'agent': 'Telegram rejects this token — this agent cannot send or receive. Replace its bot in its ⚙ Settings → Messaging.',
       'orphan-token': 'A stored token nothing uses, and Telegram no longer accepts it. Harmless; it disappears when the record is cleaned up.',
     };
+    // No token here at all (HB-1384): Telegram was never asked, so nothing is said of the bot, only how to put the token back.
+    const MISSING = {
+      'pool-free': 'This server no longer has this spare\'s token, so it can never be leased. Remove it here, then add it again with its token from @BotFather (/token) if you still want it.',
+      'pool-leased': 'This server no longer has this bot\'s token, so it cannot be given to the agent holding it again (at a rebuild or a move). Give that agent a different bot.',
+      'agent': 'This server no longer has this bot\'s token, so it cannot be given to the agent again (at a rebuild or a move). Detach… it on the agent\'s card, then add it again with its token from @BotFather (/token).',
+      'orphan-token': 'A record of a token this server no longer has, which nothing uses. Harmless.',
+    };
     $('botInvList').innerHTML = bots.map(b => `
       <div class="pair" style="gap:8px;align-items:baseline;flex-wrap:wrap">
         <span class="grow"><code class="pii">@${esc(b.username)}</code>
           <span class="sub">${b.displayName ? `<span class="pii">“${esc(b.displayName)}”</span> · ` : ''}${WHERE[b.where] ? WHERE[b.where](b) : esc(b.where)}</span>
-          ${b.alive === false ? `<div class="sub" style="color:var(--warn);flex-basis:100%">${DEAD[b.where] ?? 'Telegram rejects this token.'}</div>` : ''}</span>
-        ${b.alive === false && b.where === 'pool-free' ? `<button class="hbtn" ${onAction('click', 'removePoolBotAndList', [`${b.username ?? ''}`])}>Remove</button>` : ''}
-        <button class="hbtn" ${onAction('click', 'revealInvToken', [{ $: 'el' }, `${b.username ?? ''}`])} title="Show this bot's token — for moving it to another machine">🔑 Show</button>
-        <span title="${b.alive === true ? 'token works' : b.alive === false ? 'token revoked/dead — the bot may still exist at BotFather' : 'Telegram unreachable — unknown'}">
-          ${b.alive === true ? '✅' : b.alive === false ? '❌' : '❓'}</span>
+          ${b.alive === false ? `<div class="sub" style="color:var(--warn);flex-basis:100%">${DEAD[b.where] ?? 'Telegram rejects this token.'}</div>` : ''}
+          ${b.tokenMissing ? `<div class="sub" style="color:var(--warn);flex-basis:100%">${MISSING[b.where] ?? 'This server no longer has this bot\'s token.'}</div>` : ''}
+          ${b.tokenUnreadable ? '<div class="sub" style="color:var(--warn);flex-basis:100%">This server could not read this bot\'s token, so Telegram was not asked. Look again in a moment; if this lasts, this install\'s secret key may have changed.</div>' : ''}</span>
+        ${(b.alive === false || b.tokenMissing) && b.where === 'pool-free' ? `<button class="hbtn" ${onAction('click', 'removePoolBotAndList', [`${b.username ?? ''}`])}>Remove</button>` : ''}
+        ${b.tokenMissing ? '' : `<button class="hbtn" ${onAction('click', 'revealInvToken', [{ $: 'el' }, `${b.username ?? ''}`])} title="Show this bot's token — for moving it to another machine">🔑 Show</button>`}
+        <span title="${b.alive === true ? 'token works' : b.alive === false ? 'token revoked/dead — the bot may still exist at BotFather' : b.tokenMissing ? 'no token here — Telegram was not asked' : b.tokenUnreadable ? 'its token could not be read — Telegram was not asked' : 'Telegram unreachable — unknown'}">
+          ${b.alive === true ? '✅' : b.alive === false ? '❌' : b.tokenMissing || b.tokenUnreadable ? '⚠' : '❓'}</span>
         <code class="invtok" hidden style="flex-basis:100%;word-break:break-all;font-size:11.5px"></code>
       </div>`).join('') || '<div class="sub">No bots known to this server.</div>';
     const n = (f) => bots.filter(f).length;
     $('botInvStatus').innerHTML =
       `<b>${bots.length}</b> bots — ✅ ${n(b => b.alive === true)} working` +
       `${n(b => b.alive === false) ? ` · ❌ ${n(b => b.alive === false)} dead` : ''}` +
-      `${n(b => b.alive === undefined) ? ` · ❓ ${n(b => b.alive === undefined)} unknown` : ''}` +
+      `${n(b => b.tokenMissing) ? ` · ⚠ ${n(b => b.tokenMissing)} with no token here` : ''}` +
+      `${n(b => b.tokenUnreadable) ? ` · ⚠ ${n(b => b.tokenUnreadable)} whose token could not be read` : ''}` +
+      `${n(b => b.alive === undefined && !b.tokenMissing && !b.tokenUnreadable) ? ` · ❓ ${n(b => b.alive === undefined && !b.tokenMissing && !b.tokenUnreadable)} unknown` : ''}` +
       ` <span class="sub">(${n(b => b.where === 'agent')} on agents · ${n(b => b.where.startsWith('pool'))} pool · ${n(b => b.where === 'orphan-token')} orphan${n(b => b.where === 'orphan-token') ? ` · ⚠ ${n(b => b.where === 'orphan-token')} orphaned` : ''})</span>`;
   } catch (e) { $('botInvStatus').textContent = e.message; }
   finally { $('botInvBtn').disabled = false; }
@@ -760,6 +782,60 @@ async function setPoolOwnOnly(on) {
     toast(on ? 'Your agents take only bots you parked yourself.' : 'Your agents may take a shared house bot again.', 6000);
     void loadPool();
   } catch (e) { toast(e.message, 8000); if ($('poolOwnOnly')) $('poolOwnOnly').checked = !!myAccount.prefs?.ownBotsOnly; }
+}
+
+async function recheckPoolBot(username, btn) {
+  btn.disabled = true;
+  try {
+    const r = await api(`/v1/pool/${encodeURIComponent(username)}/recheck`, { method: 'POST', body: {} });
+    toast(r.alive ? `@${username} answers${r.botName ? ` as “${r.botName}”` : ''}.${r.warnings?.length ? ` ⚠ ${r.warnings.join(' ')}` : ''}` : `⚠ ${r.warnings?.[0] || `@${username} does not answer.`}`, 9000);
+  } catch (e) { toast(e.message, 8000); }
+  finally { btn.disabled = false; }
+}
+
+/**
+ * Reveal one bot's token from the inventory — the only place that can show a
+ * spare's, an orphaned token's, or one whose agent is archived. One bot at a
+ * time, on purpose; the second press copies it.
+ */
+async function revealInvToken(btn, username) {
+  const out = btn.parentElement.querySelector('.invtok');
+  if (out && !out.hidden && out.textContent) {
+    toast(await copyText(out.textContent) ? 'Token copied' : 'Select it and copy');
+    return;
+  }
+  btn.disabled = true;
+  try {
+    const r = await api(`/v1/bots/${encodeURIComponent(username)}/token`);
+    out.textContent = r.token;
+    out.hidden = false;
+    btn.textContent = 'Copy';
+  } catch (e) { toast(e.message, 8000); }
+  finally { btn.disabled = false; }
+}
+
+async function addPoolBot() {
+  const token = $('poolToken').value.trim();
+  $('poolErr').textContent = '';
+  if (!token) { $('poolErr').textContent = 'Paste a bot token first.'; return; }
+  $('poolAddBtn').disabled = true;
+  try {
+    const r = await api('/v1/pool', { method: 'POST', body: { token, shared: $('poolShared').checked } });
+    $('poolToken').value = ''; $('poolShared').checked = false;
+    toast(`@${r.username} added — ${r.availableBots} instant bot${r.availableBots === 1 ? '' : 's'} ready.`);
+    await loadPool();
+    refresh(true); // header "N instant bots ready"
+  } catch (e) { $('poolErr').textContent = e.message; }
+  finally { $('poolAddBtn').disabled = false; }
+}
+
+async function removePoolBot(username) {
+  if (!confirm(`Delete @${username} from the pool?\n\nHatchabot discards its stored token and forgets the bot. The bot itself still exists — remove it for good at @BotFather → /mybots → /deletebot, which also frees one of your ~20 bot slots.`)) return;
+  try {
+    await api(`/v1/pool/${encodeURIComponent(username)}`, { method: 'DELETE' });
+    await loadPool();
+    refresh(true);
+  } catch (e) { toast(e.message, 10000); }
 }
 
 // ---- spare Discord bots and Slack apps (Settings → Messaging) ------------------
@@ -846,59 +922,6 @@ async function removePoolApp(kind, id, name) {
   if (!confirm(`Delete ${name} from the pool?\n\nHatchabot discards its stored token${kind === 'slack' ? 's' : ''}. The ${kind === 'slack' ? 'app' : 'bot'} itself still exists — remove it for good at ${U.label}.`)) return;
   try { await api(`${U.path}/${encodeURIComponent(id)}`, { method: 'DELETE' }); await loadPoolPane(kind); }
   catch (e) { toast(e.message, 10000); }
-}
-async function recheckPoolBot(username, btn) {
-  btn.disabled = true;
-  try {
-    const r = await api(`/v1/pool/${encodeURIComponent(username)}/recheck`, { method: 'POST', body: {} });
-    toast(r.alive ? `@${username} answers${r.botName ? ` as “${r.botName}”` : ''}.${r.warnings?.length ? ` ⚠ ${r.warnings.join(' ')}` : ''}` : `⚠ ${r.warnings?.[0] || `@${username} does not answer.`}`, 9000);
-  } catch (e) { toast(e.message, 8000); }
-  finally { btn.disabled = false; }
-}
-
-/**
- * Reveal one bot's token from the inventory — the only place that can show a
- * spare's, an orphaned token's, or one whose agent is archived. One bot at a
- * time, on purpose; the second press copies it.
- */
-async function revealInvToken(btn, username) {
-  const out = btn.parentElement.querySelector('.invtok');
-  if (out && !out.hidden && out.textContent) {
-    toast(await copyText(out.textContent) ? 'Token copied' : 'Select it and copy');
-    return;
-  }
-  btn.disabled = true;
-  try {
-    const r = await api(`/v1/bots/${encodeURIComponent(username)}/token`);
-    out.textContent = r.token;
-    out.hidden = false;
-    btn.textContent = 'Copy';
-  } catch (e) { toast(e.message, 8000); }
-  finally { btn.disabled = false; }
-}
-
-async function addPoolBot() {
-  const token = $('poolToken').value.trim();
-  $('poolErr').textContent = '';
-  if (!token) { $('poolErr').textContent = 'Paste a bot token first.'; return; }
-  $('poolAddBtn').disabled = true;
-  try {
-    const r = await api('/v1/pool', { method: 'POST', body: { token, shared: $('poolShared').checked } });
-    $('poolToken').value = ''; $('poolShared').checked = false;
-    toast(`@${r.username} added — ${r.availableBots} instant bot${r.availableBots === 1 ? '' : 's'} ready.`);
-    await loadPool();
-    refresh(true); // header "N instant bots ready"
-  } catch (e) { $('poolErr').textContent = e.message; }
-  finally { $('poolAddBtn').disabled = false; }
-}
-
-async function removePoolBot(username) {
-  if (!confirm(`Delete @${username} from the pool?\n\nHatchabot discards its stored token and forgets the bot. The bot itself still exists — remove it for good at @BotFather → /mybots → /deletebot, which also frees one of your ~20 bot slots.`)) return;
-  try {
-    await api(`/v1/pool/${encodeURIComponent(username)}`, { method: 'DELETE' });
-    await loadPool();
-    refresh(true);
-  } catch (e) { toast(e.message, 10000); }
 }
 
 // ---- hosts (Cluster mode) ---------------------------------------------------
@@ -1036,7 +1059,7 @@ async function pingHost(id) {
     const r = await api(`/v1/hosts/${id}/ping`);
     // A copy under way (started from another page, or before a reload): follow it instead.
     const copy = await api(`/v1/hosts/${id}/install-image`).catch(() => null);
-    if (copy && !copy.idle && !copy.done) { followImageCopy(id); return; }
+    if (imageCopyUnderWay(copy)) { followImageCopy(id); return; }
     if (el) {
       el.style.color = r.reachable ? 'var(--ok)' : 'var(--warn)';
       if (!r.reachable) { el.textContent = `⚠ unreachable — ${r.error || 'no response'}`; return; }
@@ -1065,6 +1088,11 @@ async function installImage(id) {
   followImageCopy(id);
 }
 const imageCopyFollowing = new Set();
+/**
+ * An answer that says a copy is under way: `done: false`, as the server sends while it copies. Anything else, an
+ * answer of another shape among them, was followed every 3 s for the page's life (HB-1307).
+ */
+const imageCopyUnderWay = (j) => !!j && typeof j === 'object' && j.done === false && !j.idle;
 async function followImageCopy(id) {
   if (imageCopyFollowing.has(id)) return;
   imageCopyFollowing.add(id);
@@ -1075,7 +1103,7 @@ async function followImageCopy(id) {
       const j = await api(`/v1/hosts/${id}/install-image`).catch(() => null);
       const el = $(`hostping-${id}`);
       if (!j || j.idle) return;
-      if (j.done) {
+      if (j.done === true) {
         // Installed on the published image of another CPU, not built as this machine's (HB-1189).
         if (j.ok && j.differs) toast(`⚠ Runtime image installed on ${h?.name ?? 'the runner'}. ${j.differs}`, 20000);
         else if (j.ok) toast(`✅ Runtime image installed on ${h?.name ?? 'the runner'}.`, 10000);
@@ -1083,6 +1111,7 @@ async function followImageCopy(id) {
         pingHost(id);
         return;
       }
+      if (!imageCopyUnderWay(j)) return;
       if (el) {
         el.style.color = 'var(--dim)';
         el.textContent = `copying the runtime image… ${gb(j.bytes)}${j.total ? ` of ${gb(j.total)}` : ''} GB`;
@@ -1138,7 +1167,14 @@ async function drainHost(id, name) {
 async function deleteHost(id, name) {
   if (!confirm(`Remove runner "${name}"? Agents can no longer be placed there.`)) return;
   try {
-    const r = await api(`/v1/hosts/${id}`, { method: 'DELETE' });
+    let r;
+    try { r = await api(`/v1/hosts/${id}`, { method: 'DELETE' }); }
+    catch (e) {
+      // An image copy under way to it: Remove anyway stops it (HB-1254); waiting for it took up to hours.
+      if (e.code !== 'image_copy') throw e;
+      if (!confirm(`${e.message}\n\nRemove anyway? That stops the copy to "${name}" where it is.`)) { toast('Not removed.', 6000); return; }
+      r = await api(`/v1/hosts/${id}`, { method: 'DELETE', body: { stopImageCopy: true } });
+    }
     await loadHosts();
     // What could not be removed on that machine (asleep, a docker refusal) is said, not dropped.
     if (r?.warning) toast(`Removed "${name}". ${r.warning}`, 20000);
@@ -1221,9 +1257,19 @@ async function loadBackups() {
       ? `<div class="sub" style="color:var(--warn);padding:4px 0 8px">⚠ Not in the newest backup: ${r.missing.map(m => `${esc(m.name)}${m.host ? ` (${esc(m.host)})` : ''}`).join(', ')}.
           Nightly backups cover the agents on this machine only; use <b>Download copy</b> for an agent that lives elsewhere.</div>` : '';
     el.innerHTML = missing + r.backups.map(b => {
-      const failedN = (b.failedVolumes ?? []).length;
+      // Left out while their files were replaced (a restore, an import, a move) is no failure: the next backup
+      // takes them (HB-1205). Such a volume is in failedVolumes too, for a reader from before the list.
+      const replacing = b.replacing ?? [];
+      const failedN = (b.failedVolumes ?? []).filter(v => !replacing.includes(v)).length, skippedN = (b.skipped ?? []).length;
+      // Why it is incomplete, as its record says: "the run did not finish" was said of every set with no failed
+      // volume, one whose run ended refusing (the saved key reads none of the secrets, every runner asleep) among
+      // them (HB-1451). A run with no end written was cut off.
+      const why = failedN || replacing.length
+        ? [failedN ? `${failedN} agent${failedN === 1 ? '' : 's'} failed` : '', replacing.length ? `${replacing.length} left out while their files were replaced` : ''].filter(Boolean).join(', ')
+        : skippedN ? `${skippedN} left out: ${skippedN === 1 ? 'its runner' : 'their runners'} did not answer`
+        : b.finishedAt ? 'the run ended with a problem' : 'the run did not finish';
       const warn = !b.hasDb ? `<span style="color:var(--warn)"> · ⚠ no registry</span>`
-        : b.complete === false ? `<span style="color:var(--warn)"> · ⚠ incomplete${failedN ? ` (${failedN} agent${failedN === 1 ? '' : 's'} failed)` : ' (the run did not finish)'}</span>`
+        : b.complete === false ? `<span style="color:var(--warn)"> · ⚠ incomplete (${why})</span>`
         : !b.hasKey ? `<span style="color:var(--warn)"> · ⚠ no key (can't decrypt)</span>`
         : b.running ? `<span class="sub"> · still running</span>` : '';
       // Made by another install, or under an earlier key: listed, never deleted from here; a restore asks first.
@@ -1438,7 +1484,7 @@ async function loadReadiness() {
   const lo = (x) => {
     const l = x.leftOut || {};
     if (!l.count) return '—';
-    const why = [l.asleep ? 'machine asleep' : '', l.failed ? 'failed' : '', l.missing ? 'volume missing' : '', l.other ? 'not taken' : ''].filter(Boolean).join(', ');
+    const why = [l.asleep ? 'machine asleep' : '', l.replacing ? 'files being replaced' : '', l.failed ? 'failed' : '', l.missing ? 'volume missing' : '', l.other ? 'not taken' : ''].filter(Boolean).join(', ');
     return `${l.count} of ${l.of} <span class="sub">(${why})</span>`;
   };
   const cell = 'style="padding:4px 8px 4px 0;border-top:1px solid var(--line);vertical-align:top"';

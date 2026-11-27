@@ -276,26 +276,72 @@ sendAgentDlg.addEventListener('close', () => { if (!sendAgentDlg.open) sendOpeni
 async function openInbox() { inboxDlg.showModal(); loadInbox(); }
 let inboxShares = []; // last-loaded shares — acceptShare needs their .parameters
 let inboxRead = 0, inboxBadgeRead = 0;
+/**
+ * The inbox is read a page at a time (HB-1167): where the next page starts (the last page's `next`; null, none after
+ * it), and how many wait in all, as the last page read said.
+ */
+let inboxNext = null, inboxTotal = 0;
 function inboxSession() {
   const epoch = sharingEpoch, person = pagePerson;
   return () => epoch === sharingEpoch && person === pagePerson && !pagePersonAway && !pageSignedOut;
 }
-async function loadInbox() {
+/**
+ * The inbox read again from its newest page; with `upTo`, page after page until as many shares as that are shown, so
+ * an Import or a Dismiss keeps the pages shown (the server ends a page at a place, not a count: none twice, none skipped).
+ */
+async function loadInbox(upTo = 0) {
   const el = $('inboxBody');
   const current = inboxSession(), read = ++inboxRead;
   try {
-    const { shares } = await api('/v1/inbox');
+    let page = await api('/v1/inbox');
     if (!current() || read !== inboxRead) return;
-    inboxShares = shares;
-    updateInboxBadge(shares.length);
-    if (!shares.length) { el.innerHTML = '<div class="sub">Nothing waiting. Agents other users send you appear here.</div>'; return; }
-    el.innerHTML = shares.map(s => `<div class="pair" style="flex-wrap:wrap;gap:8px;align-items:flex-start">
+    const shares = [...page.shares];
+    while (page.next && shares.length < upTo) {
+      page = await api(`/v1/inbox?after=${encodeURIComponent(page.next)}`);
+      if (!current() || read !== inboxRead) return;
+      shares.push(...page.shares);
+    }
+    inboxShares = shares; inboxNext = page.next || null; inboxTotal = page.total ?? shares.length;
+    updateInboxBadge(inboxTotal);
+    renderInbox();
+  } catch (e) { if (current() && read === inboxRead) el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+}
+/** The inbox's shares read so far, and Show more while more wait after them (HB-1167). */
+function renderInbox() {
+  const el = $('inboxBody'), shares = inboxShares, left = inboxTotal - shares.length;
+  if (!shares.length && !inboxNext) { el.innerHTML = '<div class="sub">Nothing waiting. Agents other users send you appear here.</div>'; return; }
+  el.innerHTML = shares.map(s => `<div class="pair" style="flex-wrap:wrap;gap:8px;align-items:flex-start">
       <div class="grow"><b>${esc(s.agentName)}</b>
         <div class="sub">from ${esc(s.fromEmail || 'another user')} · ${ago(s.createdAt)}${s.message ? ' — ' + esc(s.message) : ''}</div></div>
       <button class="primary" ${onAction('click', 'acceptShare', [`${s.id}`, `${s.agentName ?? ''}`])}>Import</button>
       <button ${onAction('click', 'dismissShare', [`${s.id}`])} title="Turn it away">Dismiss</button>
-    </div>`).join('');
-  } catch (e) { if (current() && read === inboxRead) el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+    </div>`).join('')
+    + (inboxNext ? `<div class="pair" id="inboxMore" style="align-items:center;gap:8px">
+      <span class="grow sub">${left > 0 ? `${left} more waiting` : 'More waiting'}</span>
+      <button ${onAction('click', 'showMoreInbox', [{ $: 'el' }])}>Show more</button>
+    </div>` : '');
+}
+/**
+ * The inbox's next page, added under the shares shown, while the list is still the one read (HB-1167). Its last page
+ * read and more still waiting (sent since its first page, so above it, never after a place): read again from the top,
+ * as far as all of them, so "N more waiting" and the badge are what Show more comes to (HB-1167 review).
+ */
+async function showMoreInbox(btn) {
+  const current = inboxSession(), read = inboxRead, after = inboxNext;
+  if (!after || !current()) return;
+  if (btn) btn.disabled = true;
+  try {
+    const page = await api(`/v1/inbox?after=${encodeURIComponent(after)}`);
+    if (!current() || read !== inboxRead || inboxNext !== after) return;
+    inboxShares = [...inboxShares, ...page.shares]; inboxNext = page.next || null; inboxTotal = page.total ?? inboxTotal;
+    if (!inboxNext && inboxTotal > inboxShares.length) { await loadInbox(inboxTotal); return; }
+    updateInboxBadge(inboxTotal);
+    renderInbox();
+  } catch (e) {
+    if (!current() || read !== inboxRead) return;
+    toast(e.message, 8000);
+    if (btn?.isConnected) btn.disabled = false;
+  }
 }
 async function acceptShare(id, name) {
   const current = inboxSession();
@@ -314,23 +360,23 @@ async function acceptShare(id, name) {
     const r = await api(`/v1/inbox/${id}/accept`, { method: 'POST', body });
     if (!current()) return;
     toast(`Imported as "${r.name}" — it takes a spare bot from your pool; with none free it starts in the web app and you attach one later.`, 30000);
-    await loadInbox(); await refresh(true);
+    await loadInbox(inboxShares.length); await refresh(true);
   } catch (e) { if (current()) toast(e.message, 20000); }
 }
 async function dismissShare(id) {
   const current = inboxSession();
   if (!current()) return;
-  try { await api(`/v1/inbox/${id}/dismiss`, { method: 'POST' }); if (current()) await loadInbox(); }
+  try { await api(`/v1/inbox/${id}/dismiss`, { method: 'POST' }); if (current()) await loadInbox(inboxShares.length); }
   catch (e) { if (current()) toast(e.message); }
 }
 function updateInboxBadge(n) {
-  // The header's inbox button only shows while something is waiting.
+  // The header's inbox button only shows while something is waiting; its count is of all of them, not a page (HB-1167).
   $('v2InboxBtn').hidden = !(n > 0);
   $('v2InboxCount').textContent = n > 0 ? String(n) : '';
 }
 async function refreshInboxBadge() {
   const current = inboxSession(), read = ++inboxBadgeRead;
-  try { const { shares } = await api('/v1/inbox'); if (current() && read === inboxBadgeRead) updateInboxBadge(shares.length); } catch {}
+  try { const { shares, total } = await api('/v1/inbox'); if (current() && read === inboxBadgeRead) updateInboxBadge(total ?? shares.length); } catch {}
 }
 
 async function shareTemplate(id, name) {
@@ -404,7 +450,7 @@ async function saveFromServer(url, fallbackName, check) {
 }
 
 async function downloadAgent(id, name) {
-  if (!confirm(`Download "${name}"?${channelsLostOnExport(id)}\n\nIt's a complete private copy — it includes the agent's bot token and members, so treat the file like a password (don't share it). The agent is STOPPED here afterwards, so the copy you Restore elsewhere is the only one talking to Telegram.`)) return;
+  if (!confirm(`Download "${name}"?${channelsLostOnExport(id)}${budgetSwitchLostOnExport(id)}\n\nIt's a complete private copy — it includes the agent's bot token and members, so treat the file like a password (don't share it). The agent is STOPPED here afterwards, so the copy you Restore elsewhere is the only one talking to Telegram.`)) return;
   // Fetched, not navigated to: a refusal (busy, not exportable) is a message,
   // not a page of raw JSON in place of the app.
   toast('Preparing the copy…', 20000);

@@ -211,6 +211,26 @@ describe('the model scorecard', () => {
     ]);
   });
 
+  it('counts its practice runs in its calls, tokens, month and savings, not its turns or evidence (HB-1270)', async () => {
+    const { store, now } = await world();
+    const before = buildScorecard(store, OWNER, { now }).rows.find((r) => r.id === 'busy')!;
+    // Two runs on Opus in the window (1M input), one older than it, one on another agent.
+    const row = (agentId: string, run: string, at: number, input: number) => ({ agentId, run, model: 'claude-opus-4-8', profileId: 'key', at: new Date(at).toISOString(), day: new Date(at).toISOString().slice(0, 10),
+      skill: 'hatchabot-writing', status: 'completed', calls: 5, input, output: 0, cacheRead: 0, cacheWrite: 0, usd: input * 5 / 1e6, unpricedTokens: 0 });
+    store.addPracticeUsage([row('busy', 'r1', now - 2 * DAY, 6e5), row('busy', 'r2', now - 10 * DAY, 4e5), row('busy', 'r0', now - 40 * DAY, 9e6), row('quiet', 'r3', now - DAY, 1e6)]);
+    const busy = buildScorecard(store, OWNER, { now }).rows.find((r) => r.id === 'busy')!;
+    // Was: its own conversations only.
+    expect(busy.calls).toBe(before.calls + 10);
+    expect(busy.tokensM.in).toBe(2);
+    expect(busy.monthlyUSD).toBeCloseTo(before.monthlyUSD! + 5, 2);
+    expect(busy.cheaperOptions[0]).toMatchObject({ model: 'claude-haiku-4-5-20251001', savingUSD: 16.1 });
+    expect([busy.turns, busy.turnsOnModel, busy.evidence]).toEqual([before.turns, before.turnsOnModel, 'ok']);
+    // An agent with practice and no conversation of its own: its calls, and still no evidence.
+    store.insertAgent({ id: 'fresh', ownerId: OWNER, name: 'Agent fresh', slug: 'fresh', state: 'RUNNING', aiProfileId: 'key', hostId: 'h1', runtimeRef: 'ref-fresh', persona: '', sharedMemory: true, createdAt: '2026-09-01T00:00:00Z', updatedAt: 'now' });
+    store.addPracticeUsage([row('fresh', 'r4', now - DAY, 1e5)]);
+    expect(buildScorecard(store, OWNER, { now }).rows.find((r) => r.id === 'fresh')).toMatchObject({ calls: 5, evidence: 'none' });
+  });
+
   it('shows before and after a switch, and calls three turns on the new model thin evidence', async () => {
     const { store, now } = await world();
     const quiet = buildScorecard(store, OWNER, { now }).rows.find((r) => r.id === 'quiet')!;

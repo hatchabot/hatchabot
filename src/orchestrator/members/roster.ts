@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import type { Agent, Channel } from '../../domain/types.js';
-import type { Store } from '../../store/store.js';
+import { NAMES_NOBODY, type Store } from '../../store/store.js';
 import { CHANNEL_ACCOUNT } from '../../openclaw/configWriter.js';
 import { markBusy, whileBusy } from '../lifecycle/busy.js';
-import { claimFirstContact } from './claim.js';
+import { claimFirstContact, knockSeatFor } from './claim.js';
 import { AdmitError, grantChannelAccess, removeUnboundChannelAccess, revokeMember } from './members.js';
 import type { MemberRefusal, MembersDeps } from './membersAndInvites.js';
 
@@ -28,9 +28,13 @@ export interface Roster {
   /**
    * The active members, each with their identities on Discord and Slack,
    * whether they sign in here, and whether their seat came in by a chat-app
-   * invite (`joinedByAppInvite`: there is a door to open again).
+   * invite (`joinedByAppInvite`: there is a door to open again), and the
+   * @handle that invite named (`invitedAs`: the door opens for them alone,
+   * so "Let them in again" asks for none, HB-1439 review), or that it named
+   * them by a link with no name in it (`needsHandle`: it asks for theirs,
+   * and offers no empty one).
    */
-  list(agent: Agent): Array<ReturnType<Store['listMemberships']>[number] & { identities: ReturnType<Store['memberIdentities']>; account: boolean; joinedByAppInvite: boolean }>;
+  list(agent: Agent): Array<ReturnType<Store['listMemberships']>[number] & { identities: ReturnType<Store['memberIdentities']>; account: boolean; joinedByAppInvite: boolean; invitedAs?: string; needsHandle?: true }>;
   /** Web chat on or off for one member (only someone who signs in here may have it on). */
   setWebChat(agent: Agent, userId: string, on: boolean): MemberRefusal | { userId: string; webChat: boolean };
   /**
@@ -94,11 +98,18 @@ export function createRoster(deps: MembersDeps): Roster {
     // With each person's identities on Discord and Slack too (Telegram's is the seat's own id).
     // `account`: they sign in here, so web chat can be given to them.
     store.listMemberships(agent.id).filter((m) => m.status === 'active')
-      .map((m) => ({
-        ...m, identities: store.memberIdentities(agent.id, m.userId), account: isAccountId(m.userId),
-        // With web chat added, they were taken for web chat alone, and offered no door (HB-1136 review).
-        joinedByAppInvite: !!store.inviteJoinFor(agent.id, m.userId).byAppInvite,
-      }));
+      .map((m) => {
+        const joined = store.inviteJoinFor(agent.id, m.userId);
+        return {
+          ...m, identities: store.memberIdentities(agent.id, m.userId), account: isAccountId(m.userId),
+          // With web chat added, they were taken for web chat alone, and offered no door (HB-1136 review).
+          joinedByAppInvite: !!joined.byAppInvite,
+          // One that names nobody (a bare link an older release kept) is none to show: the door asks for theirs.
+          ...(joined.handle && joined.handle !== NAMES_NOBODY ? { invitedAs: joined.handle } : {}),
+          // And the door asks for theirs from the first: there is no one to let in without it (HB-1439 review).
+          ...(joined.handle === NAMES_NOBODY ? { needsHandle: true as const } : {}),
+        };
+      });
 
   /**
    * Web chat on or off for one member (2026-09-29). Only for someone who signs
@@ -179,19 +190,53 @@ export function createRoster(deps: MembersDeps): Roster {
     return { userId: person.userId, webChat: true, name: store.getMembership(agent.id, person.userId)?.displayName ?? name };
   };
 
+  /**
+   * The windows waiting for this person closed: their own (their first
+   * message on an app) and the knock windows of the invites they joined by
+   * (a Telegram invite copied again, which may name their @handle). The apps
+   * they were on; none for the owner, whom a removal never touches.
+   */
+  const closeWindowsFor = (agentId: string, userId: string): string[] => {
+    const m = store.getMembership(agentId, userId);
+    if (!m || m.role === 'owner') return [];
+    const knocks = new Set(store.inviteIdsRedeemedBy(agentId, userId).map(knockSeatFor));
+    const theirs = store.pairingWindows(agentId, new Date(0)).filter((w) => w.openedFor === userId || (!!w.openedFor && knocks.has(w.openedFor)));
+    for (const w of theirs) store.closePairingWindow(agentId, w.seat);
+    return [...new Set(theirs.map((w) => w.seat.split(':')[0]!))];
+  };
+
   const remove: Roster['remove'] = async (agent, userId) => {
-    // Under the lifecycle lock, on the host the agent is on once it is
-    // held: mid-move the scrub hit the volume the move had already
-    // exported (the copy kept them), a rebuild's seed or a restore's
-    // import put them back (concurrency review, 2026-10-09).
-    await whileBusy(agent.id, 'member-remove', async () => {
-      const now = store.getAgent(agent.id) ?? agent;
-      await revokeMember(
-        { store, provider: providerFor(now.hostId), log: trace(agent.id) },
-        agent.id,
-        userId,
-      );
-    });
+    let closed: string[] = [];
+    try {
+      // Under the lifecycle lock, on the host the agent is on once it is
+      // held: mid-move the scrub hit the volume the move had already
+      // exported (the copy kept them), a rebuild's seed or a restore's
+      // import put them back (concurrency review, 2026-10-09).
+      await whileBusy(agent.id, 'member-remove', async () => {
+        // The windows waiting for them close first, before the scrub: left
+        // open, each stayed in pairing for the rest of its half hour, and
+        // strangers were given codes the sweep then turned away (HB-1522).
+        // Closed only after it, a watch on another app approved and bound
+        // their knock while the scrub ran (their seat still active), on a
+        // list the scrub had read before: they were let in there for good
+        // (HB-1522 review). A watch finds its window gone and ends, telling
+        // nobody (HB-1223); one whose approval is in flight takes it back.
+        closed = closeWindowsFor(agent.id, userId);
+        const now = store.getAgent(agent.id) ?? agent;
+        await revokeMember(
+          { store, provider: providerFor(now.hostId), log: trace(agent.id) },
+          agent.id,
+          userId,
+        );
+      });
+    } finally {
+      // The door back to rest, however the removal ended: their windows are closed.
+      if (closed.length) {
+        trace(agent.id)('member.windows_closed', { userId, on: closed });
+        const now = store.getAgent(agent.id);
+        if (now) await restDoor(now).catch(() => {});
+      }
+    }
     // Their open console (the full chat) ends with the membership, and
     // their name leaves the gateway's list.
     consoleAccess.dropGuests(agent.id, userId);
@@ -229,9 +274,16 @@ export function createRoster(deps: MembersDeps): Roster {
     // learned which (joined before this was recorded), only for a named
     // @handle — the one their invite named, or one the owner types now.
     const joinedBy = store.inviteJoinFor(agent.id, member.userId);
-    const expect = joinedBy.handle ?? (handle ? handle : undefined);
+    // Their invite named them by a link that names nobody (kept so by an older
+    // release): that is no handle to open the door for, and no leave to open it
+    // to anyone either. The one typed now, or one is asked for (HB-1439 review).
+    const namedNobody = joinedBy.handle === NAMES_NOBODY;
+    const expect = (namedNobody ? undefined : joinedBy.handle) ?? (handle ? handle : undefined);
     const via = unlinked.find((c) => c.kind === joinedBy.via);
     if (joinedBy.via && !via) return conflict(`They are already linked on ${joinedBy.via} — nothing to reopen.`);
+    if (namedNobody && !expect) {
+      return conflict("Their invite named them by a link with no name in it, so Hatchabot can't tell who to let in: give their @handle.", 'needs-handle');
+    }
     if (!via && !expect) {
       return conflict(
         'We do not know which app they joined with, so the door would open to whoever messages first. Give their @handle and only they are let in.',

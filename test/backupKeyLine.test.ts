@@ -27,11 +27,11 @@ vi.setConfig({ testTimeout: 30_000 });
 
 const repo = resolve(import.meta.dirname, '..');
 /**
- * The six files that keep a copy of the reader of .env by systemd's rules on
- * Linux (HB-1457), for the seven scripts that read it so: upgrade.sh and
+ * The files that keep a copy of the reader of .env by systemd's rules on
+ * Linux (HB-1457), for every script that reads it so: upgrade.sh and
  * deploy-release.sh read the one in scripts/upgrade-helpers.sh (HB-0636).
  */
-const READERS = ['backup-volumes.sh', 'restore-drill.sh', 'uninstall.sh', 'setup-host.sh', 'upgrade-helpers.sh', 'restart.sh'];
+const READERS = ['backup-volumes.sh', 'restore-drill.sh', 'uninstall.sh', 'setup-host.sh', 'upgrade-helpers.sh', 'restart.sh', 'first-run-link.sh'];
 /** The reader of systemd's rules in `script`, to call: `ver` is what systemd_major found (the first number of `systemctl --version`). */
 const readerOf = (script: string) => {
   const src = readFileSync(join(repo, 'scripts', script), 'utf8');
@@ -177,6 +177,19 @@ describe('a backup run by hand saves the key the service reads from .env (HB-106
     expect(existsSync(elsewhere)).toBe(false);
   });
 
+  it('a Mac: .env is sourced with the launchd job\'s few settings, not the shell\'s: one only the shell\'s profile sets reads empty, as the job reads it (HB-1233)', async () => {
+    const s = sandbox();
+    // The service, started by launchd, has no FIXTURE_PART: its key is the default's.
+    const key = 'fixture-launchd-phrase';
+    await s.registry(key);
+    writeFileSync(join(s.install, '.env'), 'HATCHABOT_SECRET_KEY="fixture-${FIXTURE_PART:-launchd}-phrase"\n');
+    const r = s.byHand(true, { FIXTURE_PART: 'shell-profile' });
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(parseEnv(readFileSync(join(s.setDir(), 'secret-key.env'), 'utf8')).HATCHABOT_SECRET_KEY).toBe(key);
+    await expect(decrypts(s.setDir())).resolves.toBe('made-up secret value');
+    expect(readFileSync(join(s.setDir(), '.backup-owner'), 'utf8').trim()).toBe(mark(key));
+  });
+
   it('another key exported in the shell is refused before anything is written, on Linux and a Mac (HB-1065 review)', async () => {
     for (const [mac, envText] of [
       [false, 'HATCHABOT_SECRET_KEY=fixture-service-key\n'],
@@ -287,7 +300,7 @@ describe('a backup run by hand saves the key the service reads from .env (HB-106
     for (const [text, want] of cases) expect(systemd(text), JSON.stringify(text)).toEqual(want);
   });
 
-  it('the reader of systemd\'s rules is the same in backup-volumes.sh, uninstall.sh, restore-drill.sh, setup-host.sh, upgrade.sh, deploy-release.sh and restart.sh, and so is what asks the machine\'s systemd (HB-1231, HB-1457, and the review of HB-1109 and HB-1210)', () => {
+  it('the reader of systemd\'s rules is the same in backup-volumes.sh, uninstall.sh, restore-drill.sh, setup-host.sh, upgrade.sh, deploy-release.sh, restart.sh and first-run-link.sh, and so is what asks the machine\'s systemd (HB-1231, HB-1457, HB-1529, and the review of HB-1109 and HB-1210)', () => {
     const reader = (script: string) => {
       const src = readFileSync(join(repo, 'scripts', script), 'utf8');
       const at = src.indexOf('const systemd = (t, ver) => {');
@@ -315,6 +328,8 @@ describe('a backup run by hand saves the key the service reads from .env (HB-106
     expect(envNamed('upgrade-helpers.sh')).toBe(envNamed('setup-host.sh'));
     // And the note of a rollback goes beside the database the service opens, read the same way (review of HB-0840).
     expect(envNamed('restart.sh')).toBe(envNamed('upgrade-helpers.sh'));
+    // And the installer's last word asks the listener the service has, read the same way (HB-1529).
+    expect(envNamed('first-run-link.sh')).toBe(envNamed('upgrade-helpers.sh'));
   });
 });
 
@@ -422,5 +437,77 @@ describe('a comment that ends in a backslash is read as the machine\'s own syste
     expect(read(after, NEW)).toEqual({ out: ['[/srv/hb.sqlite]', '[/srv/hb.sqlite]'], asked: ['--version'] });
     expect(read(after, OLD)).toEqual({ out: ['[]', '[]'], asked: ['--version'] });
     expect(read('# a plain comment\nHATCHABOT_DB=/srv/hb.sqlite\n', OLD)).toEqual({ out: ['[/srv/hb.sqlite]', '[/srv/hb.sqlite]'], asked: [] });
+  });
+
+  it('env_named reads a HATCHABOT_ name under its name from before the rename too, as the service takes it when the new one is not set, on Linux and a Mac (HB-1379)', () => {
+    for (const script of ['restart.sh', 'upgrade-helpers.sh', 'setup-host.sh', 'first-run-link.sh']) {
+      const src = readFileSync(join(repo, 'scripts', script), 'utf8');
+      const fns = ['systemd_major', 'env_named'].map((name) => { const at = src.indexOf(`\n${name}() {\n`); return src.slice(at + 1, src.indexOf('\n}\n', at) + 2); }).join('\n');
+      for (const mac of [false, true]) {
+        const root = mkdtempSync(join(tmpdir(), 'hb-envnamed-old-')); dirs.push(root);
+        const bin = join(root, 'bin'); mkdirSync(bin);
+        if (mac) writeFileSync(join(bin, 'uname'), '#!/usr/bin/env bash\necho Darwin\n', { mode: 0o755 });
+        // The old name alone; both names (the new one wins, though it is empty); and a name with no old one.
+        writeFileSync(join(root, '.env'), 'AGENTCLAW_IMAGE=made-up-runtime:latest\nAGENTCLAW_BIND=192.0.2.10\nHATCHABOT_BIND=\nPORT=9137\n');
+        const r = spawnSync('bash', ['-c', `set -euo pipefail\n${fns}\ncd "$1"\nenv_named HATCHABOT_IMAGE HATCHABOT_BIND HATCHABOT_TLS_CERT PORT; echo "[$ENVSET_HATCHABOT_IMAGE:$ENV_HATCHABOT_IMAGE] [$ENVSET_HATCHABOT_BIND:$ENV_HATCHABOT_BIND] [$ENVSET_HATCHABOT_TLS_CERT:$ENV_HATCHABOT_TLS_CERT] [$ENV_PORT]"`, '_', root],
+          { encoding: 'utf8', env: scriptEnv(join(root, 'home'), `${bin}:/usr/bin:/bin`) });
+        const label = `${script} ${mac ? 'Mac' : 'Linux'}`;
+        expect(r.status, label + r.stdout + r.stderr).toBe(0);
+        expect(r.stdout.trim(), label).toBe('[1:made-up-runtime:latest] [1:] [:] [9137]');
+      }
+    }
+  });
+
+  // With no node on Linux, env_named reads in bash what reads the same as
+  // systemd line by line, and nothing else. A quote opened on an earlier line
+  // and never closed there takes the lines after it into its value, and a
+  // form feed or vertical tab around a value is kept (review of HB-1529).
+  it('env_named with no node reads a .env as node does, by systemd\'s rules, or not at all: a quote left open, a form feed or vertical tab kept', () => {
+    const cases: Array<[string, boolean]> = [
+      ['HATCHABOT_GREETING="hello\nPORT=9137\nHATCHABOT_BIND=192.0.2.10\n', false],  // open, never closed
+      ["HATCHABOT_GREETING='it\nPORT=9137\n'\n", false],                             // closed lines later
+      ['HATCHABOT_GREETING="a" "b\nPORT=9137\n', false],                              // a second quote opened
+      ['HATCHABOT_GREETING="hello there"\nX=it\'s\nPORT=9137\nHATCHABOT_BIND=192.0.2.10\n', true], // quoted whole; a quote mid-value is a character
+      ['PORT=9137\f\nHATCHABOT_BIND=\v192.0.2.10\n', true],                          // kept, as systemd keeps them
+      ['PORT\t=\t9137\t\n HATCHABOT_BIND = 192.0.2.10 \n', true],
+    ];
+    for (const script of ['restart.sh', 'upgrade-helpers.sh', 'setup-host.sh', 'first-run-link.sh']) {
+      const src = readFileSync(join(repo, 'scripts', script), 'utf8');
+      const fns = ['systemd_major', 'env_named'].map((name) => { const at = src.indexOf(`\n${name}() {\n`); return src.slice(at + 1, src.indexOf('\n}\n', at) + 2); }).join('\n');
+      for (const [envText, readable] of cases) {
+        const root = mkdtempSync(join(tmpdir(), 'hb-envnamed-nonode-')); dirs.push(root);
+        const withNode = join(root, 'with'), without = join(root, 'without'); mkdirSync(withNode); mkdirSync(without);
+        symlinkSync(process.execPath, join(withNode, 'node'));
+        writeFileSync(join(root, '.env'), envText);
+        const read = (path: string) => {
+          const r = spawnSync('bash', ['-c', `set -euo pipefail\n${fns}\ncd "$1"\nenv_named PORT HATCHABOT_BIND; printf '[%s] [%s:%q] [%s:%q]\\n' "$ENV_READ" "$ENVSET_PORT" "$ENV_PORT" "$ENVSET_HATCHABOT_BIND" "$ENV_HATCHABOT_BIND"`, '_', root],
+            { encoding: 'utf8', env: scriptEnv(join(root, 'home'), path) });
+          expect(r.status, script + r.stdout + r.stderr).toBe(0);
+          expect(r.stderr, script).toBe('');
+          return r.stdout.trim();
+        };
+        const label = `${script} ${JSON.stringify(envText)}`;
+        const byNode = read(`${withNode}:/usr/bin:/bin`);
+        const byBash = read(`${without}:${systemPathWithout(join(root, 'system'), ['node', 'nodejs'])}`);
+        expect(byNode.startsWith('[1]'), label + byNode).toBe(true);
+        expect(byBash, label).toBe(readable ? byNode : '[] [:\'\'] [:\'\']');
+      }
+    }
+  });
+
+  it('env_named on a Mac sources .env as the launchd job does: a setting only the shell has reads empty, its variables are not seen, and its input is not read (HB-1381)', () => {
+    for (const script of ['restart.sh', 'upgrade-helpers.sh', 'setup-host.sh', 'first-run-link.sh']) {
+      const src = readFileSync(join(repo, 'scripts', script), 'utf8');
+      const fns = ['systemd_major', 'env_named'].map((name) => { const at = src.indexOf(`\n${name}() {\n`); return src.slice(at + 1, src.indexOf('\n}\n', at) + 2); }).join('\n');
+      const root = mkdtempSync(join(tmpdir(), 'hb-envnamed-mac-')); dirs.push(root);
+      const bin = join(root, 'bin'); mkdirSync(bin);
+      writeFileSync(join(bin, 'uname'), '#!/usr/bin/env bash\necho Darwin\n', { mode: 0o755 });
+      // The launchd job has HOME but no FIXTURE_PART, and nothing on its input: a read there gets nothing.
+      writeFileSync(join(root, '.env'), 'HATCHABOT_DB="$HOME/${FIXTURE_PART:-launchd}.sqlite"\nread -r FIXTURE_LINE; HATCHABOT_IMAGE="made-up-runtime:${FIXTURE_LINE:-none}${FIXTURE_SHELL_ONLY:-}"\n');
+      const r = spawnSync('bash', ['-c', `set -euo pipefail\nFIXTURE_SHELL_ONLY=-shell\n${fns}\ncd "$1"\nenv_named HATCHABOT_DB HATCHABOT_IMAGE; echo "[$ENV_HATCHABOT_DB] [$ENV_HATCHABOT_IMAGE] [$ENV_READ]"`, '_', root],
+        { encoding: 'utf8', input: 'from-the-input\n', env: { ...scriptEnv(join(root, 'home'), `${bin}:/usr/bin:/bin`), FIXTURE_PART: 'shell-profile' } });
+      expect(r.status, script + r.stdout + r.stderr).toBe(0);
+      expect(r.stdout.trim(), script).toBe(`[${join(root, 'home')}/launchd.sqlite] [made-up-runtime:none] [1]`);
+    }
   });
 });

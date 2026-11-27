@@ -4,12 +4,13 @@ import type { Agent } from '../../domain/types.js';
 import type { RuntimeInfo, RuntimeProvider } from '../../providers/provider.js';
 import type { Store } from '../../store/store.js';
 import { accessAlertOf, accessOverview, agentsWithAccessFindings } from '../google/accessOverview.js';
-import { MACHINE, budgetLine, budgetView, endedPauseLine, endedPauseOwed, machineTz, monthKey, monthSpend, stepLine, stepView, type EndedPause, type StepView } from '../usage/budgets.js';
+import { MACHINE, budgetLine, budgetView, endedPauseLine, endedPauseOwed, endedSwitchLine, endedSwitchOwed, machineTz, monthKey, monthName, monthSpend, nextMonth, stepLine, stepView, type EndedPause, type EndedSwitch, type StepView } from '../usage/budgets.js';
 import type { MonthlyBudgets } from '../usage/monthlyBudgets.js';
 import { diskWarnBytes } from '../health/posture.js';
 import { memoryCapFor } from './provision.js';
 import type { AutoRebuilds } from './autoRebuilds.js';
 import { localModelListed } from '../sources/warmModels.js';
+import { ownersModel } from '../transfer/transfer.js';
 
 /**
  * The agent list (HB-0808 step 11, part 2): every tile's agent, with what the
@@ -127,8 +128,46 @@ export function createAgentList(deps: AgentListDeps): AgentList {
     // said it was paused by this Hatchabot's budget (HB-1315).
     const machinePaused = new Map<string, { pausedAt: string; alreadyStopped?: boolean; ended?: EndedPause }>(
       store.listBudgetPauses({ open: true, month: budgetMonth }).filter((p) => p.scope === MACHINE && p.kind === 'pause').map((p) => [p.agentId, p]));
+    // Moved to a cheaper model by the machine's budget: said on its tile too,
+    // with the model and the 1st it ends on; that pause's line was all
+    // there was, and a move is not a pause (HB-1315), so it showed nowhere (HB-1422).
+    const machineCheaper = new Map<string, { to: string; classModel: boolean; ended?: EndedSwitch }>(store.listBudgetPauses({ open: true, month: budgetMonth })
+      .filter((p) => p.scope === MACHINE && p.kind === 'cheaper' && !!p.toModel).map((p) => [p.agentId, { to: p.toModel!, classModel: p.fromModel === p.toModel }]));
+    const machineUntil = `${monthName(nextMonth(budgetMonth))} 1`;
+    // `own`: its owner's own model, which the copy carries; none when it
+    // follows its source's default, which there is the other machine's
+    // source's (HB-1299 review).
+    const budgetSwitchOf = (a: Agent): { budgetSwitch?: { to: string; own?: string; scope: 'agent' | 'machine' } } => {
+      const cheap = a.model ? store.openCheaperPause(a.id) : undefined;
+      if (!cheap?.toModel || cheap.toModel !== a.model) return {};
+      const own = ownersModel(store, a);
+      if (own === cheap.toModel) return {};
+      return { budgetSwitch: { to: cheap.toModel, ...(own ? { own } : {}), scope: cheap.scope === MACHINE ? 'machine' : 'agent' } };
+    };
+    // One of its own budget's, the budget removed since (this month's too):
+    // still owed its start, said on its tile as well (HB-1316).
+    const ownEnded = new Map<string, { pausedAt: string; ended: EndedPause }>();
+    // This Hatchabot's budget no longer pauses at this month's spend (raised,
+    // removed, or set to warn or a cheaper model): this month's machine
+    // pauses still owed their start are ended too (HB-1496).
+    const machineRow = budgetRows.get(MACHINE);
+    const machinePausesNow = !!machineRow && machineRow.atLimit === 'pause' && [...budgetSpend.values()].reduce((x, y) => x + y, 0) >= machineRow.usd;
     for (const p of store.listBudgetPauses({ open: true })) {
-      if (p.scope !== MACHINE || p.month >= budgetMonth || machinePaused.has(p.agentId)) continue;
+      if (p.month > budgetMonth) continue;
+      if (p.scope === p.agentId && !budgetRows.has(p.agentId) && !ownEnded.has(p.agentId)) {
+        const owed = endedPauseOwed(store, p.agentId, budgetMonth, p.agentId);
+        if (owed) ownEnded.set(p.agentId, { pausedAt: owed.at, ended: owed.ended });
+      }
+      if (p.scope !== MACHINE) continue;
+      // An earlier month's switch to a cheaper model whose own model is not back yet (HB-1496).
+      if (p.kind === 'cheaper') {
+        if (p.month < budgetMonth && !machineCheaper.has(p.agentId)) {
+          const owed = endedSwitchOwed(store, p.agentId, budgetMonth, MACHINE);
+          if (owed) machineCheaper.set(p.agentId, { to: owed.to, classModel: false, ended: owed.ended });
+        }
+        continue;
+      }
+      if (p.month === budgetMonth ? machinePausesNow || !!machinePaused.get(p.agentId)?.ended : machinePaused.has(p.agentId)) continue;
       const owed = endedPauseOwed(store, p.agentId, budgetMonth, MACHINE, { machineSpend: machineOwner() });
       if (owed) machinePaused.set(p.agentId, { pausedAt: owed.at, ended: owed.ended });
     }
@@ -209,9 +248,24 @@ export function createAgentList(deps: AgentListDeps): AgentList {
           /** A loop the watcher found and the fix (owner only): Alerts. */
           ...(role === 'owner' && stuckBy.get(a.id) ? { stuck: stuckBy.get(a.id) } : {}),
           /** Its monthly budget, this month's spend against it, and a pause (owner only): Alerts from 80%. */
-          ...(role === 'owner' && budgetOf(a) ? { budget: { ...budgetOf(a)!, ...(budgetOf(a)!.level || budgetOf(a)!.paused?.ended ? { line: budgetLine(budgetOf(a)!, 'it') } : {}) } } : {}),
+          ...(role === 'owner' && budgetOf(a) ? { budget: { ...budgetOf(a)!, ...(budgetOf(a)!.level || budgetOf(a)!.paused?.ended || budgetOf(a)!.downgraded?.ended ? { line: budgetLine(budgetOf(a)!, 'it') } : {}) } } : {}),
           ...(role === 'owner' && machinePaused.has(a.id) ? { budgetPaused: { scope: 'machine', at: machinePaused.get(a.id)!.pausedAt, ...(machinePaused.get(a.id)!.alreadyStopped ? { staysStopped: true } : {}),
-            ...(machinePaused.get(a.id)!.ended ? { ended: machinePaused.get(a.id)!.ended, line: endedPauseLine(machinePaused.get(a.id)!.ended!, 'this Hatchabot') } : {}) } } : {}),
+            ...(machinePaused.get(a.id)!.ended ? { ended: machinePaused.get(a.id)!.ended, line: endedPauseLine(machinePaused.get(a.id)!.ended!, 'this Hatchabot') } : {}) } }
+            : role === 'owner' && ownEnded.has(a.id) ? { budgetPaused: { scope: 'agent', at: ownEnded.get(a.id)!.pausedAt, ended: ownEnded.get(a.id)!.ended, line: endedPauseLine(ownEnded.get(a.id)!.ended, 'it') } } : {}),
+          /**
+           * On a cheaper model a budget switched it to (its own or the machine's): a
+           * download or a move carries `own`, its owner's model (ownersModel), so the
+           * other machine runs that until a budget there says otherwise; the
+           * confirmations say so (owner only, HB-1299).
+           */
+          ...(role === 'owner' ? budgetSwitchOf(a) : {}),
+          /**
+           * On a cheaper model the machine's budget moved it to, until the 1st (owner only): Alerts. Gone once its model
+           * is changed by hand. `classModel`: that model is its class's own, which stays: no "until" (HB-1477 review).
+           */
+          // `ended`: an earlier month's, its own model not back yet: no "until", and its line (HB-1496).
+          ...(role === 'owner' && machineCheaper.has(a.id) && machineCheaper.get(a.id)!.to === a.model ? { budgetCheaper: { scope: 'machine', to: machineCheaper.get(a.id)!.to,
+            ...(machineCheaper.get(a.id)!.ended ? { ended: machineCheaper.get(a.id)!.ended, line: endedSwitchLine(machineCheaper.get(a.id)!.ended!) } : machineCheaper.get(a.id)!.classModel ? { classModel: true } : { until: machineUntil }) } } : {}),
           ...(role === 'owner' && stepOf(a.id) ? { spendStep: stepOf(a.id) } : {}),
           /** It used far more than its usual day in the last 24 hours (owner only): an Alerts line. */
           ...(role === 'owner' && spikeBy.has(a.id) ? { spike: spikeBy.get(a.id) } : {}),

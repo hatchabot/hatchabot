@@ -32,6 +32,7 @@ export type OpKind =
   | 'app-update'
   | 'app-rollback'
   | 'install-image'
+  | 'base-build'
   | 'backup-run'
   | 'restore-drill'
   | 'adopt-workspace';
@@ -46,6 +47,14 @@ export const FILES_REPLACED_BY: ReadonlySet<string> = new Set<OpKind>([
   'adopt-workspace',
 ]);
 const filesReplacing = new Map<string, number>();
+/**
+ * Counted here as an operation row begins or starts, but not for a setup or
+ * a rebuild: each counts under its own take (provision.ts runProvisionSteps,
+ * rebuildAgent, finishInterruptedRebuild), which came after its row began,
+ * so one another holder refused counted all the same, and a snapshot or an
+ * access check at that moment was dropped for nothing (HB-1491).
+ */
+const countsAsItsRowBegins = (kind: string): boolean => FILES_REPLACED_BY.has(kind) && !BACKGROUND_KINDS.includes(kind);
 /** A change that replaces the agent's files has started running, or started again after a restart (counted in memory, by agent). */
 export function noteFilesReplacing(agentId: string): void {
   filesReplacing.set(agentId, (filesReplacing.get(agentId) ?? 0) + 1);
@@ -181,6 +190,7 @@ export const KIND_LABEL: Record<string, string> = {
   'app-update': 'App update',
   'app-rollback': 'App roll back',
   'install-image': 'Image install',
+  'base-build': 'Base image build',
   'backup-run': 'Backup',
   'restore-drill': 'Restore drill',
   'adopt-workspace': 'Workspace adopt',
@@ -317,7 +327,7 @@ export function handleFor(store: Store, id: string): OpHandle {
     id,
     start() {
       const op = store.updateOperation(id, { status: 'running', bootId: currentBootId() });
-      if (op?.agentId && FILES_REPLACED_BY.has(op.kind)) noteFilesReplacing(op.agentId);
+      if (op?.agentId && countsAsItsRowBegins(op.kind)) noteFilesReplacing(op.agentId);
       if (op) event(store, op, 'op.started', { label: KIND_LABEL[op.kind] ?? op.kind });
     },
     step(key, detail) {
@@ -354,7 +364,7 @@ export function beginOperation(
   const now = new Date().toISOString();
   const id = `op_${randomUUID().replace(/-/g, '').slice(0, 20)}`;
   // Counted when it starts running: a queued one counts at start().
-  if (!opts.queued && agentId && FILES_REPLACED_BY.has(kind)) noteFilesReplacing(agentId);
+  if (!opts.queued && agentId && countsAsItsRowBegins(kind)) noteFilesReplacing(agentId);
   store.insertOperation({
     id, agentId, hostId: opts.hostId ?? null, kind, requestedBy: opts.requestedBy ?? null,
     requestedAt: now, params, step: null, stepAt: null, status: opts.queued ? 'queued' : 'running', outcome: null,
@@ -393,7 +403,13 @@ export function operationTitles(kind: string, params: Record<string, unknown> | 
       const to = str(p.peerName);
       return to ? three(`Move to ${to}`, `Moving to ${to}`, `Moved to ${to}`) : three('Move to another Hatchabot', 'Moving to another Hatchabot', 'Moved to another Hatchabot');
     }
-    case 'import': return three('Import', 'Importing', 'Imported');
+    case 'import': {
+      // A clone and a new child are made as imports (transfer/copies.ts), with the name they were made from (HB-1297).
+      const of = str(p.cloneOf), child = str(p.childOf);
+      if (of) return three(`Clone of ${of}`, `Cloning ${of}`, `Cloned ${of}`);
+      if (child) return three(`New child of ${child}`, `Making a child of ${child}`, `Made a child of ${child}`);
+      return three('Import', 'Importing', 'Imported');
+    }
     case 'restore-backup': {
       const d = str(p.date);
       return d ? three(`Restore from the ${d} backup`, `Restoring from the ${d} backup`, `Restored from the ${d} backup`)
@@ -412,6 +428,11 @@ export function operationTitles(kind: string, params: Record<string, unknown> | 
     case 'install-image': {
       const h = str(p.host);
       return h ? three(`Image install on ${h}`, `Copying the image to ${h}`, `Copied the image to ${h}`) : three('Image install', 'Copying the image', 'Copied the image');
+    }
+    case 'base-build': {
+      const v = str(p.version);
+      return v ? three(`Base image build for OpenClaw ${v}`, `Building a base image for OpenClaw ${v}`, `Built a base image for OpenClaw ${v}`)
+        : three('Base image build', 'Building a base image', 'Built a base image');
     }
     case 'backup-run': return three('Backup', 'Backing up', 'Backed up');
     case 'restore-drill': return three('Restore drill', 'Drilling a restore from the backups', 'Restore drill passed');
@@ -646,17 +667,20 @@ export function settleOwedStart(store: Store, opId: string, words?: string): voi
 const TAKEN_OVER = {
   'owner-start': 'Its owner has started it since.',
   'owner-stop': 'Its owner has stopped it since, so it stays stopped.',
+  'host-drain': 'Its machine has been drained since, so it stays stopped.',
   'budget-pause': 'Its budget has paused it since, so it stays stopped.',
 } as const;
 
 /**
- * Its owner's own Start or Stop, or a budget's pause, since a start was owed
+ * Its owner's own Start or Stop, its machine's drain, or a budget's pause, since a start was owed
  * on the agent: the starts its operations still owe are not theirs to run any
  * more (a boot's pass runs in the background and may reach one minutes after
  * the owner stopped it on purpose), and each record says why.
  */
 export function settleStartsOwedOn(store: Store, agentId: string, by: keyof typeof TAKEN_OVER): void {
   for (const op of store.operationsOwingStart()) if (op.agentId === agentId) settleOwedStart(store, op.id, TAKEN_OVER[by]);
+  // And a download a restart cut off (transfer.ts startCutOffDownloads, HB-1479).
+  store.clearAgentHold(agentId, 'download-stop');
 }
 
 /** Tests: a death at a named point (`#start-owed`: an owed start about to run), as the step hook dies at a step. */

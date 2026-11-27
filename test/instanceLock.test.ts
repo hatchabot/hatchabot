@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -8,6 +8,15 @@ import { holdInstanceLock, InstanceLockedError, InstanceLockUnwritableError, use
 // One server process per database (HB-1436): a second one's start swept the
 // first's secrets in flight. Each test has its own folder; a child process
 // that holds the lock is a stand-in for the other server.
+
+// access() that says yes to every path, for a handle SQLite opened read only
+// while the path's check said it could be written (a file swapped between
+// the two, an odd mount; HB-1443). Only this file's import of node:fs.
+const access = vi.hoisted(() => ({ alwaysWritable: false }));
+vi.mock('node:fs', async (orig) => {
+  const real = await orig<typeof import('node:fs')>();
+  return { ...real, accessSync: (...a: Parameters<typeof real.accessSync>) => (access.alwaysWritable ? undefined : real.accessSync(...a)) };
+});
 
 const dirs: string[] = [];
 const children: ChildProcess[] = [];
@@ -137,6 +146,98 @@ describe('one server process per database (HB-1436)', () => {
     expect(userName(1234, passwd)).toBe('rivergate');
     expect(userName(4321, passwd)).toBe('user id 4321');
     expect(userName(4321, join(passwd, 'none'))).toBe('user id 4321');
+  });
+
+  it('a link to a database not made yet finds the lock beside where it leads, as a start by the database\'s own path does once it is made (HB-1443)', () => {
+    const moved = join(dbIn(), '..', 'moved');
+    mkdirSync(moved);
+    const db = join(moved, 'hatchabot.sqlite');
+    const old = join(dbIn(), '..', 'old.sqlite');
+    symlinkSync(db, old);
+    const first = holdInstanceLock(old, 0);
+    expect(first.path).toBe(`${join(realpathSync(moved), 'hatchabot.sqlite')}.lock`);
+    // SQLite makes the database where the link leads.
+    writeFileSync(db, '');
+    expect(() => holdInstanceLock(db, 0)).toThrow(InstanceLockedError);
+    expect(() => holdInstanceLock(old, 0)).toThrow(InstanceLockedError);
+    expect(existsSync(`${old}.lock`)).toBe(false);
+    first.release();
+  });
+
+  it('a link in a linked folder is read from the folder it leads to, as the system reads it (review of HB-1443)', () => {
+    const x = join(dbIn(), '..', 'x');
+    mkdirSync(join(x, 'real'), { recursive: true });
+    const linkdir = join(x, '..', 'linkdir');
+    symlinkSync(join(x, 'real'), linkdir);
+    // linkdir/hatchabot.sqlite → ../moved/hatchabot.sqlite: x/moved, not beside linkdir.
+    symlinkSync(join('..', 'moved', 'hatchabot.sqlite'), join(linkdir, 'hatchabot.sqlite'));
+    const db = join(linkdir, 'hatchabot.sqlite');
+    let refused: unknown;
+    try { holdInstanceLock(db, 0).release(); } catch (err) { refused = err; }
+    // x/moved is not made yet: said plainly, naming the folder the system would use.
+    expect(refused).toBeInstanceOf(InstanceLockUnwritableError);
+    expect((refused as Error).message).toBe(
+      `Hatchabot cannot write its lock file (${join(realpathSync(x), 'moved', 'hatchabot.sqlite')}.lock), so this one did not start: without the lock, ` +
+      'a second server could run on this database unnoticed. ' +
+      `The folder it goes in (${join(realpathSync(x), 'moved')}) is not there: a link on the way to the database leads to a folder that does not exist. ` +
+      'Make that folder, or set HATCHABOT_DB to where the database is.',
+    );
+    expect(existsSync(join(x, '..', 'moved'))).toBe(false);
+    // Made, the lock is beside the database SQLite makes there.
+    mkdirSync(join(x, 'moved'));
+    const first = holdInstanceLock(db, 0);
+    expect(first.path).toBe(`${join(realpathSync(x), 'moved', 'hatchabot.sqlite')}.lock`);
+    writeFileSync(join(x, 'moved', 'hatchabot.sqlite'), '');
+    expect(() => holdInstanceLock(join(x, 'moved', 'hatchabot.sqlite'), 0)).toThrow(InstanceLockedError);
+    first.release();
+  });
+
+  it.skipIf(process.getuid?.() === 0)('a folder that is there but that this user may not look in is not said to be missing (review of HB-1443)', () => {
+    const locked = join(dbIn(), '..', 'locked');
+    mkdirSync(join(locked, 'data'), { recursive: true });
+    const db = join(locked, 'data', 'hatchabot.sqlite');
+    chmodSync(locked, 0o600);
+    let refused: unknown;
+    try { holdInstanceLock(db, 0).release(); } catch (err) { refused = err; } finally { chmodSync(locked, 0o755); }
+    expect(refused).toBeInstanceOf(InstanceLockUnwritableError);
+    expect((refused as Error).message).toBe(
+      `Hatchabot cannot write its lock file (${db}.lock), so this one did not start: without the lock, ` +
+      'a second server could run on this database unnoticed. ' +
+      `Hatchabot cannot look in ${join(locked, 'data')} (EACCES): this user may not open one of the folders on the way to it (its x permission; ls -ld each one). ` +
+      'Give this user that access, or set HATCHABOT_DB to where the database is.',
+    );
+    expect(() => holdInstanceLock(db, 0).release()).not.toThrow();
+  });
+
+  it.skipIf(process.getuid?.() === 0)('a handle SQLite opened read only is refused although access() says the file can be written (HB-1443)', () => {
+    const db = dbIn();
+    writeFileSync(`${db}.lock`, '');
+    chmodSync(`${db}.lock`, 0o444);
+    access.alwaysWritable = true;
+    let refused: unknown;
+    try { holdInstanceLock(db, 0).release(); } catch (err) { refused = err; } finally { access.alwaysWritable = false; }
+    expect(refused).toBeInstanceOf(InstanceLockUnwritableError);
+    expect((refused as Error).message).toMatch(/^Hatchabot cannot write its lock file \(.*\), so this one did not start: .* It cannot be changed here \(SQLITE_READONLY\): the disk or folder may be read only\./);
+    // The file stays empty, and taken writable it holds as before.
+    expect(statSync(`${db}.lock`).size).toBe(0);
+    chmodSync(`${db}.lock`, 0o644);
+    const held = holdInstanceLock(db, 0);
+    expect(statSync(`${db}.lock`).size).toBe(0);
+    expect(() => holdInstanceLock(db, 0)).toThrow(InstanceLockedError);
+    held.release();
+  });
+
+  it.skipIf(process.getuid?.() === 0)('a folder the lock file cannot be made in is said in plain words, not as SQLite\'s error (HB-1443)', () => {
+    const db = dbIn();
+    chmodSync(dirname(db), 0o555);
+    let refused: unknown;
+    try { holdInstanceLock(db, 0).release(); } catch (err) { refused = err; } finally { chmodSync(dirname(db), 0o755); }
+    expect(refused).toBeInstanceOf(InstanceLockUnwritableError);
+    expect((refused as Error).message).toBe(
+      `Hatchabot cannot write its lock file (${join(realpathSync(dirname(db)), basename(db))}.lock), so this one did not start: without the lock, ` +
+      'a second server could run on this database unnoticed. ' +
+      'It cannot be changed here (SQLITE_CANTOPEN): the disk or folder may be read only. Start the server where its database can be written.',
+    );
   });
 
   it('the server takes it before it opens the database', () => {

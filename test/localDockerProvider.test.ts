@@ -1216,6 +1216,31 @@ ${config === undefined ? 'process.exit(255);' : `process.stdout.write(${JSON.str
       expect(await probe('fixture-alias.invalid', 22, 1_000)).toBe(true);
     } finally { await before.close().catch(() => {}); await after.close(); }
   });
+
+  it('one ssh -G that fails: the probe knocks where ssh said last, not on the name as written (HB-1157)', async () => {
+    const srv = await listening();
+    const d = mkdtempSync(join(tmpdir(), 'acl-ssh-once-'));
+    try {
+      // An ssh whose -G answer is a file; with none there, it fails, as one killed at its limit does.
+      const said = join(d, 'said'), ssh = join(d, 'ssh');
+      writeFileSync(ssh, `#!${process.execPath}\nconst fs = require('fs');\nif (!fs.existsSync(${JSON.stringify(said)})) process.exit(255);\nprocess.stdout.write(fs.readFileSync(${JSON.stringify(said)}, 'utf8'));\n`, { mode: 0o755 });
+      writeFileSync(said, `hostname 127.0.0.1\nport ${srv.port}\n`);
+      const probe = sshReachProbe('ssh://fixture-alias.invalid', ssh);
+      expect(await probe('fixture-alias.invalid', 22, 1_000)).toBe(true);
+      // Was: the alias as written, port 22 (a name that resolves nowhere), and "down".
+      rmSync(said);
+      expect(await probe('fixture-alias.invalid', 22, 1_000)).toBe(true);
+      // Through another machine, as ssh said last: still not probed from here.
+      writeFileSync(said, 'hostname 127.0.0.1\nport 22\nproxyjump jump.fixture.invalid\n');
+      const through = sshReachProbe('ssh://fixture-alias.invalid', ssh);
+      expect(await through('fixture-alias.invalid', 22, 1_000)).toBe(true);
+      rmSync(said);
+      expect(await through('fixture-alias.invalid', 22, 1_000)).toBe(true);
+      // Never answered: the address as written, as before.
+      const never = sshReachProbe(`ssh://127.0.0.1:${srv.port}`, ssh);
+      expect(await never('127.0.0.1', srv.port, 1_000)).toBe(true);
+    } finally { await srv.close(); rmSync(d, { recursive: true, force: true }); }
+  });
 });
 
 describe('HB-1027: the container a model copy makes is a one-shot the sweep can find', () => {
@@ -1365,6 +1390,14 @@ exit 0
     const { p, named, removed } = dropping();
     await expect(drain(p.streamFromVolume('docker://hatchabot-kitchen-helper-df918a55', ['cat', 'x']))).rejects.toThrow(/exit 255/);
     const name = named('fs');
+    expect(name).toBeTruthy();
+    expect(await removed(name!)).toBe(true);
+  });
+
+  it('a read-only shell on the volume: it fails, and its one-shot is removed by name (HB-1399)', async () => {
+    const { p, named, removed } = dropping();
+    expect((await p.execShellOnVolume('docker://hatchabot-kitchen-helper-df918a55', 'ls', { readOnly: true })).code).toBe(255);
+    const name = named('ro');
     expect(name).toBeTruthy();
     expect(await removed(name!)).toBe(true);
   });

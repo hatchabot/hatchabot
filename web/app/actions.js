@@ -99,9 +99,28 @@ function budgetsToggled(el) { if (el.open) return loadBudgets(); }
 function bpOpenAgain() { return bpOpen(bp.agent); }
 function inviteFromEdit() { return invite(editAgentId, $('editName')?.value || ''); }
 function removePoolBotAndList(username) { return removePoolBot(username).then(loadBotInventory); }
-function rebuildDerivedImageAndList(name) { return rebuildDerivedImage(name).then(loadRuntimeImages); }
+/** The Derived images drawer, unfolded: its toggle event loads it and remembers it, as a click on it does. */
+function unfoldDerivedDrawer() {
+  const d = $('advPart-derived');
+  if (d && !d.open) d.open = true;
+}
+/**
+ * ↻ on a derived row of the Runtime images list: its build is followed only with the Derived images
+ * drawer unfolded (derivedPanelShown), so it is unfolded first, or its "✓ Built" never came (HB-1525).
+ */
+function rebuildDerivedImageAndList(name) {
+  unfoldDerivedDrawer();
+  return rebuildDerivedImage(name).then(loadRuntimeImages);
+}
+/** Log on a derived row of the Runtime images list: the log is shown in the Derived drawer, so it is unfolded first, and the log scrolled into view (HB-1525 review). */
+function showDerivedLogFromList(name) {
+  unfoldDerivedDrawer();
+  return showDerivedLog(name).then(() => {
+    const pre = $('derivedBuildOut');
+    if (pre && !pre.hidden) pre.scrollIntoView?.({ block: 'nearest' });
+  });
+}
 function deleteDerivedImageAndList(name) { return deleteDerivedImage(name).then(loadRuntimeImages); }
-function kickAndList(agentId, userId, label) { return kick(agentId, userId, label).then(renderEditMembers); }
 function dismissSpikeRow(agentId, at, el) { return dismissSpike(agentId, at).then(() => { el.closest('div').remove(); }); }
 function saveMachineDefaultOf(key) { return saveMachineDefault(key, $('md-' + key)); }
 function editGroupNameOf(el) { return editGroupName(el.closest('.v2ghead').querySelector('h3')); }
@@ -149,14 +168,14 @@ function actionFor(name) {
     copyWebChatInvite, createAgent, createApiKeyProfileFromSetup, createFromScratch, createFromTodo,
     createSubscriptionProfile, cronModeChanged, del, delAiProfile, deleteClass, deleteCron,
     deleteDerivedImage, deleteDerivedImageAndList, deleteHost, deleteImageTag, deleteSnapshot,
-    delPeer, denyPair, deriveChild, discardTrial, disconnectAccount, dismissContextReset,
+    delPeer, denyPair, deriveChild, discardTrial, disconnectAccount, dismissConnEnding, dismissContextReset,
     dismissSecurityNotice, dismissShare, dismissSpike, dismissSpikeRow, distillToMaster, doLogin,
     doSendAgent, downloadAgent, downloadBackupCodes, downloadHistory, downloadRecoveryCode,
     drainHost, editCronJob, editGroupName, editGroupNameOf, editGroupNameOnEnter, embedderAction,
     embedMoveAll, enableIfChecked, faApply, faManual, faRenderAction, faSelect, faToggleAll,
     fleetResClear, fleetResSortBy, forgotPassword, goSetupValues, hideById, hideRecoverForm,
     hideWhenChecked, idResendVerification, idSignIn, idSignUp, importAgentFile, installApp,
-    installHere, installImage, inviteFromEdit, kick, kickAndList, loadAudit, loadBotInventory,
+    installHere, installImage, inviteFromEdit, kick, loadAudit, loadBotInventory,
     loadConnections, loadCrons, loadFleetUsage, loadHealth, loadInbox, loadInspectFile,
     loadLogs, loadPosture, loadReach, loadSetupLog, loadUsage, makeWebChatInvite, matchBotFather,
     moveAgentsApply, moveAgentsToSource, moveAiProfile, moveGroup, moveHostAgent, newCliToken,
@@ -185,8 +204,8 @@ function actionFor(name) {
     setPoolOwnOnly, setRebuildAtOnce, setRebuildPolicy, setSearchMode, setSpendRange,
     settingsAdvToggled, setWebChat, sfAddPasskey, sfCancel, sfConfirmTotp, sfLink, sfNewBackupCodes,
     sfOpen, sfRemove, sfStartTotp, sfSubmitCode, sfUsePasskey, shareAiProfile, shareInviteTg,
-    shareTemplate, shareWebChatWith, showBotToken, showDeployKey, showDerivedLog, showDialog,
-    showInspTab, showRecoverForm, showRunnerSetup, showTab, signOut, signOutEverywhere, skipTelegram,
+    shareTemplate, shareWebChatWith, showBotToken, showDeployKey, showDerivedLog, showDerivedLogFromList, showDialog,
+    showInspTab, showMoreInbox, showRecoverForm, showRunnerSetup, showTab, signOut, signOutEverywhere, skipTelegram,
     sortGroup, sourceSpendToggle, spendPickAll, spendPickClose, spendPickOne, startGoogleConnect,
     submitParamForm, submitToken, switchModel, switchProfile, syncBotName, syncModels,
     syncOperatorBtn, takeSnapshot, testAgentGmail, testAgentSearch, testFleetSearch, toggleApplyAll,

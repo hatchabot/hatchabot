@@ -195,16 +195,36 @@ export async function runSkillsScenarios(lib, { keep = false, runId = randomByte
         'Practice did not verify reads of both the skill and sample');
       assert(typeof result.output === 'string' && result.output.trim(), 'Practice returned no answer');
       assert(await readFile(skillPath) === customized, 'Practice modified the actual skill instructions');
-      // Counted once: the practice's own tokens (what Practice recorded) are in
-      // the agent's total, not lost with its folder and not twice. A call of the
-      // agent's own in the window (a heartbeat, say) adds to the rise, so it is
-      // held to at least the practice's tokens and under twice them.
+      // Counted once: the practice's own record (what Practice wrote, one run,
+      // with its calls, from its transcript in its own state folder) is in the
+      // agent's total once, not lost with its folder, and its calls are not in
+      // the agent's own usage (its transcripts, by model) too. Each part is read
+      // apart in the answer: the total is the agent's own models' tokens plus
+      // its practice's, so a call of the agent's own meanwhile (a heartbeat,
+      // say) on another model, or fewer calls on its model than the practice
+      // made there, is told from a copy of the run; as many there reads as a
+      // copy, and the words ask for another run. Held to the rise of the whole
+      // total, under twice the practice's tokens, a large call of its own failed
+      // it and a copy counting fewer tokens than the record passed (HB-1249).
       const usageAfter = await usage();
-      const practiced = (usageAfter.practice?.tokens ?? 0) - (usageBefore.practice?.tokens ?? 0);
-      const rose = usageAfter.totalTokens - usageBefore.totalTokens;
+      const p0 = usageBefore.practice ?? {}, p1 = usageAfter.practice ?? {};
+      const practiced = (p1.tokens ?? 0) - (p0.tokens ?? 0), runs = (p1.runs ?? 0) - (p0.runs ?? 0);
       assert(practiced > 0, "The practice was not recorded in the agent's usage");
-      assert(rose >= practiced, `The practice's ${practiced} tokens are in the agent's usage ${rose <= 0 ? 'not at all' : `only as ${rose}`}`);
-      assert(rose < 2 * practiced, `The practice's ${practiced} tokens are in the agent's usage ${rose === 2 * practiced ? 'twice' : `as ${rose}, twice or more`}`);
+      assert(runs === 1, `The practice was recorded ${runs} times in the agent's usage, not once`);
+      // A record of only what the run reported has no calls (skillTrials.ts reportedSpent),
+      // and nothing to look for in the agent's own usage: a copy there went unseen (HB-1249 review).
+      assert((p1.calls ?? 0) - (p0.calls ?? 0) > 0, "The practice's record in the agent's usage holds no calls: Practice took what the run reported, not its transcript in its own state folder, so whether the run is in the agent's own usage too cannot be told");
+      const ownOn = (u, model) => (u.byModel ?? []).filter((m) => model === undefined || m.model === model)
+        .reduce((n, m) => ({ tokens: n.tokens + (m.tokens ?? 0), calls: n.calls + (m.calls ?? 0) }), { tokens: 0, calls: 0 });
+      const folded = usageAfter.totalTokens - ownOn(usageAfter).tokens;
+      assert(folded === p1.tokens, `The agent's practice (${p1.tokens} tokens) is in its usage total ${folded <= 0 ? 'not at all' : folded === 2 * p1.tokens ? 'twice' : `as ${folded} tokens`}`);
+      for (const m of p1.byModel ?? []) {
+        const calls = (m.calls ?? 0) - ((p0.byModel ?? []).find((b) => b.model === m.model)?.calls ?? 0);
+        if (!(calls > 0)) continue;
+        const was = ownOn(usageBefore, m.model), is = ownOn(usageAfter, m.model);
+        const rose = { calls: is.calls - was.calls, tokens: is.tokens - was.tokens };
+        assert(rose.calls < calls, `The practice's ${calls} call${calls === 1 ? '' : 's'} on ${m.model} are in the agent's own usage too: it rose by ${rose.calls} calls (${rose.tokens} tokens) there while it practised, which counts them twice, unless another turn of the agent's ran on ${m.model} meanwhile (run the test again)`);
+      }
     });
   };
   try {

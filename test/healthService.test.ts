@@ -74,7 +74,7 @@ const held = (w: World, a: Agent): LiveMemoryLimits => {
   return { running: true, dockerMemory: want.memoryMax, dockerMemorySwap: want.memoryMax + want.swapMax, cgroup: { memoryMax: want.memoryMax, swapMax: want.swapMax } };
 };
 
-afterEach(() => { vi.useRealTimers(); clearBusy('a1'); });
+afterEach(() => { vi.useRealTimers(); });
 
 describe('the Setup log and Activity', () => {
   it('an agent\'s trail is newest first, in plain words, with its note', () => {

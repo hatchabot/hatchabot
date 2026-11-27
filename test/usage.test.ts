@@ -133,6 +133,17 @@ describe('GET /v1/agents/:id/usage', () => {
     const res = await f.inject({ method: 'GET', url: '/v1/agents/a1/usage', headers: { 'x-hatchabot-owner': 'someone-else' } });
     expect(res.statusCode).toBe(404);
   });
+
+  it('marks totals that include time on an earlier source (HB-1272)', async () => {
+    const { store, provider, f } = await world();
+    provider.usage.set('*', KITCHEN);
+    store.insertAIProfile({ id: 'p2', ownerId: OWNER, name: 'Plan', vendor: 'anthropic', kind: 'subscription', model: 'claude-opus-4-8', secretRef: 'ai/p2', createdAt: 'now' });
+    store.setAgentApplied('a1', 'p1', 'claude-opus-4-8');
+    expect((await f.inject({ method: 'GET', url: '/v1/agents/a1/usage', headers: as })).json()).not.toHaveProperty('earlierSource');
+    store.setAgentAIProfile('a1', 'p2');
+    store.setAgentApplied('a1', 'p2', 'claude-opus-4-8');
+    expect((await f.inject({ method: 'GET', url: '/v1/agents/a1/usage', headers: as })).json()).toMatchObject({ totalTokens: 1750, earlierSource: true });
+  });
 });
 
 describe('GET /v1/usage (fleet rollup)', () => {

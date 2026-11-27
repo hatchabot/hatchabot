@@ -1,6 +1,6 @@
 import type { ChannelKind } from '../../domain/types.js';
 import type { RuntimeProvider } from '../../providers/provider.js';
-import { normalizeHandle, Store } from '../../store/store.js';
+import { expectedHandle, normalizeHandle, Store } from '../../store/store.js';
 import { ACCOUNT_SHAPE, ID_SHAPE } from '../channels/channelIds.js';
 import { forgetDmPolicy } from '../channels/dmPolicyMemo.js';
 
@@ -136,19 +136,24 @@ export const PAIRING_DB_JS = {
  * other renamed in a later OpenClaw would make the query not fit, and every
  * knock on every upgraded agent read as nobody knocking, with no gate to
  * catch it. Nothing used created_at or last_seen_at.
+ * Neither store found (no table the query fits, no file) is said as `none`:
+ * an agent with no knock yet, or a migration between its steps, its table
+ * gone for a moment (HB-1369). Nobody is knocking there, as far as a read
+ * can tell, but the sweep does not take it for its told knocks gone.
  */
 export function pairingListShell(kind: ChannelKind): string {
   const node = [
-    'const fs = require("fs"); const out = []; const seen = new Set(); const unread = [];',
+    'const fs = require("fs"); const out = []; const seen = new Set(); const unread = []; let found = false;',
     `try { if (fs.existsSync(${JSON.stringify(PAIRING_DB)})) { ${PAIRING_DB_JS.open(true)}`,
     'let q = null; try { q = db.prepare("select request_id, code, meta_json from channel_pairing_requests where channel_key = ?"); }',
     'catch (e) { if (!(e && (e.errcode === 1 || /no such (table|column)/i.test(String(e.message))))) throw e; }',
     `if (q) for (const r of q.all(${JSON.stringify(kind)})) {`,
-    'let meta = {}; try { meta = JSON.parse(r.meta_json || "{}"); } catch (e) {} seen.add(String(r.code)); out.push({ id: r.request_id, code: r.code, meta }); } } }',
+    'let meta = {}; try { meta = JSON.parse(r.meta_json || "{}"); } catch (e) {} seen.add(String(r.code)); out.push({ id: r.request_id, code: r.code, meta }); }',
+    'if (q) found = true; } }',
     'catch (e) { unread.push("db"); }',
-    `try { const d = JSON.parse(fs.readFileSync(${JSON.stringify(pairingStorePath(kind))}, "utf8")); for (const r of (d && Array.isArray(d.requests) ? d.requests : [])) { if (r && !seen.has(String(r.code))) { seen.add(String(r.code)); out.push(r); } } }`,
+    `try { const d = JSON.parse(fs.readFileSync(${JSON.stringify(pairingStorePath(kind))}, "utf8")); found = true; for (const r of (d && Array.isArray(d.requests) ? d.requests : [])) { if (r && !seen.has(String(r.code))) { seen.add(String(r.code)); out.push(r); } } }`,
     'catch (e) { if (!e || e.code !== "ENOENT") unread.push("file"); }',
-    'process.stdout.write(JSON.stringify(unread.length ? { version: 1, requests: out, unread } : { version: 1, requests: out }));',
+    'process.stdout.write(JSON.stringify(unread.length ? { version: 1, requests: out, unread } : found ? { version: 1, requests: out } : { version: 1, requests: out, none: true }));',
   ].join(' ');
   return `node -e '${node}' 2>/dev/null || true`;
 }
@@ -172,13 +177,15 @@ export async function listPairingRequests(
   runtimeRef: string,
   accountId: string,
   kind: ChannelKind = 'telegram',
-  opts: { strict?: boolean } = {},
+  opts: { strict?: boolean; needsStore?: boolean } = {},
 ): Promise<PairingRequest[]> {
   const res = await provider.execShell(runtimeRef, pairingListShell(kind));
   // The shell always prints {version, requests} when it ran. `strict`: a read
   // that did not run (an exec that failed, no output, not that shape), or
   // found a store it could not read, throws, rather than answering "nobody
   // is knocking" (HB-1050). Otherwise it is what could be read.
+  // `needsStore` (the knock sweep): one that found no store at all throws
+  // too, so the knocks it told are kept as told (HB-1369).
   if (opts.strict) {
     const a = pairingListAnswer(res.code, res.stdout);
     // The database unread (busy past its wait, damaged) is a failed read. The
@@ -187,7 +194,8 @@ export async function listPairingRequests(
     // failing on it would hide those rows every sweep (HB-0033).
     const failed = !a ? `exit ${res.code}${res.stdout.trim() ? '' : ', no output'}`
       : a.unread.includes('db') ? 'its database could not be read'
-      : a.unread.includes('file') && !a.requests.length ? 'its file could not be read' : '';
+      : a.unread.includes('file') && !a.requests.length ? 'its file could not be read'
+      : a.none && opts.needsStore ? 'no store of them was found' : '';
     if (failed) throw new Error(`the pairing requests could not be read (${failed})`);
   }
   if (res.code !== 0 || !res.stdout.trim()) return [];
@@ -228,13 +236,17 @@ async function scrubApproval(
   log: (event: string, detail: Record<string, unknown>) => void,
 ): Promise<void> {
   if (!ID_SHAPE[kind].test(id) || !ACCOUNT_SHAPE.test(opts.accountId)) return;
-  const { allowlistScrubScript } = await import('./members.js');
+  const { allowlistScrubScript, inChannelConfigTurn } = await import('./members.js');
   const script = allowlistScrubScript([{
     channel: kind, acct: opts.accountId, id,
     cred: `/home/node/.openclaw/credentials/${kind}-${opts.accountId.toLowerCase()}-allowFrom.json`,
   }]);
-  forgetDmPolicy(opts.agentId);
-  const res = await deps.provider.execShellOnVolume(opts.runtimeRef, script).catch(() => undefined);
+  // In the agent's turn at its chat apps, as every other write of them: a
+  // door write landing in its middle wrote back what it took out (HB-1554).
+  const res = await inChannelConfigTurn(deps.store, opts.agentId, () => {
+    forgetDmPolicy(opts.agentId);
+    return deps.provider.execShellOnVolume(opts.runtimeRef, script);
+  }).catch(() => undefined);
   log(res?.code === 0 ? 'claim.unbound_approval_scrubbed' : 'claim.unbound_approval_scrub_failed', { agentId: opts.agentId, kind });
 }
 
@@ -348,7 +360,7 @@ export function resumeFirstContacts(deps: {
       const left = watchTimeLeft(w);
       const live = !!agent?.runtimeRef && agent.state !== 'DELETING' && agent.state !== 'DELETED' && agent.state !== 'FAILED'
         && !!store.getChannelForAgent(agentId, w.kind);
-      if (!agent || !ours || !live || left <= 0 || windowRanOut(w.openedAt, !!normalizeHandle(w.expect))) {
+      if (!agent || !ours || !live || left <= 0 || windowRanOut(w.openedAt, !!expectedHandle(w.expect))) {
         letWatchGo(store, agentId, w.seat, w.generation);
         if (ours) {
           store.closePairingWindow(agentId, w.seat);
@@ -383,7 +395,7 @@ async function watchFirstContact(
   /** When it first opened: now, or before a restart (opts.openedAt). */
   const firstOpened = Math.min(opts.openedAt ?? openedAt, openedAt);
   /** The latest a window open to anyone may run (ANYONE_WINDOW_MAX_MS); none for a named one. */
-  const anyoneEnds = normalizeHandle(opts.expect) ? undefined : firstOpened + Math.max(timeoutMs, ANYONE_WINDOW_MAX_MS);
+  const anyoneEnds = expectedHandle(opts.expect) ? undefined : firstOpened + Math.max(timeoutMs, ANYONE_WINDOW_MAX_MS);
   let deadline = Math.min(openedAt + timeoutMs, anyoneEnds ?? Infinity);
   const until = new Date(deadline).toISOString();
   /** The deadline this watcher last stored; renewal preserves its generation. */
@@ -402,7 +414,8 @@ async function watchFirstContact(
   const seat = Store.pairingSeat(kindHere, opts.forUserId);
   /** The ids its row says it never takes as its knock: a join's only (excludeKnocks). */
   const rowExcludes = opts.excludeKnocks ? opts.excludeIds : undefined;
-  const generation = deps.store.openPairingWindow(opts.agentId, until, opts.forUserId, { expect: opts.expect, kind: kindHere, excludeIds: rowExcludes });
+  /** This window's generation, written as it opens (below). */
+  let generation = '';
   /** This watch in the store, as of now (KeptWatch): down or up, and the time it has left. */
   const keep = (down: boolean): void => {
     const now = Date.now();
@@ -413,8 +426,16 @@ async function watchFirstContact(
       ...(opts.expect ? { expect: opts.expect } : {}), excludeIds: opts.excludeIds ?? [], openedAt: firstOpened, ...time,
     });
   };
-  // Down as it opens (a join to a stopped agent, a bot attached to one): its time does not run yet.
-  keep(deps.store.getAgent(opts.agentId)?.state !== 'RUNNING');
+  // The window and where its watch stands, in one write: written apart, a
+  // process in a deploy's overlap that read between them found this one's
+  // window over its own, and its join still naming its own generation, and
+  // let go of the join this watch had just taken up (HB-1520). Down as it
+  // opens (a join to a stopped agent, a bot attached to one): its time does
+  // not run yet.
+  deps.store.transact(() => {
+    generation = deps.store.openPairingWindow(opts.agentId, until, opts.forUserId, { expect: opts.expect, kind: kindHere, excludeIds: rowExcludes });
+    keep(deps.store.getAgent(opts.agentId)?.state !== 'RUNNING');
+  });
   mine.generation = generation;
   /**
    * This seat's stored window, expired or not. The owner's Reopen, or Telegram attached
@@ -460,7 +481,8 @@ async function watchFirstContact(
   let downSince: number | undefined; // when it was last seen down, while it still is
   let downFrom: number | undefined; // when this stretch of down time began
   let firstLook = true; // down at it: down since the window first opened
-  const expect = normalizeHandle(opts.expect);
+  // One given that names nobody matches no one: never none, which is anyone (HB-1439 review).
+  const expect = expectedHandle(opts.expect);
   const excluded = new Set(opts.excludeIds ?? []);
   // The agent rests in `allowlist`, where a stranger's DM is dropped in
   // silence. Somebody we are waiting for is not yet on the list, so the door
@@ -493,10 +515,13 @@ async function watchFirstContact(
       if (!deps.providerFor) return;
       try { provider = deps.providerFor(agent.hostId); } catch { return; }
     }
-    await setDmPolicy({ ...policyDeps, provider }, {
-      agentId: opts.agentId, runtimeRef: agent.runtimeRef ?? opts.runtimeRef, kind: kindHere,
-      accountId: opts.accountId, policy: 'allowlist', allowFrom: admit,
-    }).catch(() => false);
+    const door = { agentId: opts.agentId, runtimeRef: agent.runtimeRef ?? opts.runtimeRef, kind: kindHere, accountId: opts.accountId };
+    await setDmPolicy({ ...policyDeps, provider }, { ...door, policy: 'allowlist', allowFrom: admit }).catch(() => false);
+    // A press of Copy, a Reopen or Allow knocks during that write opened the
+    // door, and its write may have landed first: shut again by this one, the
+    // window stood open with its door shut for its half hour (HB-1521). As
+    // closeKnockWindow does since HB-1372: the door as the store says it is now.
+    await doorAsItIs({ store: deps.store, provider, log: deps.log }, { ...door, hostId: agent.hostId }, 'allowlist');
   };
   let readFailed = false; // said once a window, not every round
   for (;;) {
@@ -671,7 +696,22 @@ async function watchFirstContact(
           // now, not at the next rebuild (2026-09-30).
           if (kind !== 'telegram') {
             const { grantRoomAccess } = await import('./members.js');
-            await grantRoomAccess(policyDeps, { agentId: opts.agentId, runtimeRef: opts.runtimeRef, kind, channelUserId: first.id });
+            // Their seat, and the id on it, looked at again in the grant's turn:
+            // asked for while their removal scrubbed, it waited for it, and put
+            // them back in the rooms after the flip (HB-1554); an id unlinked
+            // meanwhile is not let in either.
+            const seatActive = () => deps.store.listMemberships(opts.agentId).some((m) => m.userId === opts.forUserId && m.status === 'active');
+            const stillTheirs = () => seatActive() && deps.store.memberIdentities(opts.agentId, opts.forUserId)[kind] === first.id;
+            await grantRoomAccess(policyDeps, { agentId: opts.agentId, runtimeRef: opts.runtimeRef, kind, channelUserId: first.id, onlyIf: stillTheirs });
+            // Removed while the grant was on its way: the removal's last scrub
+            // ran before it landed, and the id stayed in the rooms' users lists
+            // until the next build. Taken out again, rooms and all, unless the
+            // id is somebody else's here (HB-1522 review).
+            if (!deps.store.listMemberships(opts.agentId).some((m) => m.userId === opts.forUserId && m.status === 'active')) {
+              if (!deps.store.listAllowedChannelUserIds(opts.agentId, kind).includes(first.id)) await scrubApproval(deps, opts, kind, first.id, log);
+              log('claim.seat_gone', { agentId: opts.agentId, kind });
+              return null;
+            }
           }
           // Say something. OpenClaw answered their first message with the
           // pairing challenge rather than a reply, so an approval that lands
@@ -754,6 +794,8 @@ export async function holdDoorForKnocks(
     timeoutMs?: number;
     /** Tests: skip the timer that closes the window. */
     noTimer?: boolean;
+    /** An owner's press: its door write's longest wait for the agent's turn at its chat apps (PRESS_WAIT_MS), then KnockWindowError('busy'). */
+    waitMs?: number;
   },
 ): Promise<{ seat: string; until: string }> {
   const kind = opts.kind ?? 'telegram';
@@ -762,22 +804,31 @@ export async function holdDoorForKnocks(
   const timeoutMs = opts.timeoutMs ?? 30 * 60_000;
   const until = new Date(Date.now() + timeoutMs).toISOString();
   // A window's close, half a second after it ends: pressed again meanwhile,
-  // the later press owns the deadline.
+  // the later press owns the deadline. Closed already (its person let in, or
+  // another timer of the same window, as a window a failed press put back
+  // has two: its own and the first press's), the door was put back by that
+  // close: written again here, it was one more door write, and one that can
+  // land after a later press's (HB-1365).
   const closeAt = (end: string) => {
     if (opts.noTimer) return;
     setTimeout(() => {
-      const still = deps.store.pairingWindows(opts.agentId, new Date(Date.now() + 1000)).find((w) => w.seat === seat);
-      if (still) return;
+      const rows = deps.store.pairingWindows(opts.agentId, new Date(0)).filter((w) => w.seat === seat);
+      if (!rows.length || rows.some((w) => Date.parse(w.until) > Date.now() + 1000)) return;
       void closeKnockWindow(deps, opts.agentId, seat, kind).catch(() => {});
     }, Math.max(0, Date.parse(end) - Date.now()) + 500).unref?.();
   };
   // The window first, so a door rest meanwhile leaves the door it opens.
   const before = deps.store.pairingWindows(opts.agentId).find((w) => w.seat === seat);
   const mine = deps.store.openPairingWindow(opts.agentId, until, openedFor, { expect: opts.expect, kind });
-  const { writeDmPolicy } = await import('./members.js');
+  const { ChannelConfigBusyError, writeDmPolicy } = await import('./members.js');
+  let busy = '';
   const out = await writeDmPolicy({ store: deps.store, provider: deps.provider, log: deps.log }, {
-    agentId: opts.agentId, runtimeRef: opts.runtimeRef, kind, accountId: opts.accountId, policy: 'pairing',
-  }).catch(() => 'failed' as const);
+    agentId: opts.agentId, runtimeRef: opts.runtimeRef, kind, accountId: opts.accountId, policy: 'pairing', waitMs: opts.waitMs,
+  }).catch((err: unknown) => {
+    // Waited as long as a press may for a slow write ahead of it (HB-1554): nothing of it was written.
+    if (err instanceof ChannelConfigBusyError) busy = err.userMessage;
+    return 'failed' as const;
+  });
   if (out !== 'set' && out !== 'unchanged') {
     // The door did not open: this press holds nothing open, and says so. The
     // window is put back as it was (an earlier press's, still counting down,
@@ -797,21 +848,28 @@ export async function holdDoorForKnocks(
       if (before && Date.parse(before.until) > Date.now()) {
         deps.store.openPairingWindow(opts.agentId, before.until, openedFor, { expect: before.expect, kind, generation: before.generation, excludeIds: before.excludeIds });
         closeAt(before.until);
+      } else if (before && busy) {
+        // Refused for its wait (HB-1554): the close would wait as long again, so it goes on by itself.
+        void closeKnockWindow(deps, opts.agentId, seat, kind).catch(() => {});
       } else if (before) await closeKnockWindow(deps, opts.agentId, seat, kind).catch(() => {});
       else deps.store.closePairingWindow(opts.agentId, seat);
     }
-    deps.log?.('invite.knock_window_failed', { agentId: opts.agentId, kind, result: out });
-    throw new KnockWindowError(out);
+    deps.log?.('invite.knock_window_failed', { agentId: opts.agentId, kind, result: busy ? 'busy' : out });
+    throw new KnockWindowError(busy ? 'busy' : out, busy || undefined);
   }
   deps.log?.('invite.knock_window', { agentId: opts.agentId, kind, named: !!opts.expect, until });
   closeAt(until);
   return { seat, until };
 }
 
-/** holdDoorForKnocks could not open the door: the write failed, or the volume has no such app to open (`outcome`). */
+/**
+ * holdDoorForKnocks could not open the door: the write failed, the volume has
+ * no such app to open, or a press waited too long for its turn (`busy`, with
+ * the words for the owner) (`outcome`).
+ */
 export class KnockWindowError extends Error {
-  constructor(readonly outcome: 'failed' | 'no-account' | 'no-config') {
-    super(outcome === 'failed' ? 'the door could not be written' : 'the agent\'s container has no such app set up');
+  constructor(readonly outcome: 'failed' | 'no-account' | 'no-config' | 'busy', words?: string) {
+    super(words ?? (outcome === 'failed' ? 'the door could not be written' : 'the agent\'s container has no such app set up'));
     this.name = 'KnockWindowError';
   }
 }
@@ -836,12 +894,77 @@ export async function closeKnockWindow(deps: ClaimDeps, agentId: string, seat: s
   if (!admit.length) return; // nobody yet: stay reachable
   const ch = deps.store.getChannelForAgent(agentId, kind);
   if (!ch) return;
+  // The machine it is on now: moved while its window was open, the provider
+  // the window was opened with is the old machine's, which would be handed
+  // the new container's name and the door there left open (HB-0649).
+  let provider = deps.provider;
+  if (deps.providerFor) {
+    try { provider = deps.providerFor(agent.hostId); } catch { return; }
+  }
   const { setDmPolicy } = await import('./members.js');
   const { CHANNEL_ACCOUNT } = await import('../../openclaw/configWriter.js');
-  await setDmPolicy({ store: deps.store, provider: deps.provider, log: deps.log }, {
-    agentId, runtimeRef: agent.runtimeRef, kind, accountId: kind === 'telegram' ? ch.accountId : CHANNEL_ACCOUNT,
-    policy: 'allowlist', allowFrom: admit,
-  }).catch(() => false);
+  const door = { agentId, runtimeRef: agent.runtimeRef, kind, accountId: kind === 'telegram' ? ch.accountId : CHANNEL_ACCOUNT };
+  await setDmPolicy({ store: deps.store, provider, log: deps.log }, { ...door, policy: 'allowlist', allowFrom: admit }).catch(() => false);
+  // A press of Copy that landed during that write opened its window, and
+  // wrote its door open; door writes are not in order, and this one, landing
+  // after, left that window open with its door shut for its half hour
+  // (HB-1372). So too when the agent was opened to anyone during the write
+  // (Allow knocks): its own write of the door open may have landed first,
+  // and the sweep's restDoor leaves such an agent alone. The door is written
+  // again as the store says it is now (doorAsItIs), on the container it was
+  // written on.
+  await doorAsItIs({ store: deps.store, provider, log: deps.log }, { ...door, hostId: agent.hostId }, 'allowlist');
+}
+
+/**
+ * After a write of an agent's door on one app, the door as the store says it
+ * is now, on the container it was written on (HB-1372, HB-1521). Door writes
+ * are not in order, and each writer chose what to write before it waited for
+ * the machine: a window opened, or the agent opened to anyone, during a write
+ * of the door to rest, and its own write of it open landed first, so the door
+ * stood shut with the window open for its half hour; a window closed during a
+ * write of it open (this look's own), and its write to rest landed first, so
+ * the door stood in `pairing` with no window until the next sweep. So the
+ * writer looks again once its write has landed, and writes what the store
+ * says while that differs from what it wrote, at most three times (changes
+ * still coming then are the next sweep's restDoor's). Open while a window on
+ * the app waits or anyone may knock; at rest with somebody on the list;
+ * nobody on it, left as it is, as every rest leaves it. Stopped, rebuilt or
+ * moved since, nothing: its next start or build writes the door.
+ *
+ * Since HB-1554 one process's door writes take turns, so in one process the
+ * look again finds nothing to do; it stays for two processes overlapping at
+ * a deploy. `waitMs`: an owner's press, each write's longest wait for the
+ * agent's turn (PRESS_WAIT_MS); refused, the look again goes on by itself,
+ * with no limit, and the press is answered.
+ */
+export async function doorAsItIs(
+  deps: { store: Store; provider: RuntimeProvider; log?: ClaimDeps['log'] },
+  door: { agentId: string; runtimeRef: string; hostId: string; kind: ChannelKind; accountId: string },
+  wrote: 'allowlist' | 'pairing',
+  opts: { waitMs?: number } = {},
+): Promise<void> {
+  const { ChannelConfigBusyError, setDmPolicy } = await import('./members.js');
+  for (let round = 0; round < 3; round++) {
+    const now = deps.store.getAgent(door.agentId);
+    if (!now || now.state !== 'RUNNING' || now.runtimeRef !== door.runtimeRef || now.hostId !== door.hostId) return;
+    const open = !!now.allowKnocks || deps.store.pairingWindows(door.agentId).some((w) => w.seat.startsWith(`${door.kind}:`));
+    const admit = open ? [] : deps.store.listAllowedChannelUserIds(door.agentId, door.kind);
+    if (!open && !admit.length) return; // nobody yet: stay reachable
+    const want = open ? 'pairing' : 'allowlist';
+    if (want === wrote) return;
+    forgetDmPolicy(door.agentId);
+    let busy = false;
+    await setDmPolicy(deps, {
+      agentId: door.agentId, runtimeRef: door.runtimeRef, kind: door.kind, accountId: door.accountId,
+      policy: want, ...(want === 'allowlist' ? { allowFrom: admit } : {}), waitMs: opts.waitMs,
+    }).catch((err: unknown) => { busy = err instanceof ChannelConfigBusyError; return false; });
+    if (busy) {
+      void doorAsItIs(deps, door, wrote).catch(() => {});
+      return;
+    }
+    wrote = want;
+  }
 }
 
 /**
@@ -849,15 +972,15 @@ export async function closeKnockWindow(deps: ClaimDeps, agentId: string, seat: s
  * (from credentials/telegram-pairing.json): {version, requests: [{id, code,
  * meta}]}. Also accepts a bare array in case the CLI wraps differently.
  */
-/** The pairing list shell's answer ({version, requests: […], unread?}), or undefined when it did not run. */
-function pairingListAnswer(code: number, stdout: string): { requests: unknown[]; unread: string[] } | undefined {
+/** The pairing list shell's answer ({version, requests: […], unread?, none?}), or undefined when it did not run. */
+function pairingListAnswer(code: number, stdout: string): { requests: unknown[]; unread: string[]; none: boolean } | undefined {
   if (code !== 0 || !stdout.trim()) return undefined;
   try {
-    const j = JSON.parse(stdout) as { requests?: unknown; unread?: unknown } | unknown[];
+    const j = JSON.parse(stdout) as { requests?: unknown; unread?: unknown; none?: unknown } | unknown[];
     // A bare list is an answer too, as parsePairingList reads one.
-    if (Array.isArray(j)) return { requests: j, unread: [] };
+    if (Array.isArray(j)) return { requests: j, unread: [], none: false };
     if (!j || typeof j !== 'object' || !Array.isArray(j.requests)) return undefined;
-    return { requests: j.requests, unread: Array.isArray(j.unread) ? j.unread.map(String) : [] };
+    return { requests: j.requests, unread: Array.isArray(j.unread) ? j.unread.map(String) : [], none: j.none === true };
   } catch { return undefined; }
 }
 

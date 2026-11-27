@@ -1077,6 +1077,31 @@ describe('the weekly review task is renamed in place', () => {
     expect(store.managedCron('a1', MODEL_REVIEW_NAME)).toMatchObject({ jobId: 'job-old', messageHash: reviewMessageHash() });
   });
 
+  it('one recorded under the old name but renamed by hand since is reworded, not renamed back (review of HB-1317)', async () => {
+    const { store, provider, agent, jobs, old } = await opsWorld();
+    jobs.push({ ...old, name: 'Monday token look' });
+    store.setManagedCron('a1', LEGACY_REVIEW_NAME, 'job-old', '2026-10-03T00:00:00Z');
+    expect(await syncModelReviewCron({ store, provider }, agent, agent.runtimeRef!, 'weekly')).toBe('updated');
+    expect(edits(provider)).toEqual([['cron', 'edit', 'job-old', '--message', OPS_MODEL_REVIEW_MESSAGE]]);
+    expect(jobs).toEqual([{ ...old, name: 'Monday token look', payload: { kind: 'agentTurn', message: OPS_MODEL_REVIEW_MESSAGE } }]);
+    expect(store.managedCron('a1', LEGACY_REVIEW_NAME)).toBeUndefined();
+    expect(store.managedCron('a1', MODEL_REVIEW_NAME)).toMatchObject({ jobId: 'job-old', messageHash: reviewMessageHash() });
+    // The next build: nothing to do, nothing run.
+    const n = provider.execLog.length;
+    expect(await syncModelReviewCron({ store, provider }, agent, agent.runtimeRef!, 'weekly')).toBe('kept');
+    expect(provider.execLog.length).toBe(n);
+  });
+
+  it('one renamed by hand is reworded under the name the owner gave it (review of HB-1317)', async () => {
+    const { store, provider, agent, jobs, old } = await opsWorld();
+    jobs.push({ ...old, name: 'Monday token look' });
+    store.setManagedCron('a1', MODEL_REVIEW_NAME, 'job-old', '2026-10-03T00:00:00Z', 'older-words-mark');
+    expect(await syncModelReviewCron({ store, provider }, agent, agent.runtimeRef!, 'weekly')).toBe('updated');
+    expect(edits(provider)).toEqual([['cron', 'edit', 'job-old', '--message', OPS_MODEL_REVIEW_MESSAGE]]);
+    expect(jobs).toEqual([{ ...old, name: 'Monday token look', payload: { kind: 'agentTurn', message: OPS_MODEL_REVIEW_MESSAGE } }]);
+    expect(adds(provider)).toEqual([]);
+  });
+
   it('deleted by hand stays deleted: the record moves to the new name, nothing is made again', async () => {
     const { store, provider, agent, jobs } = await opsWorld();
     store.setManagedCron('a1', LEGACY_REVIEW_NAME, 'job-old', '2026-10-03T00:00:00Z');

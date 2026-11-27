@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { pbkdf2 } from 'node:crypto';
-import { chmodSync, closeSync, constants as fsConstants, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync, writeSync } from 'node:fs';
+import { chmodSync, closeSync, constants as fsConstants, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync, writeSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,6 +8,7 @@ import Database from 'better-sqlite3';
 import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
+import { LocalDockerProvider } from '../src/providers/localDockerProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 import { IMAGE_FACTS_FORMAT } from '../src/providers/provider.js';
@@ -48,6 +49,12 @@ describe('baseProblem', () => {
     // A derived image built on another derived image can't be rebuilt from a
     // promoted base — refuse the tower.
     expect(baseProblem('hatchabot-runtime:derived-x')).toMatch(/cannot be based on another/i);
+  });
+  it('says "an" before a repository name that starts with a vowel (HB-1191)', () => {
+    expect(baseProblem('ubuntu:22.04', 'example-runtime')).toBe('Base must be an example-runtime:* tag.');
+    expect(baseProblem('ubuntu:22.04', 'Oak/runtime')).toBe('Base must be an Oak/runtime:* tag.');
+    expect(baseProblem('ubuntu:22.04')).toBe('Base must be a hatchabot-runtime:* tag.');
+    expect(baseProblem('ubuntu:22.04', 'registry.example.org/runtime')).toBe('Base must be a registry.example.org/runtime:* tag.');
   });
 });
 
@@ -240,6 +247,226 @@ describe("RUN's --security and --device, which would weaken the build (HB-1291)"
     const r = { tag: 'hatchabot-runtime:derived-media', base: 'hatchabot-runtime:2026.9.8', packages: [], channels: [], lines: 'RUN --security=insecure true' };
     expect(await buildRecipeOn(m, r)).toEqual({ ok: false, problem: 'RUN --security is not allowed in a derived image.', refused: true });
     expect(m.built).toEqual([]);
+  });
+});
+
+// The words for a COPY --from (HB-1473), and for any rule on a line the lines' reading takes for a heredoc's text.
+const COPY_FROM = "COPY --from is not allowed in a derived image: it copies another image's files into this one (any image on this machine, or one Docker can pull with this machine's logins). Install what you need with RUN instead, such as apt-get install or a download.";
+const ADD_URL = "ADD of a URL is not allowed in a derived image: Docker fetches it from this machine's own network, where it can reach services only this machine can (a git address, or a source named by a variable such as $X, counts as one). Download it with RUN curl instead, which runs in the build's own network.";
+const JUDGED_LINE = (why: string, n: number) => `${why} Hatchabot judges every line as if an instruction began on it, since its reading of heredocs and of lines that go on may not be docker's. Write line ${n} another way, such as joined to the line before it, or have a RUN write that file's line with printf.`;
+
+describe("COPY --from, which copies another image's files into a derived image (HB-1473)", () => {
+  // The lines start no stage of their own (FROM is refused), so a --from is
+  // always another image: any on the machine, whose files may hold keys, or
+  // one docker pulls with the machine's registry logins. The reach of RUN
+  // --mount=from=…, which is refused, and the image built shows nothing of
+  // it: its base, user and labels are unchanged.
+  it.each([
+    'COPY --from=registry.example/fixture-secrets:1 /app/.env /tmp/x',
+    'COPY --from=hatchabot-runtime:derived-media / /opt/x',
+    'COPY --from hatchabot-runtime:derived-media / /opt/x',
+    'COPY --from',
+    'copy --FROM=other / /opt/x',
+    'COPY --chown=node:node --link --from=other /a /b',
+    'ARG SRC=registry.example/fixture-secrets:1\nCOPY --from=${SRC} / /opt/x',
+    // COPY's own flag, its quotes and escapes out, and split over a continued line, as BuildKit reads it.
+    'COPY --fr"om"=other / /opt/x',
+    "COPY --'from'=other / /opt/x",
+    'COPY --fr\\om=other / /opt/x',
+    'COPY --fr\\\nom=other / /opt/x',
+    'COPY \\\n  --from=other / /opt/x',
+    'ONBUILD COPY --from=other / /opt/x',
+    'RUN true\n  COPY --from=other / /opt/x',
+  ])('refused: %j', (lines) => {
+    expect(dockerfileProblem(lines)).toBe(COPY_FROM);
+  });
+
+  it("on a line taken for a heredoc's text too, saying why", () => {
+    expect(dockerfileProblem('RUN cat <<EOF >/opt/x\nCOPY --from=other / /opt/x\nEOF')).toBe(JUDGED_LINE(COPY_FROM, 2));
+  });
+
+  it.each([
+    'COPY fixture.conf /etc/fixture.conf',
+    'COPY --chown=node:node --chmod=644 <<EOF /etc/fixture.conf\nsource=x\nEOF',
+    'COPY -- --from=x /opt/',
+    'COPY ./a --from /opt/',
+    'RUN tool --from=registry.example/x convert',
+    'RUN echo COPY --from=x',
+    'ADD fixture.tar.gz /opt/',
+  ])("a COPY without it, and a command's own --from, are not refused: %j", (lines) => {
+    expect(dockerfileProblem(lines)).toBeNull();
+  });
+
+  it('a saved record with one is refused when rebuilt, before docker runs, and where a move or an import builds it', async () => {
+    const res = await buildDerivedImage({ name: 'media', base: 'hatchabot-runtime:latest', dockerfile: 'COPY --from=other / /opt/x', docker: '/nonexistent/docker', dataDir: mkdtempSync(join(tmpdir(), 'hb-derive-')) });
+    expect(res).toEqual({ ok: false, error: COPY_FROM });
+    const m = new MockProvider();
+    m.publishedBases.add('hatchabot-runtime:2026.9.8');
+    const r = { tag: 'hatchabot-runtime:derived-media', base: 'hatchabot-runtime:2026.9.8', packages: [], channels: [], lines: 'RUN apt-get install -y jq\nCOPY --from=other / /opt/x' };
+    expect(await buildRecipeOn(m, r)).toEqual({ ok: false, problem: COPY_FROM, refused: true });
+    expect(m.built).toEqual([]);
+  });
+});
+
+describe("ADD of a URL, which Docker fetches from the machine's own network (HB-1500)", () => {
+  // Docker's daemon fetches an ADD's URL or git address itself, from the
+  // machine's own network: services on its loopback answer there, which a
+  // build's RUN cannot reach, and a redirect can lead a public URL to them.
+  // Judged widely, as any BuildKit reads a source, the flags read first.
+  it.each([
+    'ADD https://downloads.example/tool.tar.gz /opt/',
+    'ADD http://127.0.0.1:11434/api/tags /tmp/x',
+    'add HTTP://127.0.0.1/x /tmp/x',
+    'ADD fixture.txt https://downloads.example/tool.tar.gz /opt/',
+    'ADD https://downloads.example/tool.tar.gz',
+    // Git addresses, every form BuildKit has fetched.
+    'ADD https://git.example/team/repo.git /opt/repo',
+    'ADD https://git.example/team/repo.git#main:sub /opt/repo',
+    'ADD git://git.example/team/repo /opt/repo',
+    'ADD ssh://git@git.example/team/repo.git /opt/repo',
+    'ADD git@git.example:team/repo.git /opt/repo',
+    'ADD github.com/example/repo /opt/repo',
+    'ADD GitHub.com/example/repo /opt/repo',
+    'ADD "github.com/example/repo" /opt/repo',
+    // A source an ARG or ENV fills in, or an escape spells.
+    'ARG SRC=https://downloads.example/tool.tar.gz\nADD $SRC /opt/',
+    'ADD ${SRC} /opt/',
+    'ADD fixture-$VER.tar.gz /opt/',
+    'ADD ["http\\u003a//127.0.0.1/x", "/opt/"]',
+    'ADD ["https://downloads.example/tool.tar.gz", "/opt/"]',
+    // Behind its flags, which never hide a source.
+    'ADD --checksum=sha256:abc https://downloads.example/tool.tar.gz /opt/',
+    'ADD --keep-git-dir=true https://git.example/team/repo.git /opt/repo',
+    'ADD --chown=node:node --link --exclude=*.md --unpack=false https://downloads.example/x /opt/',
+    'ADD -- https://downloads.example/tool.tar.gz /opt/',
+    'ONBUILD ADD https://downloads.example/tool.tar.gz /opt/',
+    // Spaces, tabs, line ends and continued lines as docker reads them.
+    'ADD\thttps://downloads.example/tool.tar.gz\t/opt/',
+    'RUN true\r\nADD https://downloads.example/tool.tar.gz /opt/\r\n',
+    '  ADD https://downloads.example/tool.tar.gz /opt/',
+    'ADD http\\\n://127.0.0.1/x /tmp/x',
+    'ADD \\\n  https://downloads.example/tool.tar.gz /opt/',
+  ])('refused: %j', (lines) => {
+    expect(dockerfileProblem(lines)).toBe(ADD_URL);
+  });
+
+  it("on a line taken for a heredoc's text too, saying why", () => {
+    expect(dockerfileProblem('RUN cat <<EOF >/opt/x\nADD https://downloads.example/tool.tar.gz /opt/\nEOF')).toBe(JUDGED_LINE(ADD_URL, 2));
+    expect(dockerfileProblem("RUN cat << 'CMD\\' >/dev/null\nCMD\\\nADD http://127.0.0.1/x /tmp/x\nCMD")).toBe(JUDGED_LINE(ADD_URL, 3));
+  });
+
+  it.each([
+    'ADD fixture.tar.gz /opt/',
+    'ADD --checksum=sha256:abc fixture.tar.gz /opt/',
+    'ADD <<EOF /etc/fixture.conf\nsource=https://downloads.example/x\nEOF',
+    'ADD --chown=node:node --chmod=644 <<EOF /etc/fixture.conf\nx\nEOF',
+    'RUN curl -fsSL https://downloads.example/tool.tar.gz -o /tmp/tool.tar.gz',
+    'RUN echo ADD https://downloads.example/x',
+  ])('a heredoc, a path in the build folder, and a download in a RUN are not refused: %j', (lines) => {
+    expect(dockerfileProblem(lines)).toBeNull();
+  });
+
+  it('a saved record with one is refused when rebuilt, before docker runs, and where a move or an import builds it', async () => {
+    const res = await buildDerivedImage({ name: 'media', base: 'hatchabot-runtime:latest', dockerfile: 'ADD https://downloads.example/tool.tar.gz /opt/', docker: '/nonexistent/docker', dataDir: mkdtempSync(join(tmpdir(), 'hb-derive-')) });
+    expect(res).toEqual({ ok: false, error: ADD_URL });
+    const m = new MockProvider();
+    m.publishedBases.add('hatchabot-runtime:2026.9.8');
+    const r = { tag: 'hatchabot-runtime:derived-media', base: 'hatchabot-runtime:2026.9.8', packages: [], channels: [], lines: 'RUN apt-get install -y jq\nADD https://downloads.example/tool.tar.gz /opt/' };
+    expect(await buildRecipeOn(m, r)).toEqual({ ok: false, problem: ADD_URL, refused: true });
+    expect(m.built).toEqual([]);
+  });
+});
+
+describe('a derived image is never built on another derived image (HB-1470)', () => {
+  // Built here, a derived image differs from its base only in the labels its
+  // build sets, so the checks of the image built cannot tell one built on
+  // another: the recipe then cannot be rebuilt where that one is missing.
+  // Every way the lines could take one in is refused.
+  const OTHER = 'hatchabot-runtime:derived-office';
+  it.each([
+    [`COPY --from=${OTHER} / /`, COPY_FROM],
+    [`COPY --from=${checkTag(OTHER)} / /`, COPY_FROM],
+    [`RUN --mount=type=bind,from=${OTHER},target=/m cp -a /m/. /`, 'RUN --mount is not allowed in a derived image.'],
+    [`FROM ${OTHER}`, 'A derived image cannot contain its own FROM — the base field sets it.'],
+    [`RUN cat << 'CMD\\' >/dev/null\nCMD\\\nFROM ${OTHER}\nCMD`, JUDGED_LINE('A derived image cannot contain its own FROM — the base field sets it.', 3)],
+  ])('refused: %j', (lines, why) => {
+    expect(dockerfileProblem(lines)).toBe(why);
+  });
+  it('nor named as its base', () => {
+    expect(baseProblem(OTHER)).toBe('A derived image cannot be based on another derived image.');
+  });
+});
+
+describe("a RUN --network=host in a derived image's lines is refused, and Docker's default builder would not run it (HB-1328)", () => {
+  // BuildKit runs a step on the host's network only with the network.host
+  // entitlement, and a build has it only by asking: buildx's --allow
+  // network.host, or the classic API's --network=host (Docker's daemon
+  // allows it unless told not to). No build of the lines asks, so on
+  // Docker's default builder (the docker driver) one that got past their
+  // check fails the build ("network.host is not allowed"); the legacy
+  // builder refuses any RUN flag. A buildx docker-container builder made
+  // with --driver-opt network=host runs every RUN on the host's network,
+  // so the check refuses it on every line, however the lines hide it.
+  const NETWORK = 'RUN --network is not allowed in a derived image.';
+  const HIDDEN = 'RUN --network=host curl http://127.0.0.1:11434/';
+  it.each([
+    ["a heredoc's text", `RUN cat <<EOF >/x\n${HIDDEN}\nEOF`],
+    ['the line after a heredoc closed by a line ending in \\', `RUN cat << 'CMD\\' >/dev/null\nCMD\\\n${HIDDEN}\nCMD`],
+    ['the line after a heredoc whose << is split over a continued line', `RUN cat <\\\n<'CMD\\' >/dev/null\nCMD\\\n${HIDDEN}\nCMD`],
+    ['a line that goes on', `RUN echo \\\n${HIDDEN}`],
+    ['a flag split over a continued line', 'RUN --net\\\nwork=host true'],
+    ['a quoted flag', 'RUN --net"work"=host true'],
+    ['an ONBUILD RUN', 'ONBUILD RUN --network=host true'],
+  ])('refused, in %s', (_where, lines) => {
+    expect(dockerfileProblem(lines)?.startsWith(NETWORK)).toBe(true);
+  });
+
+  let dir: string;
+  let was: { PATH?: string; HOME?: string };
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'hb-derive-net-'));
+    was = { PATH: process.env.PATH, HOME: process.env.HOME };
+    mkdirSync(join(dir, 'bin'));
+    process.env.PATH = join(dir, 'bin');
+    process.env.HOME = dir;
+  });
+  afterEach(() => {
+    for (const [k, v] of Object.entries(was)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    rmSync(dir, { recursive: true, force: true });
+  });
+  /** A made-up docker that notes each command's words; no real docker runs. Its build fails when `fail`. */
+  const fake = (fail: boolean) => {
+    const calls = join(dir, 'calls');
+    const p = join(dir, 'bin', 'docker');
+    const L = LAYER('a');
+    writeFileSync(p, `#!${process.execPath}
+const a = process.argv.slice(2);
+require('node:fs').appendFileSync(${JSON.stringify(calls)}, JSON.stringify(a) + '\\n');
+if (a[0] === 'image') console.log(JSON.stringify([${JSON.stringify(L)}, 'node', [${JSON.stringify(L)}], null]));
+if (a[0] === 'build' && ${fail}) { process.stderr.write('fixture: not built\\n'); process.exit(1); }
+`, { mode: 0o755 });
+    return { bin: p, builds: () => readFileSync(calls, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as string[]).filter((a) => a[0] === 'build') };
+  };
+  const ASKS = /^--(allow|network|security-opt)(=|$)/;
+
+  it("a derived image's build here asks docker for no network and no entitlement", async () => {
+    const d = fake(true);
+    const res = await buildDerivedImage({ name: 'media', base: 'hatchabot-runtime:latest', dockerfile: 'RUN true', docker: d.bin, dataDir: join(dir, 'data') });
+    expect(res).toEqual({ ok: false, error: 'fixture: not built', fromDocker: true });
+    const [build, ...more] = d.builds();
+    expect(more).toEqual([]);
+    expect(build).toEqual(['build', '-t', 'hatchabot-runtime-check:derived-media', '--label', 'org.hatchabot.derived=media', '--label', `org.hatchabot.recipe=${recipeStamp('hatchabot-runtime:latest', 'RUN true')}`, expect.stringContaining('hatchabot-derive-media-')]);
+    expect(build!.filter((w) => ASKS.test(w))).toEqual([]);
+  });
+
+  it("a recipe's build on a machine (a move's, an import's) asks docker for none either", async () => {
+    const d = fake(false);
+    const p = new LocalDockerProvider({ docker: d.bin, image: 'hatchabot-runtime:latest' });
+    expect(await p.buildImage('hatchabot-runtime-check:derived-media', 'FROM hatchabot-runtime:2026.9.8\nUSER root\nRUN true\nUSER node\n', { 'org.hatchabot.derived': 'media' })).toEqual({ ok: true });
+    const [build, ...more] = d.builds();
+    expect(more).toEqual([]);
+    expect(build).toEqual(['build', '-t', 'hatchabot-runtime-check:derived-media', '--label', 'org.hatchabot.derived=media', expect.stringContaining('hatchabot-recipe-')]);
+    expect(build!.filter((w) => ASKS.test(w))).toEqual([]);
   });
 });
 
@@ -642,6 +869,38 @@ describe('POST /v1/images', () => {
     } finally { await f.close(); }
   });
 
+  // Lines saved before a rule (a COPY --from, HB-1473) were marked building,
+  // with the new base, and then FAILED by the build's refusal, with no log
+  // of why: a move then said the image "has not built", and an export lost
+  // its recipe (review of HB-1473).
+  it.each([
+    ['lines saved before a rule', { dockerfile: 'RUN apt-get install -y jq\nCOPY --from=other / /opt/x' } as { dockerfile: string; basePackages?: string[] }, COPY_FROM],
+    ['an ADD of a URL saved before the rule', { dockerfile: 'ADD https://downloads.example/tool.tar.gz /opt/' }, ADD_URL],
+    ['base packages that are not package names', { dockerfile: 'RUN true', basePackages: ['jq', 'Not A Package'] }, 'Its base packages are not all package names.'],
+  ])('a Rebuild that the build would refuse (%s) is refused before anything is written, and the image stays as it was', async (_what, saved, why) => {
+    const { store, f, builds } = await world();
+    try {
+      store.upsertDerivedImage({ name: 'media', tag: deriveTag('media'), base: 'hatchabot-runtime:latest', createdBy: OWNER, ...saved });
+      store.setDerivedImageStatus('media', 'READY');
+      const before = store.getDerivedImage('media');
+      for (const payload of [{}, { base: 'hatchabot-runtime:2026.9.8' }]) {
+        const res = await f.inject({ method: 'POST', url: '/v1/images/media/rebuild', headers: H(OWNER), payload });
+        expect(res.statusCode, res.body).toBe(400);
+        expect(res.json()).toEqual({ error: why });
+        expect(store.getDerivedImage('media')).toEqual(before);
+      }
+      // Replacing its lines is judged with the base packages it keeps.
+      if (saved.basePackages) {
+        const res = await f.inject({ method: 'POST', url: '/v1/images', headers: H(OWNER), payload: { name: 'media', dockerfile: 'RUN echo again', replace: true } });
+        expect(res.statusCode, res.body).toBe(400);
+        expect(res.json()).toEqual({ error: why });
+        expect(store.getDerivedImage('media')).toEqual(before);
+      }
+      await new Promise((r) => setTimeout(r, 0));
+      expect(builds).toEqual([]);
+    } finally { await f.close(); }
+  });
+
   it('rejects a non-host-owner with 403', async () => {
     const { store, f } = await world();
     const res = await f.inject({ method: 'POST', url: '/v1/images', headers: H(OTHER), payload: { name: 'media', dockerfile: 'RUN true' } });
@@ -757,6 +1016,59 @@ describe('a fleet whose default is pinned by digest (review of HB-1182)', () => 
       // Promote and Delete take the repository's own tags.
       const del = await f.inject({ method: 'DELETE', url: `/v1/runtime/images/${encodeURIComponent('hatchabot-runtime:2026.7.1-2')}`, headers: H(OWNER) });
       expect(del.json().error ?? '').not.toMatch(/tags are managed here/);
+      await f.close();
+    } finally {
+      if (was === undefined) delete process.env.HATCHABOT_IMAGE; else process.env.HATCHABOT_IMAGE = was;
+    }
+  });
+});
+
+describe("a derived image named no base, on a fleet whose default is pinned by digest (HB-1353)", () => {
+  it('is built on a tag here of that very image, a version\'s first, and says which; with none, it is refused with how to name one', async () => {
+    const was = process.env.HATCHABOT_IMAGE;
+    const pin = `hatchabot-runtime@sha256:${'ab'.repeat(32)}`;
+    process.env.HATCHABOT_IMAGE = pin;
+    try {
+      const store = new Store(new Database(':memory:'));
+      store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
+      const provider = new MockProvider();
+      const builds: Array<{ name: string; base: string }> = [];
+      const f = Fastify();
+      await registerRoutes(f, {
+        store, secrets: new MemSecrets(), providers: new Map([['mock', provider]]),
+        channel: { pool: { availableCount: () => 0 }, release: async () => {} } as never,
+        buildImage: async (opts: any) => { builds.push({ name: opts.name, base: opts.base }); return { ok: true }; },
+        removeImage: async () => ({ ok: true }),
+      });
+      // What the pin names, as docker inspects it: one image, under three tags here, and a derived image of it.
+      let pinned = 'aaaaaaaaaaaa';
+      provider.currentImageInfo = async (image?: string) => (image === pin ? { imageId: `sha256:${pinned}${'0'.repeat(52)}` } : {});
+      provider.tags = [
+        { tag: 'hatchabot-runtime:latest', imageId: 'aaaaaaaaaaaa' }, { tag: 'hatchabot-runtime:trial', imageId: 'aaaaaaaaaaaa' },
+        { tag: 'hatchabot-runtime:2026.9.8', imageId: 'aaaaaaaaaaaa' }, { tag: 'hatchabot-runtime:2026.9.6', imageId: 'bbbbbbbbbbbb' },
+        { tag: 'hatchabot-runtime:derived-older', imageId: 'aaaaaaaaaaaa', derived: 'older' },
+      ];
+      const made = await f.inject({ method: 'POST', url: '/v1/images', headers: H(OWNER), payload: { name: 'media', dockerfile: 'RUN true' } });
+      expect(made.statusCode, made.body).toBe(202);
+      expect(made.json()).toMatchObject({ tag: 'hatchabot-runtime:derived-media', base: 'hatchabot-runtime:2026.9.8', said: "The fleet's image is pinned by digest: built on hatchabot-runtime:2026.9.8, its tag on this machine." });
+      expect(store.getDerivedImage('media')?.base).toBe('hatchabot-runtime:2026.9.8');
+      // No version's tag of it: another name, `latest` last.
+      provider.tags = provider.tags.filter((t) => t.tag !== 'hatchabot-runtime:2026.9.8');
+      await new Promise((r) => setTimeout(r, 0));
+      const other = await f.inject({ method: 'POST', url: '/v1/images', headers: H(OWNER), payload: { name: 'tools', dockerfile: 'RUN true' } });
+      expect(other.json().base, other.body).toBe('hatchabot-runtime:trial');
+      // None here names it: refused, and nothing is made.
+      pinned = 'cccccccccccc';
+      const refused = await f.inject({ method: 'POST', url: '/v1/images', headers: H(OWNER), payload: { name: 'extra', dockerfile: 'RUN true' } });
+      expect(refused.statusCode).toBe(400);
+      expect(refused.json().error).toBe("The fleet's image is pinned by digest: give --base hatchabot-runtime:<version>.");
+      expect(store.getDerivedImage('extra')).toBeUndefined();
+      // A base named is taken as before, with nothing said.
+      const named = await f.inject({ method: 'POST', url: '/v1/images', headers: H(OWNER), payload: { name: 'extra', dockerfile: 'RUN true', base: 'hatchabot-runtime:2026.9.6' } });
+      expect(named.statusCode, named.body).toBe(202);
+      expect(named.json().said).toBeUndefined();
+      await new Promise((r) => setTimeout(r, 0));
+      expect(builds.map((b) => b.name)).toEqual(['media', 'tools', 'extra']);
       await f.close();
     } finally {
       if (was === undefined) delete process.env.HATCHABOT_IMAGE; else process.env.HATCHABOT_IMAGE = was;
@@ -936,32 +1248,8 @@ esac`);
     }
   }, 10_000);
 
-  it.runIf(existsSync(sleep) && existsSync(tool('mkfifo')) && existsSync('/proc/self/fd'))("a log let go keeps its file open until the write in flight on it ends (review of HB-1026)", async () => {
-    // Closed under that write, its number was free for another file, where
-    // the rest of a partial write could land; and a close behind the stuck
-    // write held the build up again.
-    const openOn = (path: string) => readdirSync('/proc/self/fd').map(Number).filter((fd) => { try { return readlinkSync(`/proc/self/fd/${fd}`) === path; } catch { return false; } });
-    const bin = docker(`i=1; while [ $i -le 3000 ]; do echo "a line of build output for a pipe nobody reads $i"; i=$((i+1)); done; exec ${sleep} 5`);
-    const logPath = join(dir, 'data', 'derived-builds', 'media.log');
-    mkdirSync(join(dir, 'data', 'derived-builds'), { recursive: true });
-    execFileSync(tool('mkfifo'), [logPath]);
-    const reader = openSync(logPath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
-    let open = true;
-    try {
-      const t0 = Date.now();
-      const res = await buildDerivedImage({ name: 'media', base: 'hatchabot-runtime:latest', dockerfile: 'RUN true', docker: bin, dataDir: join(dir, 'data'), timeoutMs: 500, logGraceMs: 300 });
-      expect(res).toEqual({ ok: false, error: 'Build timed out.' });
-      expect(Date.now() - t0).toBeLessThan(3000);
-      expect(openOn(logPath).filter((fd) => fd !== reader)).toHaveLength(1);
-      // The write ends (the pipe's reader is gone), and only then the file closes.
-      closeSync(reader);
-      open = false;
-      await until(() => !openOn(logPath).length);
-      expect(openOn(logPath)).toEqual([]);
-    } finally {
-      if (open) closeSync(reader);
-    }
-  }, 10_000);
+  // A log let go keeps its file open until the write in flight on it ends: test/buildLog.test.ts
+  // (a pipe nobody reads no longer holds a write, HB-1289, so a write is held there by hand).
 
   it.runIf(existsSync(tool('cat')))('a derived build is labelled as one, and lays its base packages on before its lines (HB-0986)', async () => {
     const bin = docker(`printf '%s\\n' "$@" > "${join(dir, 'args')}"; ${tool('cat')} "$8/Dockerfile" > "${join(dir, 'Dockerfile')}"`);
@@ -1041,6 +1329,27 @@ esac`);
     expect(existsSync(mark)).toBe(false);
     expect(readFileSync(join(dir, 'data', 'derived-builds', 'media.log'), 'utf8')).toBe(`${head('hatchabot-runtime:derived-media')}\n[stopped: the service stopped]\n`);
   });
+
+  it.runIf(existsSync(sleep) && existsSync(tool('setsid')))('a step that starts a session of its own is stopped with the build (HB-1506)', async () => {
+    // setsid puts the step in a session, and so a process group, of its own:
+    // the kill of docker's group did not reach it, and it ran on.
+    const partPid = join(dir, 'part-pid');
+    const bin = docker(`${tool('setsid')} ${sleep} 30 & echo $! > "${partPid}"; echo started; wait`);
+    const gone = (pid: number) => { try { process.kill(pid, 0); return false; } catch { return true; } };
+    let part = 0;
+    try {
+      const building = buildDerivedImage({ name: 'media', base: 'hatchabot-runtime:latest', dockerfile: 'RUN true', docker: bin, dataDir: join(dir, 'data'), timeoutMs: 1500 });
+      await until(() => existsSync(partPid) && /^\d+\n$/.test(readFileSync(partPid, 'utf8')), 5000);
+      part = Number(readFileSync(partPid, 'utf8'));
+      expect(part).toBeGreaterThan(1);
+      expect(await building).toEqual({ ok: false, error: 'Build timed out.' });
+      await until(() => gone(part), 5000);
+      expect(gone(part)).toBe(true);
+    } finally {
+      // Left running (the old way): ended here, by its own pid only.
+      if (part > 1 && !gone(part)) try { process.kill(part, 'SIGKILL'); } catch { /* gone */ }
+    }
+  }, 15_000);
 
   it.runIf(existsSync(sleep))('a build that ran out of time is stopped with all it started (review of HB-1026)', async () => {
     // A part of the build carries on after docker itself is killed (as

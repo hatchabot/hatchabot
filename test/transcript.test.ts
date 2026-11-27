@@ -112,6 +112,27 @@ describe('transcript renderer (in-container script)', () => {
     rmSync(root, { recursive: true, force: true });
   });
 
+  it('two different pictures sent at the same moment are two replies; the same one twice, or its delivery copy, is one (HB-1361)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'tx-pictures-'));
+    try {
+      const dir = join(root, 'kitchen', 'sessions');
+      mkdirSync(dir, { recursive: true });
+      const png = (data: string) => [{ type: 'image', data, mimeType: 'image/png' }];
+      const at = '2026-09-20T10:00:15Z';
+      writeFileSync(join(dir, 'pics.jsonl'), [
+        sess('2026-09-20T10:00:00Z'),
+        msg('user', 'draw the garden and the shed', '2026-09-20T10:00:00Z'),
+        msg('assistant', png('Z2FyZGVu'), at),
+        msg('assistant', png('c2hlZA=='), at),
+        msg('assistant', png('c2hlZA=='), at),
+        line({ type: 'message', timestamp: at, message: { role: 'assistant', model: 'delivery-mirror', openclawDeliveryMirror: true, content: [{ type: 'image', url: 'https://example.invalid/shed.png' }] } }),
+      ].join('\n'));
+      const r = render(root);
+      expect(r.messages).toBe(3);
+      expect(r.text.match(/Kitchen:\*\* \[image\]/g)).toHaveLength(2);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
   it('recover with INCLUDE_LIVE also takes the current conversation (post source-switch)', () => {
     const root = fixture();
     const out = join(root, 'agent', 'recovered', 'h.md');

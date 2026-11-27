@@ -12,7 +12,9 @@ import { dmPolicyAsserted, forgetDmPolicy, rememberDmPolicy } from '../src/orche
 const AGENT = 'agent-memo-1';
 let provider: MockProvider;
 let ref: string;
-const deps = () => ({ store: {} as never, provider });
+/** Everyone the rests below name is on the agent's list (a door write writes only those the store still admits, HB-1554). */
+const store = { listAllowedChannelUserIds: () => ['1001', '1002', '1003'] };
+const deps = () => ({ store: store as never, provider });
 const volumeRuns = () => provider.execLog.filter((c) => c[0] === 'sh-volume').length;
 const rest = (admit: string[], policy: 'allowlist' | 'pairing' = 'allowlist') =>
   setDmPolicy(deps(), { agentId: AGENT, runtimeRef: ref, kind: 'telegram', accountId: 'bot1', policy, allowFrom: admit });
@@ -53,7 +55,7 @@ describe('the DM-policy memo', () => {
     expect(volumeRuns()).toBe(2);
   });
 
-  it('an older completion cannot replace a newer policy memo and leave pairing open', async () => {
+  it('a write asked for while another is in flight waits for it, and an older completion cannot replace a newer policy memo and leave pairing open', async () => {
     const original = provider.execShellOnVolume.bind(provider);
     let release!: () => void;
     const delayed = new Promise<void>((resolve) => { release = resolve; });
@@ -68,10 +70,14 @@ describe('the DM-policy memo', () => {
     };
     const older = rest(['1001']);
     await Promise.resolve();
-    await rest(['1001'], 'pairing');
-    expect(livePolicy).toBe('pairing');
+    // Its turn comes once the one in flight has landed (HB-1554): the two never overlap on the volume.
+    const newer = rest(['1001'], 'pairing');
+    await new Promise((r) => setTimeout(r, 10));
+    expect(calls).toBe(1);
     release();
     await older;
+    await newer;
+    expect(livePolicy).toBe('pairing');
     await rest(['1001']);
     expect(calls).toBe(3);
     expect(livePolicy).toBe('allowlist');

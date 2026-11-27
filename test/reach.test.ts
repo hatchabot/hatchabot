@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { freePort, Jar, publicApp, type PublicApp } from './helpers/publicApp.js';
 import { SHIM_DNS, tailscaleShim, type Shim } from './helpers/tailscaleShim.js';
+import { turnOn as switchOn } from './helpers/publicWorld.js';
 import { activeValues } from '../src/config/envFile.js';
 import { enableServe, funnelOff, funnelOn, funnelPreflight, parseFunnelStatus, targetsPort } from '../src/ops/tailnet.js';
 
@@ -45,9 +46,12 @@ const start = async (env: Record<string, string> = {}, probes = {}) => {
   return { h, owner, call };
 };
 const envNow = () => activeValues(readFileSync(envFile, 'utf8'));
-/** Turned on, or the test fails saying which of the route's refusals it was (HB-0855). */
+/**
+ * Turned on, or the test fails saying which of the route's refusals it was (HB-0855). On another
+ * port if something took the one start() chose: nothing held it meanwhile (HB-1495).
+ */
 const turnOn = async (call: Awaited<ReturnType<typeof start>>['call']) => {
-  const r = await call('POST', '/v1/public-access/on', { confirm: true });
+  const r = await switchOn({ h: h!, call });
   expect(r.statusCode, r.body).toBe(200);
   return r;
 };
@@ -64,7 +68,7 @@ describe('reach on', () => {
 
   it('turns on: Funnel is pointed at the public listener and nothing else, the address is set, the record says so', async () => {
     const { h, call, owner } = await start();
-    const r = await call('POST', '/v1/public-access/on', { confirm: true });
+    const r = await switchOn({ h, call });
     expect(r.statusCode, r.body).toBe(200);
     const body = r.json();
     expect(body).toMatchObject({ on: true, serving: true, listening: true, turnedOn: true, url: `https://${SHIM_DNS}:8443` });
@@ -145,7 +149,7 @@ describe('reach on', () => {
   it('when Funnel itself refuses, the listener is closed again and Tailscale\'s link is passed on', async () => {
     const { h, call } = await start();
     shim.failFunnel('Funnel is not enabled on your tailnet.\nTo enable, visit:\n\n         https://login.tailscale.com/f/funnel?node=abc123\n');
-    const r = await call('POST', '/v1/public-access/on', { confirm: true });
+    const r = await switchOn({ h, call });
     expect(r.statusCode).toBe(409);
     expect(r.json().link).toBe('https://login.tailscale.com/f/funnel?node=abc123');
     expect(h.app.publicAccess!.status()).toMatchObject({ on: false, serving: false, listening: false });
@@ -175,7 +179,7 @@ describe('reach on', () => {
     const { h, call } = await start();
     chmodSync(envFile, 0o000); // there, and not writable or readable: the note is written, the setting is not
     try {
-      const r = await call('POST', '/v1/public-access/on', { confirm: true });
+      const r = await switchOn({ h, call });
       expect(r.statusCode).toBe(409);
       expect(r.json().error).toContain('turned back off');
     } finally { chmodSync(envFile, 0o600); }

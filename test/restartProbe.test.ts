@@ -19,7 +19,7 @@ afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, f
 const HANGS = 'case " $* " in *" --max-time "*) exit 28 ;; esac\nexec /bin/sleep 20\n';
 
 /** Restart a fake install whose service answers only at `serving`, and FAKE_ALSO_SERVING if given (with the file `page` beside the install, when there is one); returns the URLs curl was asked for. */
-function restart(env: string, serving: string, os = 'Linux', hangs = false, extra: Record<string, string> = {}, data = false, depsRc = 0, folder = '', setup?: (repo: string, home: string) => void) {
+function restart(env: string, serving: string, os = 'Linux', hangs = false, extra: Record<string, string> = {}, data = false, depsRc = 0, folder = '', setup?: (repo: string, home: string) => void, node = true) {
   const root = mkdtempSync(join(tmpdir(), 'hb-restart-')); dirs.push(root);
   const home = join(root, 'home'); mkdirSync(home);
   const repo = join(root, 'install'); mkdirSync(join(repo, 'scripts'), { recursive: true });
@@ -32,12 +32,15 @@ function restart(env: string, serving: string, os = 'Linux', hangs = false, extr
   const bin = join(root, 'bin'); mkdirSync(bin);
   const asked = join(root, 'curl.log');
   for (const tool of ['systemctl', 'launchctl', 'sleep', 'journalctl']) writeFileSync(join(bin, tool), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
-  symlinkSync(process.execPath, join(bin, 'node')); // .env read as the service reads it (env_named)
+  if (node) symlinkSync(process.execPath, join(bin, 'node')); // .env read as the service reads it (env_named)
+  // With none: no node anywhere on the PATH, and an npm there, so restart.sh adds no folder that may hold one.
+  else writeFileSync(join(bin, 'npm'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+  const system = node ? '/usr/bin:/bin' : systemPathWithout(join(root, 'system'), ['node', 'nodejs']);
   writeFileSync(join(bin, 'uname'), `#!/usr/bin/env bash\necho ${os}\n`, { mode: 0o755 });
   // The last argument is the URL; only the listener's real address answers.
   const page = join(root, 'page');
   writeFileSync(join(bin, 'curl'), `#!/usr/bin/env bash\nurl="\${@: -1}"\necho "$* " >> ${JSON.stringify(asked)}\n${hangs ? HANGS : ''}[ "$url" = ${JSON.stringify(serving)} ] || [ "$url" = "\${FAKE_ALSO_SERVING:-}" ] || exit 1\n[ ! -f ${JSON.stringify(page)} ] || cat ${JSON.stringify(page)}\n`, { mode: 0o755 });
-  const r = spawnSync('bash', [join(repo, 'scripts', 'restart.sh')], { encoding: 'utf8', env: { ...scriptEnv(home, `${bin}:/usr/bin:/bin`), ...extra }, timeout: 15_000 });
+  const r = spawnSync('bash', [join(repo, 'scripts', 'restart.sh')], { encoding: 'utf8', env: { ...scriptEnv(home, `${bin}:${system}`), ...extra }, timeout: 15_000 });
   let calls: string[] = [];
   try { calls = readFileSync(asked, 'utf8').trim().split('\n'); } catch { /* never called */ }
   return { status: r.status, out: r.stdout + r.stderr, calls, repo };
@@ -52,8 +55,49 @@ describe('scripts/restart.sh health probe (#225)', () => {
   });
 
   it('asks a listener bound to one address at that address', () => {
-    expect(restart('PORT="9090"  # quoted, with a comment\nHATCHABOT_BIND=192.0.2.10\n', 'http://192.0.2.10:9090/healthz').status).toBe(0);
+    expect(restart('PORT="9090"\nHATCHABOT_BIND=192.0.2.10\n', 'http://192.0.2.10:9090/healthz').status).toBe(0);
     expect(restart('HATCHABOT_BIND=fd00::10\n', 'http://[fd00::10]:8080/healthz').status).toBe(0);
+  });
+
+  it('a link-local address with its zone is asked at a URL, the zone\'s % written %25 (RFC 6874; HB-1378)', () => {
+    const r = restart('HATCHABOT_BIND=fe80::10%eth0\n', 'http://[fe80::10%25eth0]:8080/healthz');
+    expect(r.status, r.out).toBe(0);
+    expect(r.out).toContain('up on http://[fe80::10%25eth0]:8080');
+  });
+
+  it('reads .env as the service does: the names from before the rename, Windows line endings, and a "# note" kept in the value on Linux (HB-1529)', () => {
+    // The service takes AGENTCLAW_BIND and AGENTCLAW_TLS_CERT when the new names are not set: read by sed, plain http on localhost was asked.
+    const old = restart('PORT=9137\nAGENTCLAW_BIND=192.0.2.10\nAGENTCLAW_TLS_CERT=/made-up/cert.pem\nAGENTCLAW_TLS_KEY=/made-up/key.pem\n', 'https://192.0.2.10:9137/healthz');
+    expect(old.status, old.out).toBe(0);
+    expect(old.calls).toHaveLength(1);
+    expect(restart('PORT=9137\r\nHATCHABOT_BIND=192.0.2.10\r\nHATCHABOT_TLS_CERT=/made-up/cert.pem\r\n', 'https://192.0.2.10:9137/healthz').status).toBe(0);
+    // systemd keeps the note: PORT is then no port, and the service listens on 8080, as with none; asked there, never at an address that is no URL.
+    const noted = restart('PORT="9090"  # quoted, with a comment\nHATCHABOT_BIND=192.0.2.10\n', 'http://192.0.2.10:8080/healthz');
+    expect(noted.status, noted.out).toBe(0);
+    expect(noted.calls).toHaveLength(1);
+    // A Mac's launchd job sources .env with bash, which takes the note off.
+    expect(restart('PORT="9090"  # quoted, with a comment\nAGENTCLAW_BIND=192.0.2.10\n', 'http://192.0.2.10:9090/healthz', 'Darwin').status).toBe(0);
+  });
+
+  it('with no node on its PATH (cron, a bare ssh, an nvm node), the lines bash reads as systemd does are still read (review of HB-1529)', () => {
+    const plain = restart('PORT=9137\nHATCHABOT_BIND=192.0.2.10\n', 'http://192.0.2.10:9137/healthz', 'Linux', false, {}, false, 0, '', undefined, false);
+    expect(plain.status, plain.out).toBe(0);
+    expect(plain.out).not.toContain('Could not read .env');
+    expect(plain.calls).toHaveLength(1);
+    // Spaces around the =, quoted whole, the old names, the last line of a name.
+    const quoted = restart("PORT = '9137'\nAGENTCLAW_BIND=192.0.2.10\nHATCHABOT_TLS_CERT=\"/made-up/cert.pem\"\nPORT=9138\n", 'https://192.0.2.10:9138/healthz', 'Linux', false, {}, false, 0, '', undefined, false);
+    expect(quoted.status, quoted.out).toBe(0);
+    // A form feed after the port, which systemd keeps and Number takes off: asked where the service listens.
+    const fed = restart('PORT=9137\f\nHATCHABOT_BIND=192.0.2.10\n', 'http://192.0.2.10:9137/healthz', 'Linux', false, {}, false, 0, '', undefined, false);
+    expect(fed.status, fed.out).toBe(0);
+    expect(fed.out).not.toContain('Could not read .env');
+    // What bash cannot read as systemd does is not guessed at: unread, said, and the service asked where it listens with none.
+    // A quote left open on an earlier line: systemd reads the lines after it into its value (review of HB-1529).
+    for (const env of ['PORT=9137\r\nHATCHABOT_BIND=192.0.2.10\r\n', 'PORT="91\\37"\nHATCHABOT_BIND=192.0.2.10\n', 'X=a\\\nPORT=9137\n', 'HATCHABOT_GREETING="hello\nPORT=9137\nHATCHABOT_BIND=192.0.2.10\n']) {
+      const r = restart(env, 'http://localhost:8080/healthz', 'Linux', false, {}, false, 0, '', undefined, false);
+      expect(r.status, JSON.stringify(env) + r.out).toBe(0);
+      expect(r.out, JSON.stringify(env)).toContain('Could not read .env as the service reads it');
+    }
   });
 
   it('a plain listener (TLS in front, or none) is still asked at http://localhost', () => {
@@ -268,10 +312,11 @@ describe('scripts/restart.sh under an upgrade that rolls back (HB-0840)', () => 
       const r = spawnSync('bash', ['-c', `set -euo pipefail\n${fns}\nmark_rolled_back "$1"`, '_', dir], { encoding: 'utf8', env: scriptEnv(join(root, 'home'), `${bin}:${sys}`) });
       return { r, dir, out: r.stdout + r.stderr };
     };
-    for (const node of ['none', 'fails'] as const) {
-      const { r, dir, out } = mark(node, 'HATCHABOT_DB=elsewhere/hb.sqlite\n');
+    // With no node, a line bash cannot read as systemd does (a carriage return); with one that fails, any.
+    for (const [node, env] of [['none', 'HATCHABOT_DB=elsewhere/hb.sqlite\r\n'], ['fails', 'HATCHABOT_DB=elsewhere/hb.sqlite\n']] as const) {
+      const { r, dir, out } = mark(node, env);
       expect(r.status, out).toBe(0);
-      expect(out, node).toContain(`Could not read ${dir}/.env to find the database (no node to read it with, or it failed), so this rollback is written down beside the one the service opens when .env names none, ${dir}/data/hatchabot.sqlite. If .env names another (HATCHABOT_DB), the next start may take up what the release left had still to do for its agents.`);
+      expect(out, node).toContain(`Could not read ${dir}/.env to find the database (node failed, or with none to read it with, it has a line bash cannot read as systemd does), so this rollback is written down beside the one the service opens when .env names none, ${dir}/data/hatchabot.sqlite. If .env names another (HATCHABOT_DB), the next start may take up what the release left had still to do for its agents.`);
       expect(existsSync(join(dir, 'data', 'hatchabot.sqlite.rolled-back')), node).toBe(true);
     }
     // No .env: the service opens the default, and nothing is said.
@@ -282,6 +327,10 @@ describe('scripts/restart.sh under an upgrade that rolls back (HB-0840)', () => 
     const read = mark('works', 'HATCHABOT_DB=elsewhere/hb.sqlite\n');
     expect(read.out).toBe('');
     expect(existsSync(join(read.dir, 'elsewhere', 'hb.sqlite.rolled-back'))).toBe(true);
+    // With no node, a plain line is read all the same (review of HB-1529).
+    const plain = mark('none', 'HATCHABOT_DB=elsewhere/hb.sqlite\n');
+    expect(plain.out).toBe('');
+    expect(existsSync(join(plain.dir, 'elsewhere', 'hb.sqlite.rolled-back'))).toBe(true);
   });
 
   it('never makes a record that is not there', () => {

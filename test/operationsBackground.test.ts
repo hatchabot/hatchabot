@@ -261,6 +261,12 @@ describe('the words', () => {
     expect(operationTitles('move-host', { toName: 'Test Runner' })).toEqual({ what: 'Move to Test Runner', doing: 'Moving to Test Runner', done: 'Moved to Test Runner' });
     expect(operationSummary('restore-backup', 'failed', { date: '2026-10-01' })).toBe('Restore from the 2026-10-01 backup failed');
     expect(operationSummary('import', 'rolled_back', {})).toBe('Import undone');
+    // A clone and a new child are made as imports (copies.ts), and are not called one (HB-1297).
+    expect(operationTitles('import', { template: true, cloneOf: 'Kitchen' })).toEqual({ what: 'Clone of Kitchen', doing: 'Cloning Kitchen', done: 'Cloned Kitchen' });
+    expect(operationSummary('import', 'interrupted', { template: true, cloneOf: 'Kitchen' })).toBe('Clone of Kitchen was interrupted by a restart');
+    expect(operationTitles('import', { template: true, childOf: 'Kitchen' })).toEqual({ what: 'New child of Kitchen', doing: 'Making a child of Kitchen', done: 'Made a child of Kitchen' });
+    expect(operationSummary('import', 'rolled_back', { template: true, childOf: 'Kitchen' })).toBe('New child of Kitchen undone');
+    expect(operationTitles('import', { template: true, shareId: 'made-up-share' })).toEqual({ what: 'Import', doing: 'Importing', done: 'Imported' });
     expect(spanWords(4_000)).toBe('4 s');
     expect(spanWords(185_000)).toBe('3 min');
     expect(spanWords(2 * 3600_000 + 5 * 60_000)).toBe('2 h 5 min');

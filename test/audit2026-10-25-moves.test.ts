@@ -148,20 +148,33 @@ exit 0
 });
 
 describe('archiving a pasted bot keeps a lease another agent took meanwhile (audit #089)', () => {
-  it('the new lease stays, the bot is not spare, and its token cannot be removed', async () => {
+  it('a create the moment archive has parked it finds no spare: the bot is the archiving agent\'s until its row goes (HB-1263 review)', async () => {
     const w = await world();
     const id = await seedRunningAgent(w);
     const telegram = async () => new Response(JSON.stringify({ ok: true, result: true }), { headers: { 'content-type': 'application/json' } });
     const pool = new TelegramPoolProvisioner((w.store as unknown as { db: never }).db, w.secrets, { fetchImpl: telegram as never, renameBackoffMs: [] });
     const add = pool.addToPool.bind(pool);
-    // A create leases the bot the moment archive has parked it, before archive releases it.
+    let between: string | undefined;
     pool.addToPool = async (...a: Parameters<typeof pool.addToPool>) => {
       await add(...a);
-      await pool.provision({ agentId: 'garden', agentName: 'Garden', slug: 'garden', ownerId: w.owner });
+      between = await pool.provision({ agentId: 'garden', agentName: 'Garden', slug: 'garden', ownerId: w.owner }).then((c) => c.accountId, (err: Error) => err.name);
     };
     const channel = { pool, release: (accountId: string, opts?: never) => pool.release(accountId, opts) };
     await archiveAgent({ store: w.store, secrets: w.secrets, provider: w.provider, channel: channel as never, log: () => {} }, id);
+    expect(between).toBe('PoolExhaustedError');
     expect(w.store.getAgent(id)?.state).toBe('ARCHIVED');
+    // Archived, its row gone: a spare now, its token kept.
+    expect(pool.list().find((b) => b.username === 'kitchenbot')?.leasedTo).toBeUndefined();
+    expect(pool.availableCount(w.owner)).toBe(1);
+    expect(await w.secrets.get('telegram/bot/kitchenbot')).toBe('bot-token-123');
+  });
+
+  it('a release named for another agent than the one leasing the bot keeps that lease: not spare, and its token cannot be removed', async () => {
+    const w = await world();
+    const pool = new TelegramPoolProvisioner((w.store as unknown as { db: never }).db, w.secrets, { fetchImpl: (async () => new Response('{"ok":true}')) as never, renameBackoffMs: [] });
+    await pool.addToPool('kitchenbot', 'bot-token-123', w.owner);
+    await pool.provision({ agentId: 'garden', agentName: 'Garden', slug: 'garden', ownerId: w.owner });
+    await pool.release('kitchenbot', { reason: 'archived', agentId: 'kitchen' });
     expect(pool.list().find((b) => b.username === 'kitchenbot')?.leasedTo).toBe('garden');
     expect(pool.availableCount(w.owner)).toBe(0);
     await expect(pool.removeFromPool('kitchenbot')).rejects.toThrow(/leased to an agent/);

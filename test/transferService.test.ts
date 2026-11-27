@@ -18,6 +18,7 @@ import { ADOPT_PASS_TURN_WAIT_MS } from '../src/orchestrator/transfer/adopts.js'
 import { workspacePath } from '../src/orchestrator/files/snapshots.js';
 import { parseTemplate, readTemplate } from '../src/orchestrator/transfer/template.js';
 import { migrateCrons } from '../src/orchestrator/transfer/cronImport.js';
+import { INBOX_PAGE, type InboxPage, type ShareCaller } from '../src/orchestrator/transfer/inbox.js';
 import { MemSecrets, seedRunningAgent } from './support/world.js';
 import Fastify from 'fastify';
 import { installErrorHandler } from '../src/api/errorHandler.js';
@@ -40,6 +41,8 @@ vi.mock('node:zlib', async (importOriginal) => {
  * data only; the one address is built at run time.
  */
 const OWNER = 'user-owner';
+/** A carried record's fingerprint, for the copy it names (HB-1200). */
+const carriedFp = (copyId: string) => expect.stringMatching(new RegExp(`^1:[0-9a-f]{16}:${copyId}$`));
 const FRIEND = 'user-friend';
 const friendAddress = ['friend', 'example.test'].join('@');
 const ownerAddress = ['owner', 'example.test'].join('@');
@@ -778,6 +781,13 @@ describe('a template import storing its setup answers', () => {
 });
 
 describe('inbox', () => {
+  /** A page of the inbox (HB-1167): the newest, or from `after`. */
+  async function page(w: World, me: ShareCaller, o?: { limit?: number; after?: string }): Promise<InboxPage> {
+    const got = await w.svc.inbox.list(me, o);
+    if (got === 'bad-place') throw new Error('not a page');
+    return got;
+  }
+  const listed = async (w: World, me: ShareCaller) => (await page(w, me)).shares;
   it('a template sent lands in the recipient\'s inbox with its setup fields, and an accept stands it up as theirs', async () => {
     const w = world();
     const id = await seed(w);
@@ -785,7 +795,7 @@ describe('inbox', () => {
     w.store.insertHost({ id: 'h-friend', ownerId: FRIEND, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' } as never);
     expect(await w.svc.inbox.send(w.store.getAgent(id)!, { ownerId: OWNER }, friendAddress, 'For your kitchen')).toBe('sent');
     const me = { ownerId: FRIEND, email: friendAddress };
-    const [share] = await w.svc.inbox.list(me);
+    const [share] = await listed(w, me);
     expect(share).toMatchObject({ agentName: 'Kitchen', message: 'For your kitchen', parameters: [] });
     const shareId = String(share!.id);
     // The route reads the share, claims it (setShareStatus), then the service stands it up.
@@ -795,7 +805,7 @@ describe('inbox', () => {
     expect(agent).toMatchObject({ name: 'Their Kitchen', ownerId: FRIEND });
     expect(w.store.getAgent(agent.id)!.parentAgentId).toBe(id);
     expect(w.kicked).toEqual([agent.id]);
-    expect(await w.svc.inbox.list(me)).toEqual([]);
+    expect(await page(w, me)).toEqual({ shares: [], total: 0 });
   });
 
   it('an accept that fails puts the share back for another try; a dismissed one leaves the inbox', async () => {
@@ -806,10 +816,10 @@ describe('inbox', () => {
     const share = w.store.getShareFor('sh-bad', FRIEND, friendAddress)!;
     expect(w.store.setShareStatus('sh-bad', 'accepted', FRIEND)).toBe(true);
     await expect(w.svc.inbox.accept('sh-bad', share, me, { hostId: 'h1' })).rejects.toThrow();
-    expect((await w.svc.inbox.list(me)).map((s) => s.id)).toEqual(['sh-bad']);
+    expect((await listed(w, me)).map((s) => s.id)).toEqual(['sh-bad']);
     // Dismiss is the route's one store call (transferRoutes.ts).
     w.store.setShareStatus('sh-bad', 'dismissed', FRIEND);
-    expect(await w.svc.inbox.list(me)).toEqual([]);
+    expect(await listed(w, me)).toEqual([]);
     expect(w.kicked).toEqual([]);
   });
 
@@ -827,7 +837,7 @@ describe('inbox', () => {
     expect(await w.svc.inbox.send(w.store.getAgent(id)!, { ownerId: OWNER }, friendAddress, undefined)).toBe('sent');
     const me = { ownerId: FRIEND, email: friendAddress };
     const reads = vi.spyOn(w.store, 'getShareFor');
-    const [share] = await w.svc.inbox.list(me);
+    const [share] = await listed(w, me);
     expect(share!.parameters).toEqual([expect.objectContaining({ key: 'api_key', label: 'Key', required: true })]);
     expect(reads).not.toHaveBeenCalled();
     // What it shows is what the file holds, the fields an Accept asks.
@@ -852,11 +862,34 @@ describe('inbox', () => {
     // were inflated off it, not in one go on it.
     expect(ranFirst).toBe(true);
     const first = await listing;
-    expect(first.map((s) => [s.id, (s.parameters as Array<{ key: string }>).map((p) => p.key)])).toEqual([['sh-unreadable', []], ['sh-old', ['api_key']]]);
+    if (first === 'bad-place') throw new Error('not a page');
+    expect(first.shares.map((s) => [s.id, (s.parameters as Array<{ key: string }>).map((p) => p.key)])).toEqual([['sh-unreadable', []], ['sh-old', ['api_key']]]);
     expect(reads).toHaveBeenCalledTimes(2);
     // Kept: the next list reads neither file, and shows the same.
     expect(await w.svc.inbox.list(me)).toEqual(first);
     expect(reads).toHaveBeenCalledTimes(2);
+  });
+
+  it('lists a page at a time, newest first, with how many wait and where the next page starts; only the page\'s files are read (HB-1167)', async () => {
+    const w = world();
+    w.store.recordAccount(FRIEND, friendAddress);
+    // 120 shares sent before their fields were kept (each one's file read when it is first listed), a second apart.
+    for (let i = 0; i < 120; i++) {
+      w.store.insertShare({ id: `sh-${String(i).padStart(3, '0')}`, fromOwner: OWNER, toEmail: friendAddress, toOwner: FRIEND, agentName: `Kitchen ${i}`,
+        blob: Buffer.from('not a template'), createdAt: new Date(Date.UTC(2026, 10, 1, 0, 0, i)).toISOString() });
+    }
+    const me = { ownerId: FRIEND, email: friendAddress };
+    const reads = vi.spyOn(w.store, 'getShareFor');
+    const one = await page(w, me);
+    expect(INBOX_PAGE).toBe(50);
+    expect([one.shares.length, one.total, one.shares[0]!.id, one.shares.at(-1)!.id]).toEqual([50, 120, 'sh-119', 'sh-070']);
+    expect(reads).toHaveBeenCalledTimes(50);
+    const two = await page(w, me, { after: one.next });
+    const three = await page(w, me, { after: two.next });
+    expect([two.shares.length, two.shares[0]!.id, three.shares.length, three.shares.at(-1)!.id, three.next]).toEqual([50, 'sh-069', 20, 'sh-000', undefined]);
+    expect(new Set([...one.shares, ...two.shares, ...three.shares].map((s) => s.id)).size).toBe(120);
+    expect(await w.svc.inbox.list(me, { after: 'made-up' })).toBe('bad-place');
+    expect(await w.svc.inbox.list(me, { after: Buffer.from('["2026-11-01T00:00:00.000Z"]').toString('base64url') })).toBe('bad-place');
   });
 });
 
@@ -1307,6 +1340,97 @@ describe('adopts', () => {
     expect(w.store.listAdoptPending()).toEqual([]);
     expect(adds(w)[0]).toContain('--disabled');
   });
+
+  /** The agent's gateway does not answer its task list (just started, or out of reach) until `answer()`. */
+  function gatewayDown(w: World) {
+    const exec = w.local.exec.bind(w.local);
+    w.local.exec = async (r, argv, o) => argv[0] === 'cron' && argv[1] === 'list' ? { code: 1, stdout: '', stderr: 'gateway not ready (made up)' } : exec(r, argv, o);
+    return () => { w.local.exec = exec; };
+  }
+  const stopIt = async (w: World, id: string) => { await w.local.stop(w.store.getAgent(id)!.runtimeRef!); w.store.setAgentState(id, 'STOPPED'); };
+  const startIt = async (w: World, id: string) => { await w.local.start(w.store.getAgent(id)!.runtimeRef!); w.store.setAgentState(id, 'RUNNING'); };
+
+  it('an adopt into an agent on a machine this server does not know is left for later, and the adopts after it in the same pass run (HB-1476)', async () => {
+    const w = world();
+    const lost = await putOffThenStarted(w);
+    const id = await seed(w, { id: 'a2', slug: 'garden', name: 'Garden' });
+    await stopIt(w, id);
+    await w.svc.adopts.adoptInto(w.store.getAgent(id)!, ws);
+    await startIt(w, id);
+    w.store.setAgentHost(lost, 'h-made-up');      // its runner was removed meanwhile
+    // Was: "no host h-made-up" out of the whole pass, every pass: the second adopt never ran.
+    await w.svc.adopts.finishDeferredAdopts();
+    expect(w.store.listAdoptPending().map((r) => r.agentId)).toEqual([lost]);
+    expect(adds(w)).toHaveLength(1);
+  });
+
+  it('the same folder adopted again while its older adopt waits gets its own first look and its own day (HB-1476)', async () => {
+    const w = world();
+    const id = await putOffThenStarted(w);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(Date.parse('2026-11-20T09:00:00.000Z'));
+      const answer = gatewayDown(w);
+      await w.svc.adopts.finishDeferredAdopts();      // looked at: its gateway did not answer
+      answer();
+      expect(w.store.listAdoptPending()).toHaveLength(1);
+      // Adopted again, into it stopped, and started: a new adopt of the same folder.
+      vi.setSystemTime(Date.parse('2026-11-20T09:05:00.000Z'));
+      await stopIt(w, id);
+      await w.svc.adopts.adoptInto(w.store.getAgent(id)!, ws);
+      await startIt(w, id);
+      vi.setSystemTime(Date.parse('2026-11-20T09:10:00.000Z'));
+      // Was: the older adopt's try at 09:00 held it back to 10:00.
+      await w.svc.adopts.finishDeferredAdopts();
+    } finally { vi.useRealTimers(); }
+    expect(w.store.listAdoptPending()).toEqual([]);
+    expect(adds(w)[0]).toContain('--disabled');
+  });
+
+  it('a folder adopted again after a newer adopt took its place says again that it waits for the gateway (HB-1476)', async () => {
+    const w = world();
+    const id = await putOffThenStarted(w);
+    const plain = join(tmp, 'plain-made-up');
+    mkdirSync(plain, { recursive: true });
+    writeFileSync(join(plain, 'SOUL.md'), 'You are tidy.');
+    const answer = gatewayDown(w);
+    try {
+      await w.svc.adopts.finishDeferredAdopts();
+      expect(w.events.filter((e) => e === 'adopt.deferred_waiting')).toHaveLength(1);
+      await w.svc.adopts.adoptInto(w.store.getAgent(id)!, plain);   // a newer adopt, nothing to re-point: the older one goes
+      expect(w.store.listAdoptPending()).toEqual([]);
+      await w.svc.adopts.finishDeferredAdopts();
+      await stopIt(w, id);
+      await w.svc.adopts.adoptInto(w.store.getAgent(id)!, ws);      // the first folder again
+      await startIt(w, id);
+      await w.svc.adopts.finishDeferredAdopts();
+    } finally { answer(); }
+    // Was: once, the first adopt's word kept in memory for good.
+    expect(w.events.filter((e) => e === 'adopt.deferred_waiting')).toHaveLength(2);
+  });
+
+  it('a re-point that keeps failing is said once on the timeline, not every hour (HB-1476)', async () => {
+    const w = world();
+    await putOffThenStarted(w);
+    const turns = w.turns;
+    w.turns = { ...turns, withCoreFilesTurn: async () => { throw new Error('made-up failure'); } };
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      for (const at of ['09:00', '10:01', '11:02', '12:03']) {
+        vi.setSystemTime(Date.parse(`2026-11-20T${at}:00.000Z`));
+        await w.svc.adopts.finishDeferredAdopts();
+      }
+      expect(w.store.listAdoptPending()).toHaveLength(1);
+      // Was: one an hour, 200 of them in eight days, all the agent's timeline keeps.
+      expect(w.events.filter((e) => e === 'adopt.repoint_failed')).toHaveLength(1);
+      // Once it ran, a failure after is said again.
+      w.turns = turns;
+      vi.setSystemTime(Date.parse('2026-11-20T13:04:00.000Z'));
+      await w.svc.adopts.finishDeferredAdopts();
+    } finally { vi.useRealTimers(); w.turns = turns; }
+    expect(w.store.listAdoptPending()).toEqual([]);
+    expect(adds(w)[0]).toContain('--disabled');
+  });
 });
 
 describe('tasks an agent did not adopt itself (HB-0985)', () => {
@@ -1345,7 +1469,7 @@ describe('tasks an agent did not adopt itself (HB-0985)', () => {
       listing([{ id: 'k1', enabled: true, ...task, sessionTarget: 'current', sessionKey: `agent:${clone.slug}:main` }]);
       expect(await adopt(clone.id)).toEqual({ total: 1, carried: 1, failed: 0 });
       expect(adds()).toHaveLength(1);
-      expect(w.store.carriedTasks(clone.id)).toEqual([{ sourceAgent: 'garden-advisor', sourceId: 's0', copyId: 'k1' }]);
+      expect(w.store.carriedTasks(clone.id)).toEqual([{ sourceAgent: 'garden-advisor', sourceId: 's0', copyId: 'k1', fingerprint: carriedFp('k1') }]);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });

@@ -77,7 +77,7 @@ function world(opts: { jail?: boolean; driftEveryMs?: number; base?: string; tag
 const source = (w: World, id: string, vendor: string, extra: Record<string, unknown> = {}) =>
   w.store.insertAIProfile({ id, ownerId: OWNER, name: id, vendor, kind: 'api_key', model: 'm', secretRef: `ai/${id}`, createdAt: 'now', ...extra } as never);
 
-afterEach(() => { vi.useRealTimers(); clearBusy('ops1'); clearBusy('a1'); });
+afterEach(() => { vi.useRealTimers(); });
 
 describe('a turn in the manager\'s own conversation', () => {
   it('runs one turn and forgets the cached sessions on both sides of it', async () => {

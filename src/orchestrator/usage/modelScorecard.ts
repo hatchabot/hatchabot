@@ -2,6 +2,7 @@ import type { Agent, AIProfile } from '../../domain/types.js';
 import type { Store } from '../../store/store.js';
 import type { ModelProfile, WindowModelStats, TurnErrors } from './usage.js';
 import { modelKey, modelOption, priceMix, sourceModels, type TokenMix } from '../sources/modelOptions.js';
+import { runningModelOf, type RunningSource } from './tokenHealth.js';
 
 /**
  * The model scorecard: one compact row per agent the caller owns, for the
@@ -53,7 +54,7 @@ export interface ScorecardRow {
   toolTurnShare: number;
   toolsPerTurn: number;
   /** Non-zero counts only (see TurnErrors); failed7d = failed or truncated turns in the last 7 days. */
-  errors: Partial<TurnErrors> & { failedTurns?: number; failed7d?: number; promptErrors?: number; httpFailed8d?: number };
+  errors: Partial<TurnErrors> & { failedTurns?: number; failed7d?: number; promptErrors?: number; httpFailed8d?: number; practiceRefused?: number };
   scheduledTasks?: number;
   /** The same use for a month on the current model, at API prices (USD). */
   monthlyUSD?: number;
@@ -83,7 +84,7 @@ const r2 = (x: number) => Math.round(x * 100) / 100;
 const r1 = (x: number) => Math.round(x * 10) / 10;
 const mega = (x: number) => r2(x / 1e6);
 
-function sumMix(models: WindowModelStats[]): TokenMix {
+function sumMix(models: TokenMix[]): TokenMix {
   return models.reduce((s, m) => ({ input: s.input + m.input, output: s.output + m.output, cacheRead: s.cacheRead + m.cacheRead, cacheWrite: s.cacheWrite + m.cacheWrite }),
     { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 }
@@ -108,16 +109,23 @@ function stateOf(a: Agent): string {
 
 const ERR_KEYS: Array<keyof TurnErrors> = ['malformedToolCall', 'providerError', 'rateLimited', 'aborted', 'truncated', 'toolFailed', 'retried'];
 
-export function scoreAgent(a: Agent, profile: AIProfile | undefined, stored: { profile: StoredProfile; at: string } | undefined, ctx: {
+export function scoreAgent(a: Agent, profile: RunningSource | undefined, stored: { profile: StoredProfile; at: string } | undefined, ctx: {
   now: number; className?: string; sourceTotal?: number; httpFailed8d?: number;
+  /** The model its container runs, when that is not its own pin or its source's default (a switch of source waiting for its rebuild). */
+  model?: string;
+  /** Its practice runs' calls and tokens in the window, which its profile does not hold (HB-1270), and the calls their source refused (HB-1497). */
+  practice?: { calls: number; mix: TokenMix; refused?: number };
 }): ScorecardRow {
   const p = stored?.profile;
   const readAt = stored ? Date.parse(stored.at) : ctx.now;
-  const model = a.model ?? profile?.model ?? '(unknown)';
+  const model = ctx.model ?? a.model ?? profile?.model ?? '(unknown)';
   const entries = Object.entries(p?.models ?? {});
   const all = entries.map(([, m]) => m);
-  const mix = sumMix(all);
-  const calls = all.reduce((s, m) => s + m.calls, 0);
+  // Its practice is in its calls, tokens and cost, as its Usage page has it;
+  // not in its turns or the evidence, which are its own conversations'.
+  const mix = sumMix([...all, ...(ctx.practice ? [ctx.practice.mix] : [])]);
+  const ownCalls = all.reduce((s, m) => s + m.calls, 0);
+  const calls = ownCalls + (ctx.practice?.calls ?? 0);
   const turns = all.reduce((s, m) => s + m.turns, 0);
   const toolTurns = all.reduce((s, m) => s + m.toolTurns, 0);
   const toolCalls = all.reduce((s, m) => s + m.toolCalls, 0);
@@ -131,6 +139,8 @@ export function scoreAgent(a: Agent, profile: AIProfile | undefined, stored: { p
   if (failed7d) errors.failed7d = failed7d;
   if (p?.promptErrors) errors.promptErrors = p.promptErrors;
   if (ctx.httpFailed8d) errors.httpFailed8d = ctx.httpFailed8d;
+  // Apart: a practice call refused is not a turn of its own that failed (HB-1497).
+  if (ctx.practice?.refused) errors.practiceRefused = ctx.practice.refused;
   const days = p ? coverageDays(p, readAt, a.createdAt) : 0;
   const billing: ScorecardRow['billing'] = profile?.vendor === 'local' ? 'local' : profile?.kind === 'subscription' ? 'plan' : 'api';
   const atCurrent = billing === 'local' || !p ? undefined : priceMix(model, mix);
@@ -140,7 +150,7 @@ export function scoreAgent(a: Agent, profile: AIProfile | undefined, stored: { p
   // or every unknown model's turns count as experience on the new one (#123).
   const onModel = entries.filter(([m]) => m === model || (cur ? modelOption(m)?.id === cur.id : modelKey(m) === modelKey(model))).map(([, m]) => m);
   const turnsOnModel = onModel.reduce((s, m) => s + m.turns, 0);
-  const evidence: ScorecardRow['evidence'] = !calls ? 'none' : turnsOnModel < 10 || days < 3 ? 'thin' : 'ok';
+  const evidence: ScorecardRow['evidence'] = !ownCalls ? 'none' : turnsOnModel < 10 || days < 3 ? 'thin' : 'ok';
   const options: ScorecardOption[] = [];
   if (monthly !== undefined && cur && profile) {
     for (const id of sourceModels(profile)) {
@@ -197,19 +207,39 @@ export function buildScorecard(store: Store, ownerId: string, opts: { now?: numb
   const live = mine.filter((a) => a.state !== 'ARCHIVED');
   const profiles = new Map<string, AIProfile | undefined>();
   const profileOf = (id: string) => { if (!profiles.has(id)) profiles.set(id, store.getAIProfile(id)); return profiles.get(id); };
+  // What its container runs: while a switch of source waits for its rebuild,
+  // the source it was built with and its model, as its token health row and
+  // its context cap judge it (runningModelOf). Its row was billed, priced and
+  // offered cheaper models by the source chosen (HB-1343).
+  const switching = (a: Agent) => !!a.appliedProfileId && a.appliedProfileId !== a.aiProfileId;
+  const runs = new Map<string, ReturnType<typeof runningModelOf>>();
+  const runningOf = (a: Agent) => { if (!switching(a)) return undefined; if (!runs.has(a.id)) runs.set(a.id, runningModelOf(store, a)); return runs.get(a.id); };
+  const sourceOf = (a: Agent): RunningSource | undefined => (switching(a) ? runningOf(a)?.profile : profileOf(a.aiProfileId));
+  const sourceIdOf = (a: Agent) => (switching(a) ? a.appliedProfileId! : a.aiProfileId);
   // Each plan source's whole window, every account's agents on it (a sum, nothing else of theirs).
-  const planSources = new Set(live.map((a) => a.aiProfileId).filter((id) => profileOf(id)?.kind === 'subscription' && profileOf(id)?.vendor !== 'local'));
-  const onPlans = store.listAllActiveAgents().filter((a) => planSources.has(a.aiProfileId));
+  const planSources = new Set(live.map((a) => sourceOf(a)).filter((p) => p?.kind === 'subscription' && p.vendor !== 'local').map((p) => p!.id));
+  const onPlans = store.listAllActiveAgents().filter((a) => planSources.has(sourceIdOf(a)));
   const stored = store.modelProfiles([...new Set([...live.map((a) => a.id), ...onPlans.map((a) => a.id)])]) as Map<string, { profile: StoredProfile; at: string }>;
   const sourceTotal = new Map<string, number>();
-  for (const a of onPlans) sourceTotal.set(a.aiProfileId, (sourceTotal.get(a.aiProfileId) ?? 0) + windowCost(stored.get(a.id)?.profile));
+  for (const a of onPlans) sourceTotal.set(sourceIdOf(a), (sourceTotal.get(sourceIdOf(a)) ?? 0) + windowCost(stored.get(a.id)?.profile));
   // Calls the logs saw fail (not rate limits), last 8 days: what Hatchabot already counts.
   const from = new Date(now - 8 * DAY).toISOString().slice(0, 13);
   const httpFailed = new Map<string, number>();
   for (const r of store.modelCallHoursForAgents(new Set(live.map((a) => a.id)), from)) httpFailed.set(r.agentId, (httpFailed.get(r.agentId) ?? 0) + r.failed);
   const classes = new Map(store.listAgentClasses(ownerId).map((c) => [c.id, c.name]));
-  const rows = live.map((a) => scoreAgent(a, profileOf(a.aiProfileId), stored.get(a.id), {
-    now, className: a.classId ? classes.get(a.classId) : undefined, sourceTotal: sourceTotal.get(a.aiProfileId), httpFailed8d: httpFailed.get(a.id),
+  // Practice runs in the last 30 days, as the window's figures (HB-1270).
+  const practice = new Map<string, { calls: number; mix: TokenMix; refused?: number }>();
+  for (const r of store.practiceUsageFor(live.map((a) => a.id), new Date(now - 30 * DAY).toISOString())) {
+    if (r.at > new Date(now).toISOString()) continue;
+    const x = practice.get(r.agentId) ?? { calls: 0, mix: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
+    x.calls += r.calls; x.mix.input += r.input; x.mix.output += r.output; x.mix.cacheRead += r.cacheRead; x.mix.cacheWrite += r.cacheWrite;
+    if (r.refused) x.refused = (x.refused ?? 0) + r.refused;
+    practice.set(r.agentId, x);
+  }
+  const rows = live.map((a) => scoreAgent(a, sourceOf(a), stored.get(a.id), {
+    now, className: a.classId ? classes.get(a.classId) : undefined, sourceTotal: sourceTotal.get(sourceIdOf(a)), httpFailed8d: httpFailed.get(a.id),
+    ...(runningOf(a) ? { model: runningOf(a)!.id } : {}),
+    ...(practice.has(a.id) ? { practice: practice.get(a.id)! } : {}),
   })).sort((x, y) => (y.monthlyUSD ?? -1) - (x.monthlyUSD ?? -1) || y.calls - x.calls);
   const shown = rows.slice(0, limit);
   return {
@@ -223,7 +253,7 @@ export function buildScorecard(store: Store, ownerId: string, opts: { now?: numb
     },
     notes: [
       'Last 30 days (days = how much history there is). monthlyUSD = this use for a month on the current model at API list prices; on a Claude plan that is an equivalent, not a bill.',
-      'errors are counts from the transcripts: malformedToolCall = OpenClaw rejected a tool call the model wrote; failedTurns = turns that ended in an error (rateLimited is the source, not the model); toolFailed = tool results that came back as errors.',
+      'errors are counts from the transcripts: malformedToolCall = OpenClaw rejected a tool call the model wrote; failedTurns = turns that ended in an error (rateLimited is the source, not the model); toolFailed = tool results that came back as errors; practiceRefused = skill Practice calls its source refused (a rate limit), none of them its own turns.',
       'Asleep agents show their last reading (readHoursAgo); nothing here wakes them.',
     ],
   };

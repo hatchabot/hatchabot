@@ -125,10 +125,48 @@ fi
 # published (a fresh candidate) — or BUILD_LOCAL=1 — falls through to the
 # local build below.
 PUBLISHED="${HATCHABOT_IMAGE_REGISTRY:-ghcr.io/hatchabot/runtime}"
-# A pulled image, under this script's names.
+# The fleet default, as the app reads it (withTag, runtimeImages.ts): an image
+# named with no tag or digest is its :latest.
+FLEET="${HATCHABOT_IMAGE:-hatchabot-runtime:latest}"
+case "$FLEET" in *@*) ;; *) case "${FLEET##*/}" in *:*) ;; *) FLEET="${FLEET}:latest" ;; esac ;; esac
+# Its repository, as REPO's default above is read.
+FLEET_REPO="$(printf '%s' "$FLEET" | sed -e 's/@[^/]*$//' -e 's/:[^:/]*$//')"
+# A build that moves :latest moves the fleet default only while HATCHABOT_IMAGE
+# names that :latest: one that pins another tag or a digest stays, and the
+# words said "promoted" of a build its agents never follow (HB-1355).
+moved_latest() {
+  if [ "$FLEET" = "${REPO}:latest" ]; then echo "$1 ${REPO}:${IMAGE_TAG} (promoted to :latest)"; return; fi
+  echo "$1 ${REPO}:${IMAGE_TAG} (moved ${REPO}:latest; the fleet default stays ${HATCHABOT_IMAGE:-hatchabot-runtime:latest})"
+  # Built outside the fleet's repository (HATCHABOT_IMAGE_REPO set by hand),
+  # it is tagged into it to be used, as hatchabot upgrade-image says: a line
+  # here with another way made one run say three (review of HB-1386).
+  [ "$REPO" != "$FLEET_REPO" ] || echo "  To make it the fleet default, set HATCHABOT_IMAGE in .env to ${REPO}:${IMAGE_TAG} and restart Hatchabot."
+}
+# A pulled image, under this script's names. Checked first as an image built
+# here is (below, HB-1326): it runs as node and says what it was built from
+# (its build-inputs label), or it takes no tag (HB-1511). The image a release
+# manifest names is built by that release from this Dockerfile, which sets
+# both (the label from v2.191.0 on); the legacy path below is for a release
+# before manifests, which a v2.159.0-or-later release such as this one never
+# reaches (release-manifest.sh refuses one without a manifest).
 use_pulled() {
+  local facts runs_as inputs
+  facts="$(docker image inspect --format '{{.Config.User}}|{{ index .Config.Labels "org.hatchabot.build-inputs" }}' "$1" 2>/dev/null || true)"
+  runs_as="${facts%%|*}"; inputs="${facts#*|}"
+  if [ "$runs_as" != node ]; then
+    echo "✗ The published image $1 would run as '${runs_as:-root}', not node, which the agents' volumes and Claude Code need. Not using it." >&2
+    echo "  Build it from source instead: BUILD_LOCAL=1 ./scripts/build-runtime-image.sh" >&2
+    exit 1
+  fi
+  case "$inputs" in
+    v1\;openclaw=*) ;;
+    *)
+      echo "✗ The published image $1 carries no build-inputs label (org.hatchabot.build-inputs), so no machine could tell what it was built from. Not using it." >&2
+      echo "  Build it from source instead: BUILD_LOCAL=1 ./scripts/build-runtime-image.sh" >&2
+      exit 1 ;;
+  esac
   docker tag "$1" "${REPO}:${IMAGE_TAG}"
-  if [ "${NO_LATEST:-0}" != "1" ]; then docker tag "${REPO}:${IMAGE_TAG}" "${REPO}:latest"; echo "Pulled ${REPO}:${IMAGE_TAG} (promoted to :latest)"; else echo "Pulled ${REPO}:${IMAGE_TAG} (candidate — :latest untouched)"; fi
+  if [ "${NO_LATEST:-0}" != "1" ]; then docker tag "${REPO}:${IMAGE_TAG}" "${REPO}:latest"; moved_latest Pulled; else echo "Pulled ${REPO}:${IMAGE_TAG} (candidate — :latest untouched)"; fi
   exit 0
 }
 # Legacy: a release made before release manifests (before v2.159.0). Its
@@ -310,14 +348,12 @@ docker build \
   -f docker/Dockerfile.runtime \
   docker/
 
-# Trust, but verify: the image must actually run the version it is named for —
-# one word of its version line, exactly. Found anywhere in the line, OpenClaw
-# 2026.9.80 passed for 2026.9.8 (audit, 2026-10-29).
-RUNS="$(docker run --rm --network none --entrypoint openclaw "${REPO}:${IMAGE_TAG}" --version 2>/dev/null | sed -n 1p || true)"
-if ! printf '%s\n' "$RUNS" | tr -s ' \t' '\n\n' | sed -e 's/^[(v]*//' -e 's/[),;:]*$//' | grep -qxF -- "${OPENCLAW_VERSION}"; then
-  echo "✗ ${REPO}:${IMAGE_TAG} runs '${RUNS:-nothing}', not OpenClaw ${OPENCLAW_VERSION}. Removing it." >&2
+# A built image that is not used: removed, and the tag given back to the
+# image it named before this build, if any. The same image as before the
+# build is what was there: left as it was.
+not_used() {
+  echo "✗ $1 Removing it." >&2
   NEW_ID="$(docker image inspect --format '{{.Id}}' "${REPO}:${IMAGE_TAG}" 2>/dev/null || true)"
-  # The same image as before the build is what was there: left as it was.
   if [ -z "$PREV_ID" ] || [ "$NEW_ID" != "$PREV_ID" ]; then
     docker rmi "${REPO}:${IMAGE_TAG}" >/dev/null 2>&1 || true
     if [ -n "$PREV_ID" ] && docker tag "$PREV_ID" "${REPO}:${IMAGE_TAG}" >/dev/null 2>&1; then
@@ -325,11 +361,34 @@ if ! printf '%s\n' "$RUNS" | tr -s ' \t' '\n\n' | sed -e 's/^[(v]*//' -e 's/[),;
     fi
   fi
   exit 1
+}
+
+# Trust, but verify: the image must actually run the version it is named for —
+# one word of its version line, exactly. Found anywhere in the line, OpenClaw
+# 2026.9.80 passed for 2026.9.8 (audit, 2026-10-29).
+RUNS="$(docker run --rm --network none --entrypoint openclaw "${REPO}:${IMAGE_TAG}" --version 2>/dev/null | sed -n 1p || true)"
+if ! printf '%s\n' "$RUNS" | tr -s ' \t' '\n\n' | sed -e 's/^[(v]*//' -e 's/[),;:]*$//' | grep -qxF -- "${OPENCLAW_VERSION}"; then
+  not_used "${REPO}:${IMAGE_TAG} runs '${RUNS:-nothing}', not OpenClaw ${OPENCLAW_VERSION}."
 fi
+# And as a derived image's and a recipe's build are checked (useBuiltImage,
+# HB-1326): it runs as node, which the agents' volumes and Claude Code need,
+# and says what it was built from (its build-inputs label), which another
+# machine matches it by. This Dockerfile sets both; one edited so it does not
+# made an image every agent on it would fail with, or one no other machine
+# could tell from the standard image of its OpenClaw.
+FACTS="$(docker image inspect --format '{{.Config.User}}|{{ index .Config.Labels "org.hatchabot.build-inputs" }}' "${REPO}:${IMAGE_TAG}" 2>/dev/null || true)"
+RUNS_AS="${FACTS%%|*}"; INPUTS="${FACTS#*|}"
+if [ "$RUNS_AS" != node ]; then
+  not_used "${REPO}:${IMAGE_TAG} would run as '${RUNS_AS:-root}', not node: docker/Dockerfile.runtime must end with USER node."
+fi
+case "$INPUTS" in
+  v1\;openclaw=*) ;;
+  *) not_used "${REPO}:${IMAGE_TAG} carries no build-inputs label (org.hatchabot.build-inputs), so no machine could tell what it was built from: docker/Dockerfile.runtime must set it." ;;
+esac
 
 if [ "${NO_LATEST:-0}" != "1" ]; then
   docker tag "${REPO}:${IMAGE_TAG}" "${REPO}:latest"
-  echo "Built ${REPO}:${IMAGE_TAG} (promoted to :latest)"
+  moved_latest Built
 else
   echo "Built ${REPO}:${IMAGE_TAG} (candidate — :latest untouched)"
 fi

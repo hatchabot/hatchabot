@@ -193,9 +193,11 @@ describe('open sockets do not outlive public access', () => {
     expect(state.got).toContain('101');
     const done = await Promise.race([h.app.publicAccess!.stopListener().then(() => 'stopped'), sleep(3000).then(() => 'hung')]);
     expect(done).toBe('stopped');
+    // Nothing answers on its port. Asked at once: the listener held the port until now, and once it is
+    // free another test file's app can choose it and answer there (HB-1495).
+    await expect(fetch(`http://127.0.0.1:${h.port}/healthz`)).rejects.toThrow();
     await sleep(100);
     expect(state.closed).toBe(true);
-    await expect(fetch(`http://127.0.0.1:${h.port}/healthz`)).rejects.toThrow();
   });
 
   it('a sign-in used only for a socket is recorded and announced like any other', async () => {

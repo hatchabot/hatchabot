@@ -106,7 +106,54 @@ KEY="$(printf %s "$DIR" | cksum | cut -d' ' -f1)"
 # back. Left for the next hand upgrade, the install stayed half changed under a
 # running timer (HB-0372), or pinned to a release it never got, with this timer
 # quiet for good (HB-0428).
+# That record, and the release it names (`from`). A kept one (kept_record, a
+# copy of upgrade-helpers.sh's) is of a release put back whose restart did
+# not come up: no upgrade was cut off, and past the cap of restarts it is
+# only looked at (review of HB-1456). Said so wherever the tick
+# would speak of an upgrade cut off (HB-1468).
+cut_rec() { if [ -f .swapping ]; then echo .swapping; else echo "$STATE/upgrade-$KEY.from"; fi; }
+kept_record() { grep -qx back "$1" 2>/dev/null || grep -q '^tries ' "$1" 2>/dev/null; }
+put_back() { local r; r="$(sed -n 's/^from //p' "$(cut_rec)" 2>/dev/null | sed -n 1p || true)"; echo "${r:-$1}"; }
 PINNED=""
+# An upgrade cut off: a bundle swap (.swapping), or a git install's record
+# beside the lock. A pin's record alone is no cut: that upgrade.sh sees
+# through, or takes back.
+cut_due() { [ -f .swapping ] || [ -f "$STATE/upgrade-$KEY.from" ]; }
+# No cut left to repair: the repair's clock (below; FILE.repair beside the
+# try record, scripts/follow-tries.sh) goes with it, here, before a tick
+# that is up to date, pinned or set aside ends without reading that record.
+# Left, the failures of a cut repaired by hand made the next cut's first
+# failed repair wait as long as the last one's (review of HB-1431).
+cut_due || rm -f "$STATE/follow-channel-tries-$KEY.repair" 2>/dev/null || true
+# The repair's own clock (HB-1431, scripts/follow-tries.sh): an upgrade.sh
+# whose repair of an upgrade cut off failed before the release was touched
+# (7) is no try of the release; the next repair waits, doubling to an hour,
+# wherever it runs. repair_clock reads it, with stand-ins for a helper from
+# before it (or none), under which such a repair runs on every tick, as
+# before, and is said to (REPAIR_EVERY_TICK). repair_ended RC: after an
+# upgrade.sh that ended RC, one more failed repair (7), said; with no cut
+# left, the clock goes.
+REPAIR_EVERY_TICK=""
+repair_clock() {
+  declare -F repair_open repair_waiting note_repair forget_repair >/dev/null || {
+    REPAIR_EVERY_TICK=1
+    repair_open() { R_COUNT=0; R_LAST=0; }
+    repair_waiting() { return 1; }
+    note_repair() { :; }
+    forget_repair() { :; }
+  }
+  TRIES="$STATE/follow-channel-tries-$KEY"; repair_open
+}
+repair_ended() {
+  if [ "$1" = 7 ]; then
+    note_repair
+    if [ -n "$REPAIR_EVERY_TICK" ]; then
+      echo "The repair did not go through (above)${TARGET:+, and $TARGET was not touched}: it is tried again on the next tick.${TARGET:+ This does not count against $TARGET.}"
+    else
+      echo "The repair did not go through (above)${TARGET:+, and $TARGET was not touched}: it is tried again later, less and less often (an hour apart at most).${TARGET:+ This does not count against $TARGET.}"
+    fi
+  elif ! cut_due; then forget_repair; fi
+}
 repair_due() { [ -f .swapping ] || [ -f "$STATE/upgrade-$KEY.from" ] || { [ -n "$PINNED" ] && [ -f "$STATE/upgrade-$KEY.pin" ]; }; }
 case "$REMEMBERED" in v[0-9]*)
   [ -f .swapping ] || [ -f "$STATE/upgrade-$KEY.from" ] || [ -f "$STATE/upgrade-$KEY.pin" ] || exit 0
@@ -126,11 +173,18 @@ if [ -z "$TARGET" ]; then
   # with the service half changed meanwhile (HB-0547). The release waits for
   # a tick that can find it, and no try is counted against it.
   repair_due || exit 0
-  echo "Could not find which release $CHANNEL names now, so only the upgrade that was cut off is repaired."
+  # A repair that failed (7) waits on its own clock, which needs no release (HB-1431).
+  { [ -r scripts/follow-tries.sh ] && . scripts/follow-tries.sh; } 2>/dev/null || true
+  mkdir -p "$STATE" 2>/dev/null || true
+  repair_clock
+  ! repair_waiting || exit 0
+  if kept_record "$(cut_rec)"; then echo "Could not find which release $CHANNEL names now, so only $(put_back 'the release put back'), which was not up, is looked at again."
+  else echo "Could not find which release $CHANNEL names now, so only the upgrade that was cut off is repaired."; fi
   # As below: 4 (another upgrade holds the lock, and repairs it) is routine,
   # 0; anything else that failed, a full disk (5) too, 1, a failed unit to
-  # see. Nothing is counted here (ninth review).
-  rc=0; HATCHABOT_UPGRADE_BY_TIMER=1 HATCHABOT_UPGRADE_REPAIR_ONLY=1 bash "$DIR/scripts/upgrade.sh" "$CHANNEL" || rc=$?
+  # see. Nothing is counted against a release here (ninth review).
+  rc=0; HATCHABOT_UPGRADE_BY_TIMER=1 HATCHABOT_UPGRADE_REPAIR_ONLY=1 HATCHABOT_FOLLOW_KNOWS_7=1 bash "$DIR/scripts/upgrade.sh" "$CHANNEL" || rc=$?
+  repair_ended "$rc"
   case "$rc" in 0|4) exit 0 ;; *) exit 1 ;; esac
 fi
 fi
@@ -164,21 +218,16 @@ if ! { [ -r scripts/follow-tries.sh ] && . scripts/follow-tries.sh && declare -F
   forget_tries() { :; }
 fi
 tries_open "$TRIES" "hatchabot-follow-channel-tries-$KEY" "$TARGET"
-# With an upgrade cut off part-way, on a tick the release is not due (set
-# aside, or within its wait) upgrade.sh repairs it and does nothing more, as
-# when the release cannot be looked up; nothing is counted. A full upgrade
-# repairs it too, so it ran in its place on every tick: one that kept
+repair_clock
+# With an upgrade cut off part-way (cut_due), on a tick the release is not
+# due (set aside, or within its wait) upgrade.sh repairs it and does nothing
+# more, as when the release cannot be looked up; nothing is counted. A full
+# upgrade repairs it too, so it ran in its place on every tick: one that kept
 # failing with the record left ran every ten minutes, and set aside was
-# tried again on the next (review of HB-0637). A pin's record alone is no
-# cut: that upgrade.sh sees through, or takes back.
-cut_due() { [ -f .swapping ] || [ -f "$STATE/upgrade-$KEY.from" ]; }
-# That record, and the release it names (`from`). A kept one (kept_record, a
-# copy of upgrade-helpers.sh's) is of a release put back whose restart did
-# not come up: no upgrade was cut off, and past the cap of restarts it is
-# only looked at (review of HB-1456).
-cut_rec() { if [ -f .swapping ]; then echo .swapping; else echo "$STATE/upgrade-$KEY.from"; fi; }
-kept_record() { grep -qx back "$1" 2>/dev/null || grep -q '^tries ' "$1" 2>/dev/null; }
-put_back() { local r; r="$(sed -n 's/^from //p' "$(cut_rec)" 2>/dev/null | sed -n 1p || true)"; echo "${r:-$1}"; }
+# tried again on the next (review of HB-0637). A repair that failed (7)
+# waits on its own clock, the full upgrade too, which would run it first:
+# counted against the release, a repair that kept failing set it aside for
+# good (HB-1431).
 # disk_waiting: 0 while the wait after the disk's last failure lasts (an
 # hour at most), from that failure (T_DLAST), as follow-latest.sh has it.
 # A repair the disk stopped (5) is counted the disk's (note_try 2), not a
@@ -188,14 +237,19 @@ disk_waiting() { [ "$T_DISK" -gt 0 ] && ( T_COUNT="$T_DISK"; T_LAST="${T_DLAST:-
 TAG_HELD=""
 if [ "$(cat "$FAILED" 2>/dev/null)" = "$TARGET" ]; then TAG_HELD="was set aside, so it is not tried again; the channel's next release will be"
 elif tries_waiting; then TAG_HELD="is tried again later"; fi
+! cut_due || ! repair_waiting || exit 0
 if [ -n "$TAG_HELD" ] && cut_due; then
   ! disk_waiting || exit 0
-  if kept_record "$(cut_rec)"; then echo "$TARGET $TAG_HELD. This tick looks again at $(put_back 'the release put back'), which was not up, and only that."
+  REPAIRING="Repairing the upgrade that was cut off"
+  if kept_record "$(cut_rec)"; then
+    REPAIRING="Looking again at $(put_back 'the release put back')"
+    echo "$TARGET $TAG_HELD. This tick looks again at $(put_back 'the release put back'), which was not up, and only that."
   else echo "$TARGET $TAG_HELD. This tick repairs the upgrade that was cut off, and only that."; fi
-  rc=0; HATCHABOT_UPGRADE_BY_TIMER=1 HATCHABOT_UPGRADE_REPAIR_ONLY=1 bash "$DIR/scripts/upgrade.sh" "$CHANNEL" || rc=$?
+  rc=0; HATCHABOT_UPGRADE_BY_TIMER=1 HATCHABOT_UPGRADE_REPAIR_ONLY=1 HATCHABOT_FOLLOW_KNOWS_7=1 bash "$DIR/scripts/upgrade.sh" "$CHANNEL" || rc=$?
+  repair_ended "$rc"
   if [ "$rc" = 5 ]; then
     note_try 2
-    echo "Repairing the upgrade that was cut off could not go ahead on this machine's disk (see above); it will be tried again later. This does not count against $TARGET."
+    echo "$REPAIRING could not go ahead on this machine's disk (see above); it will be tried again later. This does not count against $TARGET."
   fi
   case "$rc" in 0|4) exit 0 ;; *) exit 1 ;; esac
 fi
@@ -223,10 +277,11 @@ set_aside() {
 # HATCHABOT_UPGRADE_TARGET: the release resolved above, not the channel again —
 # a channel that moved in between had the release upgrade.sh tried fail, this
 # one set aside, and the next tick try the failed one again (audit #042).
-if HATCHABOT_UPGRADE_BY_TIMER=1 HATCHABOT_UPGRADE_TARGET="$TARGET" bash "$DIR/scripts/upgrade.sh" "$CHANNEL"; then
-  rm -f "$FAILED"; forget_tries
+if HATCHABOT_UPGRADE_BY_TIMER=1 HATCHABOT_UPGRADE_TARGET="$TARGET" HATCHABOT_FOLLOW_KNOWS_7=1 bash "$DIR/scripts/upgrade.sh" "$CHANNEL"; then
+  rm -f "$FAILED"; forget_tries; forget_repair
 else
   rc=$?
+  repair_ended "$rc"
   # Exit 1 = the release did not start and was rolled back: set aside at once.
   # 3 = it did not complete (the install step, the network): tried again, less
   # and less often. 5 = this machine's disk (full, or a folder it cannot
@@ -239,6 +294,8 @@ else
   # had nothing to upgrade it to (the channel names it, or an older one):
   # nothing was tried, so nothing is counted; it ends 1, a failed unit to see
   # (review of HB-1456). Named as the record names it: TARGET may be older.
+  # 7 = its repair of the upgrade cut off before it failed, before TARGET was
+  # touched: the repair's own clock (repair_ended), nothing counted (HB-1431).
   # But a pin upgrade.sh took back is not tried again: the channel is, next tick.
   if [ "$rc" = 4 ]; then
     echo "Another upgrade of $DIR is running, or this machine's channel changed while this tick waited (above): it leaves $TARGET to the next tick."
@@ -247,6 +304,8 @@ else
     echo "$(put_back 'The release put back') is on this machine but not up (above), and there was nothing to upgrade it to. This does not count against $TARGET."
   elif [ "$rc" != 1 ] && [ -n "$PINNED" ] && [ "$(remembered)" != "$PINNED" ]; then
     echo "Upgrading to $PINNED did not complete (see above), so this machine is no longer pinned to it."
+  elif [ "$rc" = 7 ]; then
+    :
   elif [ "$rc" = 1 ]; then
     set_aside "$TARGET" "Upgrading to $TARGET failed and was rolled back." "It will not be retried; the channel's next release will be."
   elif [ "$rc" = 3 ] && [ $((T_COUNT + 1 - T_DISK)) -ge "$MAX_TRIES" ]; then

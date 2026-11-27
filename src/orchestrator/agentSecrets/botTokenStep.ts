@@ -50,10 +50,13 @@ export interface BotTokenStepDeps {
   channel: Pick<CompositeTelegramProvisioner, 'heldBot' | 'discardPending' | 'submitToken' | 'pool'>;
   /** Set the agent up, now or when a setup slot is free (the lifecycle's). */
   provisionWhenFree: (agentId: string) => void;
+  /** Telegram's Bot API, as the routes hand it in (the global fetch without one; a test's stand-in with one; HB-1447). */
+  telegramFetch?: typeof fetch;
 }
 
 export function createBotTokenStep(deps: BotTokenStepDeps): BotTokenStep {
   const { store, secrets, trace, channel, provisionWhenFree } = deps;
+  const telegramFetch: typeof fetch = (url, init) => (deps.telegramFetch ?? fetch)(url, init);
 
   /**
    * The bot this agent holds for setup, or was set up with, when a post
@@ -127,7 +130,7 @@ export function createBotTokenStep(deps: BotTokenStepDeps): BotTokenStep {
     let checked: string | undefined;
     if (token) {
       if (caller.throttled()) return refused(429, TOKEN_CHECK_THROTTLED);
-      try { checked = await verifyBotToken(token); }
+      try { checked = await verifyBotToken(token, telegramFetch); }
       catch (err) {
         if (err instanceof InvalidBotTokenError) { caller.noteFailure(); return refused(400, err.userMessage); }
         throw err;
@@ -153,26 +156,29 @@ export function createBotTokenStep(deps: BotTokenStepDeps): BotTokenStep {
       // messages silently rather than failing.
       // Telegram off for the whole instance is not the account off: switched
       // back on there, it polls this bot again (HB-1031). Said so, and how.
+      // The account by its key in OpenClaw's config, which is no @handle ("default", say), and its
+      // place there in words that hold for any key (one with a dot read as a deeper path) (HB-1300).
+      const account = `Telegram account ${JSON.stringify(existing.accountId)}`;
       if (existing.enabledInSource && existing.channelOffInSource) {
         return refused(409,
           `Telegram is switched off in your hand-built instance's config, but its account "${existing.accountId}" ` +
           `for "${existing.sourceAgentId}" is still on: switched back on there, Telegram would poll this bot in both copies. ` +
-          `Switch that account off too (enabled: false under channels.telegram.accounts.${existing.accountId}), then try again.`,
+          `Switch that account off too (in its openclaw.json, under channels.telegram.accounts, set "enabled": false on the account ${JSON.stringify(existing.accountId)}), then try again.`,
         );
       }
       if (existing.enabledInSource) {
         return refused(409,
-          `@${existing.accountId} is still enabled for "${existing.sourceAgentId}" in your ` +
+          `Its bot (${account}) is still enabled for "${existing.sourceAgentId}" in your ` +
           `hand-built instance. Turn it off there first, or both copies will fight over ` +
           `every message.`,
         );
       }
-      if ((await botPollState(existing.botToken)) === 'busy') {
+      if ((await botPollState(existing.botToken, telegramFetch)) === 'busy') {
         return refused(409,
-          `Something is still polling @${existing.accountId}. Stop it, then try again.`,
+          `Something is still polling its bot (${account}). Stop it, then try again.`,
         );
       }
-      try { checked = await verifyBotToken(existing.botToken); }
+      try { checked = await verifyBotToken(existing.botToken, telegramFetch); }
       catch (err) {
         if (err instanceof InvalidBotTokenError) return refused(400, err.userMessage);
         throw err;

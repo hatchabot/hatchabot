@@ -93,12 +93,6 @@ function agentChannelLinks(a) {
     ...((a?.otherChannels ?? []).filter((c) => ok(c.deepLink) && V2_MARK_SVG[c.kind]).map((c) => ({ kind: c.kind, url: c.deepLink }))),
   ];
 }
-function renderConsoleChannels(a) {
-  const box = $('consoleChans');
-  if (!box) return;
-  box.innerHTML = agentChannelLinks(a).map((l) =>
-    `<button class="cbtn" title="Open this agent in ${V2_CHAN_LABEL[l.kind]}" aria-label="Open this agent in ${V2_CHAN_LABEL[l.kind]}" ${onAction('click', 'openInNewTab', [`${l.url ?? ''}`])}>${chanIcon(l.kind)}</button>`).join('');
-}
 /** Every chat app that reaches this agent, Telegram first. */
 function v2ChannelKinds(a) {
   return [...(a.botUsername ? ['telegram'] : []), ...(a.otherChannels ?? []).map(c => c.kind).filter(k => V2_MARK_SVG[k])];
@@ -429,6 +423,7 @@ function renderV2() {
   if (!agentsLoaded) return;
   v2MaybeAutoIcons();
   v2RenderHub();
+  v2PaintMachine(); // with no Hatchabot agent's tile, the machine line carries the machine's alerts (HB-1463)
   renderV2Joins(); // people knocking: refreshed with the pairing poll, not only with proposals
   v2RenderWho();
   v2RefreshSheet();

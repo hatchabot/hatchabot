@@ -882,21 +882,21 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** before v2.168.0 the deploy always asked `127.0.0.1` and took the first `PORT` line, while the service listens at its bind address and uses the last line. A healthy release failed the check, was rolled back, and follow-latest set it aside.
 - **Fix:** upgrade (deploy the next release by hand: `scripts/deploy-release.sh vX.Y.Z`), then `rm ~/.local/state/hatchabot/follow-latest-failed`. Keeping one line per setting in `.env` avoids the second cause.
 - **Fixed in:** `v2.168.0`
-- **Code:** `scripts/deploy-release.sh` — `envval`, `PROBE_HOST`; `scripts/restart.sh` — `LISTENER`
+- **Code:** `scripts/deploy-release.sh` — `serving_wait`, `PROBE_HOST`; `scripts/restart.sh` — `LISTENER`
 
 ### A restart (or a deploy) says the service "isn't answering at http://localhost:8080", though `.env` sets another port with spaces around the =
 - **Check:** `.env` has a line such as `PORT = 9137` (spaces around the `=`, or before the name); `curl -s http://localhost:9137/healthz` answers.
 - **Cause:** systemd reads `PORT = 9137` as `PORT=9137`, but the restart, deploy, setup and first-run-link scripts looked only for `PORT=` at the start of a line. They probed the default port, waited a minute, and reported the service down; a deploy rolled back a healthy release.
 - **Fix:** upgrade, or write the line as `PORT=9137`. On Linux the scripts now read spaces around the `=`, as systemd does. On a Mac the service's launchd job reads `.env` with bash, where only `PORT=9137` sets the port (`PORT = 9137` is a command and sets nothing, so the service listens on 8080): the scripts read it that way there, and the line must be `PORT=9137` for the port to change.
 - **Fixed in:** `v2.171.0`
-- **Code:** `scripts/restart.sh` — `envval`, `envlines`; `scripts/deploy-release.sh` — `envval`; `scripts/first-run-link.sh` — `envval`, `envlines`; `scripts/setup-host.sh`
+- **Code:** `scripts/restart.sh` — `env_named`, `LISTENER`; `scripts/deploy-release.sh` — `serving_wait`; `scripts/first-run-link.sh` — `env_named`; `scripts/setup-host.sh` — `env_named`, `service_port`
 
 ### After an upgrade or deploy was cut off, the next one failed and left no `node_modules` at all ("Cannot find module …")
 - **Check:** `ls` in the install shows neither `node_modules` nor `node_modules.prev`; the log of the run before says it rolled back after a failed install.
 - **Cause:** a run killed (or a power cut) right after it moved `node_modules` aside leaves `node_modules.prev` as the only working copy. Before v2.168.0 the next `scripts/upgrade.sh` or `scripts/deploy-release.sh` deleted it as a leftover, so when its own install failed there was nothing to roll back to. Now it is put back first.
 - **Fix:** `./scripts/ensure-deps.sh` in the install (it needs the network), then `./scripts/restart.sh`. With a `node_modules.prev` still there and no `node_modules`, `mv node_modules.prev node_modules` brings the old ones back at once.
 - **Fixed in:** `v2.168.0`
-- **Code:** `scripts/upgrade.sh` — `restore_deps`; `scripts/deploy-release.sh` — `restore_deps`
+- **Code:** `scripts/upgrade-helpers.sh` — `restore_deps`; `scripts/upgrade.sh` — `rollback`; `scripts/deploy-release.sh` — `rollback`
 
 ### A bundle install is broken after an upgrade was cut off, and every upgrade since says "Already on vX.Y.Z"
 - **Check:** the install has `BUNDLE.json` and no `.git`, and a `.prev-release` folder; some top-level folders (`scripts`, `.node`, `node_modules`, …) are missing or from the older release (`cat VERSION` against `BUNDLE.json`'s `tag`).
@@ -1818,7 +1818,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 ### An agent's AI source is gone: switched to a source while it was being deleted
 - **Check:** the agent's page names no AI source, or a rebuild fails because its source cannot be found, and the source it was switched to was deleted at about the same time.
 - **Cause:** deleting a source checked that no agent used it, then deleted its key, and only then the source. An agent switched to it during the key's deletion kept a source that no longer existed. The other way round, a switch (an agent's AI source, Move agents here, a class that brings its source) or an import (Restore, a move from another Hatchabot) that was checking the agent's runtime, applying its memory limit or reading the file when the source went also went ahead.
-- **Fix:** switch the agent to another source. Since the fix, the source is gone the moment it is found unused, and a switch to it is refused ("That AI source was deleted meanwhile") with nothing changed. A switch (an agent's AI source, Move agents here, a class) holds the source until the switch is stored, even if the page that asked was closed; from then on the agent is on it, and a delete says it is in use. While it does, for ten minutes at most, deleting the source is refused with "An agent is switching to it; try again in a moment.", or "Still in use by …" when an agent already uses it. An agent's settings saved with a source switch are stored all at once: when the switch is refused or the save fails, none of them is kept, nothing follows from them or is logged for them, and a memory limit already given to its container is put back as stored. An import is not held, since a large one takes minutes: one whose source is gone by the time its agent is written is refused (409, "That AI source was deleted meanwhile") with no agent made, and so is a template. An agent deleted during its switch is said to be deleted ("It was deleted."), not its source, and one deleted while any of its settings were being saved has none of them stored. A source switch, a class or Move agents here judges each agent as it is when it writes it: one busy by then is skipped as busy, and one moved to a runner meanwhile is not put on this machine's login (an agent's own switch is refused, as it would have been up front).
+- **Fix:** switch the agent to another source. Since the fix, the source is gone the moment it is found unused, and a switch to it is refused ("That AI source was deleted meanwhile") with nothing changed. A switch (an agent's AI source, Move agents here, a class) holds the source until the switch is stored, even if the page that asked was closed; from then on the agent is on it, and a delete says it is in use. While it does, however long the switch takes (until `v2.193.0`, ten minutes at most), deleting the source is refused with "An agent is switching to it; try again in a moment.", or "Still in use by …" when an agent already uses it. An agent's settings saved with a source switch are stored all at once: when the switch is refused or the save fails, none of them is kept, nothing follows from them or is logged for them, and a memory limit already given to its container is put back as stored. An import is not held, since a large one takes minutes: one whose source is gone by the time its agent is written is refused (409, "That AI source was deleted meanwhile") with no agent made, and so is a template. An agent deleted during its switch is said to be deleted ("It was deleted."), not its source, and one deleted while any of its settings were being saved has none of them stored. A source switch, a class or Move agents here judges each agent as it is when it writes it: one busy by then is skipped as busy, and one moved to a runner meanwhile is not put on this machine's login (an agent's own switch is refused, as it would have been up front).
 - **Fixed in:** `v2.178.0`
 - **Code:** `src/api/usage/aiSourceRoutes.ts` — `'/v1/ai-profiles/:id'` (DELETE); `src/api/agents/lifecycleRoutes.ts` — `'/v1/agents/:id'` (PATCH); `src/orchestrator/lifecycle/agentEdits.ts` — `withSourceHold`; `src/api/data/transferRoutes.ts` — `'/v1/agents/restore'`, `'/v1/agents/import'`; `src/orchestrator/sources/aiSources.ts` — `switchAgentToSource`; `src/orchestrator/lifecycle/classChanges.ts` — `applyClassToAgent`; `src/orchestrator/lifecycle/memoryLimits.ts` — `applyCurrentLimits`; `src/orchestrator/lifecycle/sourceHolds.ts` — `holdSource`, `withSourceHold`; `src/store/store.ts` — `setAgentAIProfile`, `insertAgentOnSource`, `SourceGoneError`; `src/orchestrator/transfer/transfer.ts` — `importAgent`; `src/orchestrator/transfer/template.ts` — `importTemplate`; `src/api/data/transferRoutes.ts` — `'/v1/agents/restore'`
 
@@ -2758,7 +2758,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 ### Push definition changed a child whose restore was interrupted ("is being put right")
 - **Check:** after a restart, a child's page says its restore or move was interrupted and is being put right (Alerts), yet a Push definition from its master reported it pushed; the child's files are then a mix of the restore's and the master's, and its setup values changed under the recovery. Only before v2.166.0.
 - **Cause:** the push checked that each child was RUNNING and not busy in memory; after a restart the in-memory busy flag is empty, while the operation on disk still protects the half-written files. Every other file-writing action also asks the operation on disk.
-- **Fix:** upgrade. A child under an unfinished operation is now refused in the operation's words and named in the push's result while the others are pushed; a master under one is refused up front. Let the operation finish (or choose on its page under Alerts), then push again. For a child already written into, restore its `pre-params` snapshot once the operation is over.
+- **Fix:** upgrade. A child under an unfinished operation is now refused in the operation's words and named in the push's result while the others are pushed; a master under one is refused up front. Let the operation finish (or choose on its page under Alerts), then push again. For a child already written into, restore its snapshot "before its setup values or definition changed" (one taken on v2.191.0 or older is listed as "manual snapshot", without "kept", before v2.193.0) once the operation is over.
 - **Fixed in:** `v2.166.0`
 - **Code:** `src/api/routes.ts` — `busyNow`; `src/api/agents/definitionRoutes.ts` — `/v1/agents/:id/push-definition`; `src/orchestrator/lifecycle/operations.ts` — `operationRefusal`
 
@@ -2773,7 +2773,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 ### Setup values: Apply says the write failed, and SOUL.md has the new values while AGENTS.md and the stored values have the old
 - **Check:** the agent runs on a runner (or its machine's Docker stopped answering) at the moment of the Apply.
 - **Cause:** a file whose write failed with an error was put back, but a write that broke off (the connection lost mid-call) skipped the putting back.
-- **Fix:** upgrade, then Apply again, or restore the `pre-params` snapshot. Since this release both kinds of failure put back what was written, including a file that landed just before the connection was lost (in a Push definition to a child too); a file that cannot be put back is named, with the snapshot to restore.
+- **Fix:** upgrade, then Apply again, or restore the snapshot "before its setup values or definition changed" (one taken on v2.191.0 or older is listed as "manual snapshot", without "kept", before v2.193.0). Since this release both kinds of failure put back what was written, including a file that landed just before the connection was lost (in a Push definition to a child too); a file that cannot be put back is named, with the snapshot to restore.
 - **Fixed in:** `v2.171.0`
 - **Code:** `src/api/agents/definitionRoutes.ts` — `'/v1/agents/:id/params'`, `'/v1/agents/:id/push-definition'`
 
@@ -5017,7 +5017,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Code:** `src/orchestrator/backups/backupFiles.ts` — `pruneBackup`
 
 ### A restore drill says "passed", or a backup set "complete", though it was stopped part-way
-- **Check:** the drill hit its 90-minute limit, or the service restarted (a deploy, an upgrade, `hatchabot restart`) or the machine shut down during a drill or a backup; yet Settings → Backups shows that drill passed, or the set complete, and volumes after the stop were never read or captured.
+- **Check:** the drill hit its 90-minute limit, or the service restarted (a deploy, an upgrade, `./scripts/restart.sh`) or the machine shut down during a drill or a backup; yet Settings → Backups shows that drill passed, or the set complete, and volumes after the stop were never read or captured.
 - **Cause:** both scripts write their verdict in an EXIT trap. Stopped by a signal, bash ran that trap with the last finished command's status, 0, so the verdict was "passed" or "complete".
 - **Fix:** since the fix a signal ends them through an exit of 130, 143 or 129, so a stopped drill is recorded failed and a stopped set incomplete. For a set recorded before, run Back up now; for a drill, run a drill again.
 - **Fixed in:** `v2.171.0`
@@ -5475,7 +5475,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 ### Setup values failed with "Write failed", and now SOUL.md has the new answer while AGENTS.md and the values panel have the old one
 - **Check:** the agent's Setup values edit answered "Write failed" (a full disk, a runner that went to sleep part way); its SOUL.md shows the new answer, its AGENTS.md (or the Setup values panel) the old one.
 - **Cause:** before v2.168.0 Setup values wrote SOUL.md, then AGENTS.md, and stopped at the first that failed: what was already written stayed, while the stored values were not changed.
-- **Fix:** upgrade: a file that cannot be written puts back the ones already written, and the error says "Nothing was changed" (or names a file it could not put back: restore the agent's `pre-params` snapshot). On an older version, apply the values again once the disk or machine is fine, or restore the `pre-params` snapshot.
+- **Fix:** upgrade: a file that cannot be written puts back the ones already written, and the error says "Nothing was changed" (or names a file it could not put back: restore the agent's snapshot "before its setup values or definition changed" (one taken on v2.191.0 or older is listed as "manual snapshot", without "kept", before v2.193.0)). On an older version, apply the values again once the disk or machine is fine, or restore that snapshot.
 - **Fixed in:** `v2.168.0`
 - **Code:** `src/api/agents/definitionRoutes.ts` — `'/v1/agents/:id/params'`
 
@@ -6467,7 +6467,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 ### The installer's "Open Hatchabot" link reads http://…:"8123" and does not open
 - **Check:** `.env` has the port in quotes (`PORT="8123"` or `PORT='8123'`) or with a comment after it; the link (and `hbt` without `--url`) uses the port with its quotes.
 - **Cause:** `first-run-link.sh` and `setup-host.sh` took everything after `PORT=` as the port, quotes and comment included. The service itself reads the quoted value fine.
-- **Fix:** open `http://<this machine>:8123` by hand, or write the line as `PORT=8123`. Since the fix, both scripts drop the quotes and a trailing comment, as `deploy-release.sh` does.
+- **Fix:** open `http://<this machine>:8123` by hand, or write the line as `PORT=8123`. Since the fix, both scripts drop the quotes. Since `v2.193.0` they read the port as the service does: on Linux a comment after the value is part of it, as systemd keeps it, so the service listens on 8080 and the link says so (see "A setting differs between the Linux service and restart.sh"); on a Mac the comment is dropped, as there.
 - **Fixed in:** `v2.164.2`
 - **Code:** `scripts/first-run-link.sh`, `scripts/setup-host.sh`
 
@@ -6476,7 +6476,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** `first-run-link.sh` always asked `http://127.0.0.1` and printed `http://` links, so it never reached a native-TLS listener or one bound to a LAN address, and could not tell that the first account needed its setup code.
 - **Fix:** open `https://<this machine or bind address>:<PORT>` by hand; the setup code is in `journalctl --user -u hatchabot | grep 'first-run setup code'`. Since the fix, the link asks the listener as `restart.sh` does: https when it serves TLS, at the bind address when it is one host, and a loopback-only listener gets no LAN link.
 - **Fixed in:** `v2.171.0`
-- **Code:** `scripts/first-run-link.sh` — `envval`, `PROBE_HOST`
+- **Code:** `scripts/first-run-link.sh` — `env_named`, `PROBE_HOST`
 
 ### The service log says ".env … would be read in another order — left as it was" or "has a value on more than one line"
 - **Check:** `journalctl --user -u hatchabot | grep -i 'left as it was'`; the `.env` has a value with `$` outside single quotes (`PORT=$MY_PORT`), or an `export NAME="…` value that runs over several lines.
@@ -6649,7 +6649,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 ### A failed push left a child with the master's new SOUL.md and its old AGENTS.md
 - **Check:** the push result names the child with "write failed", and the child's SOUL.md is the new text while AGENTS.md is the old.
 - **Cause:** the push wrote the two files one after the other, and nothing undid the first when the second failed.
-- **Fix:** push again, or restore the child's `pre-params` snapshot. Since the fix, a failed push puts back what it wrote. If that fails too, the result says to restore the snapshot.
+- **Fix:** push again, or restore the child's snapshot "before its setup values or definition changed" (one taken on v2.191.0 or older is listed as "manual snapshot", without "kept", before v2.193.0). Since the fix, a failed push puts back what it wrote. If that fails too, the result says to restore the snapshot.
 - **Fixed in:** `v2.164.2`
 - **Code:** `src/api/agents/definitionRoutes.ts` — the `/v1/agents/:id/push-definition` route
 
@@ -6693,9 +6693,9 @@ Each entry says how to **confirm** it before acting: run that check first, since
 ### The quality guard said a model did worse, but no switch-back card came
 - **Check:** the model ledger shows a change judged "worse"; Alerts has no "Switch … back" card for it; the service log has a database error (often a full disk) from around then.
 - **Cause:** the guard marked the change as having its card before writing the card. When the write failed, the mark stayed, and no later pass filed it.
-- **Fix:** free some disk space. Since the fix, a card that can't be written gives its mark back (`model.guard_failed` in the log), and the next pass files it.
+- **Fix:** free some disk space. Since the fix, a card that can't be written gives its mark back (`model.guard_failed` in the log), and the next pass files it. Since `v2.191.0` the mark and its card are one write (a transaction in `fileGuardProposals`): a card that can't be written undoes the mark with it, and so does a process that ends between the two.
 - **Fixed in:** `v2.164.2`
-- **Code:** `src/orchestrator/usage/modelLedger.ts` — `fileGuardProposals`; `src/store/store.ts` — `releaseModelChangeGuard`
+- **Code:** `src/orchestrator/usage/modelLedger.ts` — `fileGuardProposals`; `src/store/store.ts` — `transact`, `claimModelChangeGuard`
 
 ### The weekly review still runs after `HATCHABOT_MODEL_REVIEW=off` (under its old name)
 - **Check:** the Hatchabot agent's tasks list both "Weekly token review" and "Weekly model review", or one of them after the review was turned off; the agent was imported or restored.
@@ -6982,7 +6982,7 @@ Each entry says how to **confirm** it before acting: run that check first, since
 - **Cause:** a killed git leaves its lock, every later checkout fails on it, and a plain checkout back kept the files it had rewritten, so later runs refused them as local changes.
 - **Fix:** upgrade, then run it again. A deploy or upgrade now writes in its record which git it started, and removes the lock only when that git is gone, no other git is running in the checkout (a `git commit` waiting in its editor holds it for as long as the person takes), the lock is no older than the record and a couple of minutes old; it then puts every tracked file back (`.env` and `data/` are not touched). A tracked file that matches neither release, such as a hand edit made since the kill, is copied first and named: the copy is in `~/.local/state/hatchabot/upgrade-*.kept-<time>/`. A lock it cannot show is its own stays and is named: check no git is running there (`pgrep -a git`), then `rm <install>/.git/index.lock`. One left by a kill under an older release is that case. When only git was killed, the run puts the dependencies back at once and a later run clears the lock.
 - **Fixed in:** `v2.172.0`
-- **Code:** `scripts/deploy-release.sh` — `git_running_here`, `clear_own_index_lock`, `save_other_edits`, `repair_tree`; `scripts/upgrade.sh` — `git_running_here`, `clear_own_index_lock`, `save_other_edits`, `repair_tree`; `scripts/upgrade-helpers.sh` — `checkout_recorded`
+- **Code:** `scripts/upgrade-helpers.sh` — `git_running_here`, `clear_own_index_lock`, `save_other_edits`, `repair_tree`, `checkout_recorded`; `scripts/deploy-release.sh` and `scripts/upgrade.sh` call them
 
 ### An install pinned to a version stays half upgraded although its channel timer runs
 - **Check:** `data/channel` holds a version (`v2.31.3`), a `hatchabot upgrade vX.Y.Z` was killed part-way, and `.swapping` in the install or `~/.local/state/hatchabot/upgrade-*.from` is there; `journalctl --user -u hatchabot-follow-channel` shows the timer doing nothing.
@@ -7794,8 +7794,8 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Code:** `src/orchestrator/machines/runtimeImages.ts` — `buildBaseImage`, `stopAll`
 
 ### Install image to a runner: "Could not tell which CPU … runs on"
-- **Symptom:** Install image answers `Could not tell which CPU this machine runs on (docker info did not say), so nothing was copied` (or that runner). Before the fix, agents on a runner of the other CPU failed to start after an install (`exec format error`).
-- **Check:** run `docker info` on both machines and look at the Architecture line.
+- **Symptom:** Install image answers `Could not tell which CPU that runner runs on (docker info did not say), so nothing was copied`, or, from `v2.193.0`, `Could not tell which CPU this machine's image is built for (docker image inspect did not say)` (before it, `… this machine runs on …`). Before the fix, agents on a runner of the other CPU failed to start after an install (`exec format error`).
+- **Check:** run `docker info` on the runner and look at the Architecture line; on this machine, `docker image inspect --format '{{.Architecture}}' hatchabot-runtime:latest` (or the image `HATCHABOT_IMAGE` names).
 - **Cause:** the install copied the image even when one side's CPU could not be read.
 - **Fix:** try again once Docker answers on both. Before upgrading, check that both CPUs match before Install image.
 - **Fixed in:** `v2.191.0` (HB-0976).
@@ -7959,7 +7959,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** setup checked the shell's default daemon before reading .env.
 - **Fix:** before upgrading, run `DOCKER_HOST=<the value from .env> ./scripts/setup-host.sh`; after upgrading, re-run as usual.
 - **Fixed in:** `v2.191.0` (HB-1059).
-- **Code:** `scripts/setup-host.sh` — `NAMED_IN`, `ENV_LINES`
+- **Code:** `scripts/setup-host.sh` — `NAMED_IN`, `ENVSET_DOCKER_HOST`
 
 ### After a start or reboot the web app never answers, with docker info hanging
 - **Symptom:** after a start or reboot the web app never answers; `systemctl --user status hatchabot` is active with only with-docker.sh and docker info under it.
@@ -8194,12 +8194,12 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Code:** `src/orchestrator/transfer/adopt.ts` — `copyIn`, `holdCutOff`, `resumeAdoptWorkspace`, `recoverAdoptWorkspace`, `cannotCopyFrom`; `src/orchestrator/lifecycle/operations.ts` — `FILES_REPLACED_BY`, `settleOwedStart`, `startsStillOwed`, `settleStartsOwedOn`; `src/orchestrator/lifecycle/operationsResume.ts` — `runKind`, `startAsStartDoes`
 
 ### Practising a skill costs money, but the agent's budget and Usage don't change
-- **Symptom:** after a skill's Practice on a paid source, the agent's budget, its Usage total, the spike warnings and the source's 5-hour and 7-day tokens are as they were; or, after upgrading, Practice answers `This agent is paused by its budget for <Month>, and Practice spends from the same budget. It can practise again once the budget is raised or the pause ends on <Next month> 1.`
+- **Symptom:** after a skill's Practice on a paid source, the agent's budget, its Usage total, the spike warnings and the source's 5-hour and 7-day tokens are as they were; or, after upgrading, Practice answers `This agent is paused by its budget for <Month>, and Practice spends from the same budget. It can practise again once the budget is raised or the pause ends on <Next month> 1.` (from v2.193.0 `This agent has reached its budget for <Month>, …` or `This Hatchabot has reached its budget for <Month>, …`)
 - **Check:** the agent's Usage "in all" is the same before and after a practice and the next usage pass; after upgrading it shows "N practice runs" and a practice row.
 - **Cause:** Practice runs in a temporary state folder that is removed when it returns, and the usage pass reads only the agent's own transcripts.
 - **Fix:** upgrade; practice before the upgrade can't be counted. For the refusal, raise the budget or wait for the 1st.
 - **Fixed in:** `v2.191.0` (HB-0933).
-- **Code:** `src/orchestrator/skills/skillTrials.ts` — `skillTrialScript`, `spentOf`, `runSkillTrial`; `src/orchestrator/usage/practiceUsage.ts` — `recordPracticeUsage`, `practiceSummary`, `foldPractice`, `practicePausedLine`; `src/orchestrator/usage/budgets.ts` — `ownPauseDue`; `src/store/store.ts` — `addPracticeUsage`, `costBetween`, `tokenDeltas`; `src/api/usage/usageRoutes.ts` — `'/v1/agents/:id/usage'`; `web/app/spend.js` — `usageHTML`
+- **Code:** `src/orchestrator/skills/skillTrials.ts` — `skillTrialScript`, `spentOf`, `runSkillTrial`; `src/orchestrator/usage/practiceUsage.ts` — `recordPracticeUsage`, `practiceSummary`, `foldPractice`, `practicePausedLine`; `src/orchestrator/usage/budgets.ts` — `pauseDue`; `src/store/store.ts` — `addPracticeUsage`, `costBetween`, `tokenDeltas`; `src/api/usage/usageRoutes.ts` — `'/v1/agents/:id/usage'`; `web/app/spend.js` — `usageHTML`
 
 ### A removed runner stays busy, and its image install's progress is gone
 - **Symptom:** after removing a runner while Install image was copying to it, the runner's disk and network stay busy for a long time, and the copy's status answers "Not found".
@@ -8293,9 +8293,9 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Symptom:** "Anyone can knock" is on, but new people's messages are dropped and no join requests appear.
 - **Check:** it was turned on while the agent was rebuilding (or starting, or moving).
 - **Cause:** the door was opened only on an agent that was running when the setting changed.
-- **Fix:** before upgrading, turn it off and on again while the agent runs, or Rebuild. After upgrading the door opens once the agent is free; if the timeline then says `anyone may knock, but its <app> did not take the change once the agent was free again …`, Rebuild it once its machine answers.
-- **Fixed in:** `v2.191.0` (HB-1156).
-- **Code:** `src/api/chat/channelRoutes.ts` — `'/v1/agents/:id/allow-knocks'`, `refusedDoor`
+- **Fix:** before upgrading, turn it off and on again while the agent runs, or Rebuild. After upgrading the door opens once the agent is free; if the timeline then says `anyone may knock, but its <app> did not take the change once the agent was free again …`, Rebuild it once its machine answers. Until `v2.193.0` a restart of Hatchabot during that wait lost it, and the door stayed shut until the next build; since then the next start opens it.
+- **Fixed in:** `v2.191.0` (HB-1156); `v2.193.0` for a restart during the wait (HB-1264).
+- **Code:** `src/api/chat/channelRoutes.ts` — `'/v1/agents/:id/allow-knocks'`; `src/orchestrator/channels/knocks.ts` — `openDoor`, `openDoorWhenFree`, `resumeKnockDoors`
 
 ### Re-check says the Telegram token was refused, but the bot still answers
 - **Symptom:** Re-check on an agent's Telegram card says `Telegram refused the bot token. Add the bot again with a fresh token from @BotFather.` while the bot still replies in Telegram.
@@ -8690,12 +8690,12 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Code:** `src/store/store.ts` — `matchManagedCronsToCopy`; `src/orchestrator/backups/backupFiles.ts` — `applyCurrentSettingsOver`; `src/orchestrator/usage/modelReview.ts` — `syncModelReviewCron`
 
 ### Moving or importing an agent says "no image on … is built the way …'s base is"
-- **Symptom:** a move to another machine, or an import, fails with "no image on <machine> is built the way <tag>'s base is: <what differs>". The message goes on with one of three things: ". Build an image of OpenClaw <version> on <machine> (Settings → Advanced → Runtime images), then try again, or run it on <machine>'s default image"; a build "with <setting> set by hand to <value>, as its base was (scripts/build-runtime-image.sh)"; or "an image built there from Settings would not be either (…), so run it on <machine>'s default image".
+- **Symptom:** a move to another machine, or an import, fails with "no image on <machine> is built the way <tag>'s base is: <what differs>". The message goes on with one of three things: ". Build an image of OpenClaw <version> on this machine (Settings → Advanced → Runtime images), then try again, or run it on <machine>'s default image" (for a runner, since `v2.193.0`: "… on this machine (Settings → Advanced → Runtime images), make it this machine's default and copy it to <runner> (Settings → Hosts → Check, then Install image or Update image, offered when its image is missing or runs another OpenClaw), then try again, …"; before, "Build … on <runner> (Settings → Advanced → Runtime images)"). An import onto a runner (`hatchabot import --host`, or a restore with a `hostId`) that cannot build it there is rolled back with "the image <tag> could not be built on <runner>: no image on <runner> is built the way …" since `v2.193.0`; before, "could not be built here: no image on this machine …", with this machine's advice; a build "with <setting> set by hand to <value>, as its base was (scripts/build-runtime-image.sh)"; or "an image built there from Settings would not be either (…), so run it on <machine>'s default image" (for a runner: "an image built from Settings on this machine and installed there would not be either (…)").
 - **Check:** the agent runs on a derived or `-plus-` image. What its base was built from is that base's label (`docker image inspect --format '{{index .Config.Labels "org.hatchabot.build-inputs"}}' <base>`); compare it with the same label on the other machine's runtime images. The message names the first difference.
 - **Cause:** a move or import now rebuilds the image only on an image built the way its base was: the same OpenClaw, Node line, engine and messaging plugins, with the packages laid on. Before, it was built on whatever had the base's name, which could run another OpenClaw. When there is no such image, and the published image of that OpenClaw is not one, nothing is built.
-- **Fix:** do what the message says: build that image on the machine (Settings → Advanced → Runtime images, or `scripts/build-runtime-image.sh` with the settings it names), then try again. Or choose that machine's default image for the agent.
-- **Fixed in:** `v2.191.0` (HB-0986).
-- **Code:** `src/orchestrator/machines/imageRecipe.ts` — `buildRecipeOn`, `recipeFor`, `standInAmong`; `src/orchestrator/machines/buildInputs.ts` — `pickStandIn`, `buildAdvice`
+- **Fix:** do what the message says: build that image (Settings → Advanced → Runtime images, or `scripts/build-runtime-image.sh` with the settings it names), then try again. Settings builds on this machine only, and a runner is given only this machine's default image. So for a runner: build it as the default (or Promote it), which moves every agent here with no pin onto it at its next rebuild (pin those that must stay to their current image first); then on the runner's row under Settings → Hosts press Check, then Install image (its image missing) or Update image (another OpenClaw), which makes it that runner's default too. Under a `HATCHABOT_IMAGE` pin, Promote is off and a default build moves `hatchabot-runtime:latest`, not the pin: set `HATCHABOT_IMAGE` in `.env` to the image you built and restart Hatchabot, then copy it to the runner. When the runner's image runs the same OpenClaw and differs only in how it was built (its Node line, engine, plugins or packages), its row offers no button: run the agent on that machine's default image. Or choose that machine's default image for the agent.
+- **Fixed in:** `v2.191.0` (HB-0986); the advice for a runner, `v2.193.0` (HB-1515).
+- **Code:** `src/orchestrator/machines/imageRecipe.ts` — `buildRecipeOn`, `recipeFor`, `standInAmong`; `src/orchestrator/machines/buildInputs.ts` — `pickStandIn`, `buildAdvice`, `settingsBuildOn`
 
 ### A move or an import says the images "changed just now" or "could not be read just now"
 - **Symptom:** a move or an import fails with one of these: "<machine>'s image <base> changed just now — try again"; "this machine's images changed just now — try again"; "This machine's images could not be read just now. Try the import again."; or "<machine>'s images could not be read just now — try again".
@@ -8755,11 +8755,11 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 
 ### Hatchabot's access stays in a Google Account after its connection was deleted
 - **Symptom:** after deleting a Google connection under Settings → Connections, Hatchabot's app still appears in that Google Account under Security → "Your connections to third-party apps & services".
-- **Check:** the log line `connection.unlinked` shows `revoked: false, keptForOtherAccount: false`. From 2.191.0 on it also shows `tokenLeft: true`, and Hatchabot keeps asking Google; `connection.token_ended` says when it worked, and `connection.revoke_given_up` (with `tries` and `days`) when it stopped.
+- **Check:** the log line `connection.unlinked` shows `revoked: false, keptForOtherAccount: false`. From 2.191.0 on it also shows `tokenLeft: true`, and Hatchabot keeps asking Google; `connection.token_ended` says when it worked, and `connection.revoke_given_up` (with `tries` and `days`) when it stopped. From 2.193.0 on, ⚙ Settings → Connections lists it under "Access still being ended" while Hatchabot asks, and after it stops.
 - **Cause:** Google did not confirm the revoke (no answer, or an error). Before 2.191.0 the token was deleted anyway and the failure forgotten.
-- **Fix:** before upgrading, remove the app's access by hand in the Google Account. After upgrading, Hatchabot retries every ten minutes for at least seven days and a day of tries, then messages you how many times it asked; then remove the access by hand. With no chat app, the log line is the only notice.
-- **Fixed in:** `v2.191.0` (HB-1203, HB-0901).
-- **Code:** `src/orchestrator/google/connectionVault.ts` — `endToken`, `retryCleanups`; `src/orchestrator/google/googleConnections.ts` — `revokeGoogleToken`
+- **Fix:** before upgrading, remove the app's access by hand in the Google Account. After upgrading, Hatchabot retries every ten minutes for at least seven days and a day of tries, then messages you how many times it asked; then remove the access by hand. From 2.193.0 on, ⚙ Settings → Connections also shows it, chat app or not, until you press "Done — I removed it"; before 2.193.0, with no chat app, the log line is the only notice.
+- **Fixed in:** `v2.191.0` (HB-1203, HB-0901); listed on the Connections page from `v2.193.0` (HB-1336).
+- **Code:** `src/orchestrator/google/connectionVault.ts` — `endToken`, `retryCleanups`, `list`, `dismissEnding`; `src/orchestrator/google/googleConnections.ts` — `revokeGoogleToken`
 
 ### Hatchabot keeps access to a Google Account every household account disconnected
 - **Symptom:** after every account here disconnected the same Google address, the app still has access in that Google Account.
@@ -9007,7 +9007,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Cause:** the upgrade moved node_modules while a restart's ensure-deps was still installing into it.
 - **Fix:** before upgrading, `rm -rf node_modules && ./scripts/ensure-deps.sh`, then restart. After upgrading, wait for the other install, or remove the lock if no npm is running, then run the command it names (`hatchabot upgrade`, or `scripts/deploy-release.sh vX.Y.Z` for a deploy).
 - **Fixed in:** `v2.191.0` (HB-1212).
-- **Code:** `scripts/upgrade.sh` — `restore_deps`, `rollback_bundle`, `rollback_or_redo`; `scripts/deploy-release.sh` — `restore_deps`; `scripts/ensure-deps.sh` — `DEPS_LOCK`; `scripts/upgrade-helpers.sh` — `deps_lock`, `deps_unlock`
+- **Code:** `scripts/upgrade.sh` — `rollback_bundle`, `rollback_or_redo`; `scripts/ensure-deps.sh` — `DEPS_LOCK`; `scripts/upgrade-helpers.sh` — `restore_deps`, `deps_lock`, `deps_unlock`
 
 ### Setup kept the default runtime image though HATCHABOT_IMAGE names another
 - **Symptom:** with HATCHABOT_IMAGE set, setup said "Runtime image already present — keeping the existing :latest." and the agents then fail to start (no such image) or run an older OpenClaw.
@@ -9165,7 +9165,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Symptom:** every create or rebuild fails with "The agent runtime could not be created." and the detail "network hatchabot-agents not found".
 - **Check:** `docker network ls` has no `hatchabot-agents`, after a `docker network prune` or `docker system prune`.
 - **Cause:** the network was noted as made once per process and never looked for again.
-- **Fix:** before upgrading, `hbt restart` (or `docker network create hatchabot-agents`). After upgrading nothing is needed.
+- **Fix:** before upgrading, restart the service (`./scripts/restart.sh` in its install folder), or `docker network create hatchabot-agents`. After upgrading nothing is needed.
 - **Fixed in:** `v2.191.0` (HB-1029).
 - **Code:** `src/providers/localDockerProvider.ts` — `provision`, `agentProxySource`
 
@@ -9274,12 +9274,12 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Code:** `src/cli.ts` — the adopt case, the delete case; `web/app/create.js` — `doAdopt`
 
 ### An adopt during a network hiccup removed the agent and its bot went silent
-- **Symptom:** an adopt, on the page or with `hatchabot adopt`, ends with the agent removed and its bot silent, after "Trying again in 8 s…".
+- **Symptom:** an adopt, on the page or with `hatchabot adopt`, ends with the agent removed and its bot silent, after "Trying again in 8 s…". Since `v2.191.0`, also when the last hand-over was still being checked by the server as the agent was read: it took the bot a moment later, and the agent was removed with it.
 - **Check:** the hand-over of the bot got no answer four times (a proxy or network hiccup).
-- **Cause:** an unanswered hand-over was taken as not done, though the server may have taken the bot.
-- **Fix:** before upgrading, adopt again. After upgrading the agent is read: adopted if it has the bot, removed if it surely does not, and kept with a message when that is not known: look at its card (or `hatchabot setup-log <id>`); if it still asks for a bot token, remove it and adopt again.
-- **Fixed in:** `v2.191.0` (HB-1277).
-- **Code:** `web/app/create.js` — `handOverBot`, `doAdopt`; `src/cli.ts` — `handOver`
+- **Cause:** an unanswered hand-over was taken as not done, though the server may have taken the bot. From `v2.191.0` the agent was read once after the last post: a post the server was still checking (a look at the bot of up to 5 s, then a token check with Telegram of up to 10 s) could take the bot after that read.
+- **Fix:** before upgrading, adopt again. After upgrading the agent is read: adopted if it has the bot, removed if it surely does not, and kept with a message when that is not known: look at its card (or `hatchabot setup-log <id>`); if it still asks for a bot token, remove it and adopt again. Since `v2.193.0`, an agent still asking for its token at that read is read again once the server's bound on the last post (20 s from when it was sent) is out ("Waiting N s for the server to finish with the bot hand-over…"); against a server of v2.177 or before, `hatchabot` watches it for 30 s. The paste-a-token box waits the same.
+- **Fixed in:** `v2.191.0` (HB-1277); `v2.193.0` (HB-1427): the step read again after the server's bound on a post.
+- **Code:** `web/app/create.js` — `handOverBot`, `doAdopt`; `src/cli.ts` — `handOver`, `HANDOVER_POST_BOUND_MS`
 
 ### A console opens on "pairing required" with no Approve button
 - **Symptom:** an agent's console opens on OpenClaw's "pairing required" screen, with no Approve button and no "Connecting this browser…".
@@ -9290,12 +9290,12 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Code:** `web/app/console.js` — `autoApproveConsole`, `consoleConnected`
 
 ### A setting differs between the Linux service and restart.sh
-- **Symptom:** a setting behaves differently as the Linux service than on the Mac or under restart.sh, or doctor probes another port than the one in use. After upgrading, doctor says `.env has a # comment after the value of <NAME>: systemd (the service on Linux) reads it as part of the value, while the Mac's service and restart.sh drop it, so they use different settings`.
-- **Check:** an active line in `.env` with ` #` after an unquoted value, such as `HATCHABOT_PORT=9137 # note`.
-- **Cause:** systemd keeps an inline comment in the value; a shell drops it.
+- **Symptom:** a setting behaves differently as the Linux service than on the Mac or under restart.sh, or doctor probes another port than the one in use. After upgrading, doctor says `.env has a # comment after the value of <NAME>: systemd (the service on Linux) reads it as part of the value, and so does restart.sh there, while the Mac's service drops it, so on Linux the setting is not the value it looks like` (before `v2.193.0`: `… while the Mac's service and restart.sh drop it, so they use different settings`).
+- **Check:** an active line in `.env` with ` #` after an unquoted value, such as `PORT=9137 # note`.
+- **Cause:** systemd keeps an inline comment in the value; a shell drops it. Before `v2.193.0`, restart.sh and the other scripts that ask where the service listens read `.env` as a shell does on Linux too, so they asked port 9137 while the service, with no port in `9137 # note`, did not start at all.
 - **Fix:** put the comment on its own line above the setting (or quote the value whole if the # belongs to it), then `./scripts/restart.sh`.
-- **Fixed in:** `v2.191.0` (HB-0634).
-- **Code:** `src/config/envFile.ts` — `inlineComments`, `renderEnv`; `src/doctor.ts` — `gatherFacts`, `doctorReport`
+- **Fixed in:** `v2.191.0`, the warning (HB-0634); `v2.193.0`, the scripts on Linux read `.env` as systemd does, and the service, the scripts and doctor all take 8080 for a `PORT` that is empty, 0 or no number (HB-1529).
+- **Code:** `src/config/envFile.ts` — `inlineComments`, `renderEnv`; `src/doctor.ts` — `gatherFacts`, `doctorReport`; `scripts/restart.sh` — `env_named`, `service_port`
 
 ### A machine following the latest release gives up on a new one
 - **Symptom:** about 80 minutes after a tag, the follow-latest log says `Not deploying <tag>: it is not a published release on GitHub, 8 times in a row. It will not be looked at again; the next tag will be.`, or a published tag is deployed on every tick.
@@ -9341,7 +9341,7 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Symptom:** you are told `⏳ Someone opened your invite to "<agent>", but no message from them was let in.`, though the person says they wrote to the agent.
 - **Check:** the agent was asleep when they joined, the invite named nobody, and they had sent the agent's Telegram bot a direct message before opening the invite.
 - **Cause:** such a join's window passes over everyone who had direct messages waiting for the bot, as one of them might have got in first; you, and anyone already let in on the agent, are never among them.
-- **Fix:** open the agent → Telegram → Members, press **Let them in again**, and ask them to write again; to be sure only they get in, invite them by their @handle.
+- **Fix:** open the agent → Sharing → Members, press **Let them in again**, and ask them to write again; to be sure only they get in, give their @handle when it asks (from `v2.193.0`; before it, invite them by their @handle).
 - **Fixed in:** `v2.191.0` (HB-1221).
 - **Code:** `src/orchestrator/members/invitations.ts` — `wroteBeforeJoin`, `neverMessaged`; `src/orchestrator/channels/knocks.ts` — `expectedKnock`
 
@@ -9354,12 +9354,12 @@ The 2026-11-23 deep audit of the code before 2.191.0.
 - **Code:** `src/api/signIn/auth.ts` — `accountKey`, `bound`; `src/api/signIn/accountsAuth.ts` — `SETUP_BUCKET`
 
 ### Hatchabot will not start: another server is running on this database
-- **Symptom:** the server does not start, and its log says `Another Hatchabot server is already running on this database (<path>), so this one did not start: two at once undo each other's work.`, or `Hatchabot cannot write its lock file (<path>.lock), so this one did not start`.
-- **Check:** `fuser -v <database>.lock` (Linux) or `lsof <database>.lock` (macOS) names the process that holds it; `ls -l <database>.lock` shows whose the file is.
-- **Cause:** two server processes on one HATCHABOT_DB (one started by hand beside the service), or a lock file left by a server run with sudo. Under systemd the service tries again about every 13 seconds and starts once the other stops; meanwhile `./scripts/restart.sh` fails, and an upgrade rolls back.
-- **Fix:** stop the other server, or give the second one a database of its own (`HATCHABOT_DB`); for a lock file of another user's, `sudo chown $(id -un) <database>.lock`, or remove it once no server runs.
+- **Symptom:** the server does not start, and its log says `Another Hatchabot server is already running on this database (<path>), so this one did not start: two at once undo each other's work.`, or `Hatchabot cannot write its lock file (<path>.lock), so this one did not start`. Before `v2.193.0`, a data folder the lock file could not be made in crashed the start with `SqliteError: unable to open database file` and a stack, every few seconds, and a link to the database that leads into a folder not there with `TypeError: Cannot open database because the directory does not exist`.
+- **Check:** `fuser -v <database>.lock` (Linux) or `lsof <database>.lock` (macOS) names the process that holds it; `ls -l <database>.lock` shows whose the file is. With `(SQLITE_CANTOPEN)` in the message, `ls -ld <data folder>`: the folder is another user's, or on a read-only disk. With `The folder it goes in (<folder>) is not there`, `ls -l <database>` shows the link and where it leads. With `Hatchabot cannot look in <folder>`, `ls -ld` each folder on the way to it: one has no `x` for the service's user.
+- **Cause:** two server processes on one HATCHABOT_DB (one started by hand beside the service), or a lock file left by a server run with sudo, or a data folder the service's user cannot write in. Under systemd the service tries again about every 13 seconds and starts once the other stops; meanwhile `./scripts/restart.sh` fails, and an upgrade rolls back. Since `v2.193.0` the lock is also judged by its own handle (`(SQLITE_READONLY)` in the message: SQLite opened the file read only, whatever its permissions say, as on some network or FUSE mounts), and a database reached through a link to a file not made yet finds the lock beside where the link leads (a relative link read from the folder it is really in, as the system reads it).
+- **Fix:** stop the other server, or give the second one a database of its own (`HATCHABOT_DB`); for a lock file of another user's, `sudo chown $(id -un) <database>.lock`, or remove it once no server runs; for a folder, make it yours (`sudo chown $(id -un) <data folder>`) or put the database on a disk it can write; for a folder not there, make it (the database moved there?) or set `HATCHABOT_DB` to where the database is; for a folder it cannot look in, give the service's user `x` on each folder on the way (`chmod u+x <folder>` for your own).
 - **Fixed in:** `v2.191.0` (HB-1436).
-- **Code:** `src/store/instanceLock.ts` — `holdInstanceLock`; `src/index.ts`
+- **Code:** `src/store/instanceLock.ts` — `holdInstanceLock`, `realPlace`; `src/index.ts`
 
 ### A budget's cheaper model stays after a restart, but the agent runs its own
 - **Symptom:** after a restart, the agent's page shows the budget's cheaper model while the agent still runs its own, and the budget does not try again that month.
@@ -9488,9 +9488,9 @@ The fixes made after 2.191.0, many of them the owner's decisions of 2026-11-24.
 ### The candidate gate warns on its practice turn
 - **Symptom:** the gate's results say ", 1 warned", with "⚠ one practice turn: its transcript is where Practice reads it, and it is counted once — Practice stays on OpenClaw 2026.9.8: …", and the closing line starts "Practice stays on OpenClaw".
 - **Check:** the words name the case: "counted twice" or "not in its state folder" means the release is wrong for Practice; "could not check" means nothing was learned.
-- **Cause:** the candidate's OpenClaw keeps a practice run's transcript somewhere other than its state folder, or also in the agent's own; or, for "could not check", the usage reader sees none of the agent's turns, another turn ran meanwhile, the run did not finish, the agent's own usage changed in the seconds after the run ended, the source runs under a CLI harness, `npm ci` was not run, or the practice check itself stopped.
-- **Fix:** nothing for the image, which still passes; Practice stays on PRACTICE_OPENCLAW and refuses itself on the candidate's release. For "could not check", do what the words say (`npm ci`, `--profile <a source OpenClaw runs itself>`, read the error the check stopped on, or run the gate again); a reader that sees none of the agent's turns on a new release means the usage sampler may not read that release's transcripts: look at that before promoting.
-- **Fixed in:** `v2.192.0` (HB-1418).
+- **Cause:** the candidate's OpenClaw keeps a practice run's transcript somewhere other than its state folder, or also in the agent's own; or, for "could not check", the usage reader sees none of the agent's turns, another turn ran meanwhile, the run did not finish, the agent's own usage changed (rose or fell) in the seconds after the run ended, the agent has more calls than the usage reader lists by id (100000: a check run by hand on an old agent), the source runs under a CLI harness, `npm ci` was not run, or the practice check itself stopped. Before 2.193.0, a check that crashed gave Node's last line ("Node.js v22…") as the closing line, an id the agent's own calls already had read as "counted twice", and a container whose `date` prints seconds alone let a missed ask pass.
+- **Fix:** nothing for the image, which still passes; Practice stays on PRACTICE_OPENCLAW and refuses itself on the candidate's release. For "could not check", do what the words say (`npm ci`, `--profile <a source OpenClaw runs itself>`, read the error the check stopped on, run it on a new agent as the gate does, or run the gate again); a reader that sees none of the agent's turns on a new release means the usage sampler may not read that release's transcripts: look at that before promoting.
+- **Fixed in:** `v2.192.0` (HB-1418); its edges, `v2.193.0` (HB-1453).
 - **Code:** `scripts/practice-check.ts`; `scripts/candidate-gate.sh`; `src/orchestrator/skills/skillTrials.ts` — `skillTrialScript`, `stateSpent`, `PRACTICE_OPENCLAW`; `src/orchestrator/usage/usage.ts` — `USAGE_READER_SCRIPT`
 
 ### enable-compressed-swap.sh --zram is refused, or ends with compressed swap not on
@@ -9646,18 +9646,18 @@ The fixes made after 2.191.0, many of them the owner's decisions of 2026-11-24.
 - **Code:** `src/orchestrator/machines/derivedImage.ts` — `dockerfileProblem`, `heredocText`, `joinInstructions`, `heredocsOn`, `useBuiltImage`
 
 ### Two installs share one data folder
-- **Symptom:** the service log at start says "data.folder_shared: Another Hatchabot install's database is in this install's data folder <folder>: <database>, which its install marked at its start with <database>.uses-this-folder. …", or `hatchabot doctor` fails with the same words. Before that, an agent's memory search may stop working after the other install starts, because its key was overwritten.
+- **Symptom:** the service log at start says "data.folder_shared: Another Hatchabot install's database is in this install's data folder <folder>: <database>, which its install marked at its start with <database>.uses-this-folder. …", or `hatchabot doctor` fails with the same words; since `v2.193.0` they go on "Memory search's keys are among them: they flip between the two installs as each starts or builds an agent, so memory search fails for one install's agents or the other's until one of the databases is moved out". Before that, an agent's memory search may stop working after the other install starts, because its key was overwritten.
 - **Check:** list the folder: there are two or more `<name>.uses-this-folder` files, each beside its database `<name>`. A database that is there only as a copy (copied in, not moved) counts too, until it or its mark is deleted. Only an install of v2.192.0 or later leaves a mark, once it has started.
-- **Cause:** an install keeps its other files beside its database, named for the folder, not for the database: `embed/` and `embed-hosts/` (the memory search service's keys), `models/`, `derived-builds/`, `release-manifests/`, `app-sources/`, `mgmt-cli-home/` and `limits-check.json`. Two installs whose `HATCHABOT_DB` is in one folder write the same files, and each overwrites the other's.
+- **Cause:** an install keeps its other files beside its database, named for the folder, not for the database: `embed/` and `embed-hosts/` (the memory search service's keys), `models/`, `derived-builds/`, `release-manifests/`, `app-sources/`, `mgmt-cli-home/` and `limits-check.json`. Two installs whose `HATCHABOT_DB` is in one folder write the same files, and each overwrites the other's. Memory search is where it shows: each install writes its own server key and its own agents' keys into the one `embed/` at each start and build, and the engine and its door read whichever was written last, so one install's agents or the other's are refused. With the same `HATCHABOT_PREFIX` on one Docker (`.env.example`: change it to run two installs on one machine) they also share the engine's containers (`<prefix>-embedder`, `<prefix>-embed-door`), and each start replaces the engine with one on its own key. Moving a database out does not end that: give one install a prefix of its own too. The doctor does not check for it.
 - **Fix:** (1) stop the install the message came from (its start log and its `hatchabot doctor` name its own database); (2) move that database, keeping its name, to a folder of its own, with the files named after it (`<name>-wal`, `<name>-shm`, `<name>-journal`, `<name>.lock`, `<name>.rolled-back`, `<name>.rolled-back.prev` and `<name>.uses-this-folder`, whichever are there) and its folder `move-copies-<hash>` if there is one (the message gives its exact name; a move that was cut off left it, with an agent's tokens in it), and set `HATCHABOT_DB` in its `.env` to the new path; (3) copy into the new folder whichever of these the old one holds: `embed`, `embed-hosts`, `models`, `derived-builds`, `release-manifests`, `app-sources`, `mgmt-cli-home` and `limits-check.json`; (4) start it, and restart each install left in the old folder (each install's memory search keys are rebuilt from its own database at its next start); (5) Rebuild any agent whose memory search still fails. If no install uses the other database any more (a copy left behind, say), delete that database, or its `.uses-this-folder` mark, instead, and the warning stops.
-- **Fixed in:** `v2.192.0` (HB-1151): the start and the doctor say so. Nothing is moved for you, and the start is not refused.
+- **Fixed in:** `v2.192.0` (HB-1151): the start and the doctor say so; `v2.193.0` (HB-1471): they say memory search fails for one install or the other. Nothing is moved for you, the start is not refused, and the memory search files are not kept apart per database.
 - **Code:** `src/store/folderMark.ts` — `markFolder`, `otherInstallsHere`, `sharedFolderWords`, `sharedFolderFix`, `moveCopyFolder`, `BESIDE_DATABASE`; `src/index.ts`; `src/doctor.ts` — `dbSharedWith`; `scripts/uninstall.sh` — `rm_db`
 
 ### A derived image's line is refused with "Hatchabot judges every line as if an instruction began on it"
 - **Symptom:** saving, rebuilding, moving or importing a derived image is refused with a message such as "A derived image cannot contain its own FROM — the base field sets it. Hatchabot judges every line as if an instruction began on it, since its reading of heredocs and of lines that go on may not be docker's. Write line 2 another way, such as joined to the line before it, or have a RUN write that file's line with printf.", for a line that only writes text into a file or goes on from the line above.
-- **Check:** line N, ignoring the spaces before it, begins with `FROM`, with a `RUN` (or `ONBUILD RUN`) that has `--mount`, `--network`, `--security` or `--device`, or with a `LABEL` of `org.hatchabot.…` or `hatchabot.…`, or holds `--mount` or `--network`; and it sits in a heredoc or goes on from the line above.
+- **Check:** line N, ignoring the spaces before it, begins with `FROM`, with a `RUN` (or `ONBUILD RUN`) that has `--mount`, `--network`, `--security` or `--device`, with a `COPY` (or `ONBUILD COPY`) that has `--from`, or an `ADD` (or `ONBUILD ADD`) of a URL (both since 2.193.0), or with a `LABEL` of `org.hatchabot.…` or `hatchabot.…`, or holds `--mount` or `--network`; and it sits in a heredoc or goes on from the line above.
 - **Cause:** docker can start an instruction at the start of any line, and where it reads a heredoc or a line that goes on differently from Hatchabot, that line is an instruction (BuildKit versions differ here: 0.22, in Docker 28.2, began opening a heredoc at `<< EOF`). A `FROM` there would start a build on another image before anything could be checked, so every line is judged as an instruction.
-- **Fix:** write line N another way: join it to the line before it; or have a RUN write that file's line with printf (`RUN printf '%s\n' 'from os import path' > /opt/x.py`); or, in a script, use `import os.path` rather than `from os import path`. Then save, or Rebuild. For a move or an import, change the lines where they come from, Rebuild there, and move or export again.
+- **Fix:** write line N another way: join it to the line before it; or have a RUN write that file's line with printf (`RUN printf '%s\n' 'from os import path' > /opt/x.py`); or, in a script, use `import os.path` rather than `from os import path`. The Runtime images page has no editor for the lines: ask the Hatchabot agent to change the image's lines, or put them in a file and run `hatchabot image derive <name> --from <file>` on the machine, which replaces them and builds the image (add `--base <tag>` to keep a base other than the fleet's default). For a move or an import, change the lines where they come from that way, and move or export again once it has built.
 - **Fixed in:** `v2.192.0` (HB-1032 review): such lines are refused before anything is built.
 - **Code:** `src/orchestrator/machines/derivedImage.ts` — `dockerfileProblem`, `joinEachLine`, `runFlags`
 
@@ -9700,3 +9700,1175 @@ The fixes made after 2.191.0, many of them the owner's decisions of 2026-11-24.
 - **Fix:** before upgrading, apply the source change first, then pick the model, and let a save finish before opening another agent's settings. After upgrading nothing is needed.
 - **Fixed in:** `v2.192.0` (HB-1484)
 - **Code:** `web/app/connections.js` — `sheetSave`, `sheetPress`, `sheetButton`, `SHEET_BUTTONS`, `prepareEdit`, `switchModel`; `web/app/panels.js` — `addCronJob`, `prepareCrons`
+
+## Fixes in v2.193.0
+
+The fixes made after 2.192.0.
+
+### Practice ran though this Hatchabot's budget was used up, just before its agents were paused
+- **Symptom:** with this Hatchabot's budget set to pause, a skill's Practice still ran, and spent, in the minutes between the budget reaching 100% and its agents being paused; from v2.193.0 Practice answers `This Hatchabot has reached its budget for <Month>, and Practice spends from the same budget. It can practise again once the budget is raised or the pause ends on <Next month> 1.`
+- **Check:** Usage → Budgets: this Hatchabot's budget is at 100% and set to pause, and the agent is not shown as paused yet (a pause waits up to 20 minutes for a quiet moment).
+- **Cause:** Practice was refused while a pause was open, or once the agent's own pause budget was reached; the machine's budget counted only once its pause was made.
+- **Fix:** upgrade. Then raise the budget or wait for the 1st; an agent started by hand after its pause runs on, and may practise, until the 1st.
+- **Fixed in:** `v2.193.0` (HB-1248).
+- **Code:** `src/orchestrator/usage/budgets.ts` — `pauseDue`; `src/orchestrator/usage/practiceUsage.ts` — `practicePausedLine`
+
+### The quality guard's card names a model as `anthropic/…` but switches to it without the prefix
+- **Symptom:** a "↩ Switch "<agent>" back to anthropic/claude-…" card in Alerts, or its message on the chat, while confirming it sets the model as `claude-…`.
+- **Check:** the source's model menu (Settings → AI) lists the model without the `anthropic/` prefix, and the agent's model history records the old one with it.
+- **Cause:** the card named the old model as the history recorded it, while its action used the spelling the source offers; the two are one model.
+- **Fix:** nothing to do: confirming it switches to the right model. From v2.193.0 the card and its message use the source's spelling.
+- **Fixed in:** `v2.193.0` (HB-1273).
+- **Code:** `src/orchestrator/usage/modelLedger.ts` — `guardCardText`, `fileGuardProposals`
+
+### A model change judged worse never got its switch-back card
+- **Symptom:** the model ledger (GET `/v1/model-changes`, or ask your Hatchabot agent for the agent's model changes) shows a change with the verdict "worse" in the last week, but no "↩ Switch … back to …" card ever came under Alerts or on the chat.
+- **Check:** the agent still runs the model it was moved to, its source still offers the old one, and no other model card waits for it; the change's verdict is less than a week old.
+- **Cause:** before v2.191.0 the quality guard marked the change as handled and then wrote its card in a second write; Hatchabot stopping between the two left it marked with no card, and no later pass filed one.
+- **Fix:** upgrade: at its next start Hatchabot lets go of such a mark where the card cannot have been cleared away (a verdict under a week old), and the next usage pass files the card. An older one can't be told from a card answered and cleared after its week: switch the model back by hand if you want it.
+- **Fixed in:** `v2.193.0` (HB-1178).
+- **Code:** `src/store/store.ts` — `claimModelChangeGuard`; `src/orchestrator/usage/modelLedger.ts` — `fileGuardProposals`
+
+### The usage trend's total tokens jump on the days Usage was opened
+- **Symptom:** the usage trend's day points (GET `/v1/usage/history`, `totalTokens`) are higher on the days someone opened Usage than on the days between, by about what the agents' skill Practice runs ever spent; each day's own use (`delta`) is right.
+- **Check:** an agent with practice runs (its Usage page says "N practice runs"); the jumps are on the days the fleet's Usage was read.
+- **Cause:** since v2.191.0 the fleet's reading counts practice, and it wrote that total into the day's point, while the usage pass writes the agents' counters alone; the day keeps the larger of the two.
+- **Fix:** nothing to do: each day's own use is right. From v2.193.0 the day's point keeps the counters' total; points already written stay as they are.
+- **Fixed in:** `v2.193.0` (HB-1271).
+- **Code:** `src/orchestrator/usage/usageReadings.ts` — `computeFleetUsage`; `src/orchestrator/usage/fleetUsage.ts` — `snapshotDailyUsage`
+
+### A context cap set while a source switch waits names no model
+- **Symptom:** an agent saved onto a new AI source, not rebuilt yet, whose old source was deleted since: setting its context cap is accepted, but the token ledger's entry names no model, its Conversations row shows its model as `(unknown)`, and the cap is never written; from v2.193.0, when nothing of the old source is kept, the cap is refused: `Hatchabot can't tell which model its container runs (the AI source it was built with is gone): set a cap after its next rebuild.`
+- **Check:** the agent's page says its new source waits for a rebuild, and the source it ran on is no longer in Settings → AI.
+- **Cause:** the cap is judged by the source the container runs while a switch waits (HB-1170), and a deleted source was no longer found.
+- **Fix:** rebuild the agent onto its new source, then set the cap. From v2.193.0 the cap is judged by the deleted source's record (its vendor and the model the container was built with).
+- **Fixed in:** `v2.193.0` (HB-1344).
+- **Code:** `src/orchestrator/usage/tokenHealth.ts` — `runningModelOf`; `src/orchestrator/memory/tokenSteward.ts` — `setContextCap`; `src/orchestrator/memory/compaction.ts` — `cappedModelOf`
+
+### Mid-switch, the model scorecard and Recommended bill an agent by the source it is moving to
+- **Symptom:** an agent saved onto a new AI source and not rebuilt yet: the model scorecard (GET `/v1/model-scorecard`, what your Hatchabot agent reads to choose models) names the new source, its billing and its default model over figures the old one ran, and Recommended may offer "… could use a cheaper model" priced that way; the Conversations row (token health) names the old one.
+- **Check:** the agent's page says its new source waits for a rebuild.
+- **Cause:** the token health row and the context cap judge by the source the container runs (HB-1170); the scorecard still went by the source chosen.
+- **Fix:** rebuild the agent onto its new source, or ignore that item until then. From v2.193.0 the scorecard row is the source and model the container runs, and Recommended offers no cheaper model until the rebuild.
+- **Fixed in:** `v2.193.0` (HB-1343).
+- **Code:** `src/orchestrator/usage/modelScorecard.ts` — `buildScorecard`; `src/orchestrator/usage/recommendations.ts` — `cheaperItems`; `src/orchestrator/usage/tokenHealth.ts` — `runningModelOf`
+
+### After a move off a Claude plan, the agent's earlier plan use counts as API spend
+- **Symptom:** an agent moved from a Claude plan to an API key or a local model: Usage's "At API prices" puts what it used on the plan before the move under API spend, and its spend chart's "* Claude plan use priced at API rates" note or plan share is gone or smaller than it was.
+- **Check:** the agent's source changed within the chart's window, and the hours before the change are the ones counted as API.
+- **Cause:** the window's billing and the chart's plan share took each agent's spend as its current source's, whatever source it ran on at the time.
+- **Fix:** nothing to do: the dollar figures were right, only plan against API was not. From v2.193.0 each hour is billed by the source it ran on, and the changes of source are kept 31 days, as long as a month's chart covers.
+- **Fixed in:** `v2.193.0` (HB-1180).
+- **Code:** `src/orchestrator/usage/agentCosts.ts` — `sourceTimeline`, `windowPricing`, `spendSeries`; `src/store/store.ts` — `pruneSourceUsage`
+
+### Settings → AI counts fewer requests than Usage for an agent that practises
+- **Symptom:** an agent that runs skill Practice: its source's request counts in Settings → AI (the hour, 5 hours, day and week, and its top agents) are lower than its Usage periods' request counts, while the tokens beside them agree; the model scorecard's calls and month leave its practice out.
+- **Check:** the agent's Usage page says "N practice runs"; the gap is about the practice calls.
+- **Cause:** those counts were read from the agent's log alone, which does not hold a practice run's calls (their tokens were counted from Hatchabot's own record of the run).
+- **Fix:** nothing to do. From v2.193.0 practice calls are in those counts and in the scorecard's calls, tokens and month. A practice call is not taken as a sign the source answered, and the calls its source refused are counted as refused requests (never as the source being rate-limited); the scorecard keeps them apart from its own turns.
+- **Fixed in:** `v2.193.0` (HB-1270).
+- **Code:** `src/orchestrator/usage/sourceUsage.ts` — `summarizeSourceUsage`; `src/orchestrator/usage/modelScorecard.ts` — `buildScorecard`, `scoreAgent`
+
+### A budget-paused agent is said to be "stopped by hand", or "Hatchabot tries again", while a new month's budget holds it
+- **Symptom:** an agent a budget paused last month, still not started, is shown in the new month as "stopped by hand: it stays stopped until you start it", and its own budget's line says "Its budget's pause ended on … Hatchabot tries again each pass", while this Hatchabot's budget for the new month is already used up (the message said "it was already stopped, so it stays stopped"). Or: an agent's own budget was removed after it paused the agent (that month or later), the start Hatchabot then owed it failed, and its tile gives no reason at all for being stopped.
+- **Check:** the agent's Usage → Budgets shows the earlier month's pause still open, and this Hatchabot's (or its own) budget is at 100% this month; or the agent has no budget now, is stopped, and its events show the budget's stop and no start since.
+- **Cause:** the new month's pause took the agent's stopped state for its owner's doing, and the ended pause's line did not know another budget held it; a removed budget's tile had no line for its pause at all.
+- **Fix:** nothing is lost: Hatchabot starts it once the budget that holds it allows (the 1st, a raise, or the budget removed), or start it yourself. From v2.193.0 the new month's pause is recorded as the budget's and its tile says this Hatchabot's budget holds it, and a pause whose own budget was removed says so on the tile: `Its budget was removed, which ended its pause, but it could not be started yet: …` (or, for one from an earlier month, `Its budget's pause ended on <Month> 1, …`). Still not shown: an earlier month's move to a cheaper model whose own model could not be put back; and a budget raised (not removed) in the month it paused the agent, whose start then failed, still reads "its monthly budget is used up".
+- **Fixed in:** `v2.193.0` (HB-1316).
+- **Code:** `src/orchestrator/usage/budgets.ts` — `endedPauseOwed`, `endedPauseLine`, `runBudgets`; `src/orchestrator/lifecycle/agentList.ts`
+
+### An agent you started right after Hatchabot restarted is stopped again by its budget
+- **Symptom:** an agent its budget stopped moments before Hatchabot restarted; you start it, and within about ten minutes the budget stops it again, though Start after a budget pause should leave it running until the 1st.
+- **Check:** the agent's events show its budget's stop just before a restart, and no "paused by its budget" record until after your Start.
+- **Cause:** the restart came between the budget's stop and its record of the pause; your Start found no pause to take over, so the next pass made one.
+- **Fix:** start it again: the pause is recorded then, and a Start over it holds until the 1st. From v2.193.0 a Start over such a stop is recorded as taking over its pause.
+- **Fixed in:** `v2.193.0` (HB-1406).
+- **Code:** `src/orchestrator/usage/budgets.ts` — `startedOverCutOffPause`; `src/api/agents/lifecycleRoutes.ts`
+
+### A budget pause cut off by a restart reads as a stop by hand when the agent's machine was not answering
+- **Symptom:** an agent its budget stopped just before Hatchabot restarted, on a machine that did not answer for a while after: it stays stopped on the 1st, or after the budget is raised, as if stopped by hand.
+- **Check:** Hatchabot restarted close to when the agent's budget ran out, and its machine (a runner) was down or asleep after the restart.
+- **Cause:** the next budget pass tried its own stop, which failed on the silent machine, and in failing let go of the earlier stop's mark; the stop found later had nothing saying it was the budget's.
+- **Fix:** start it by hand. From v2.193.0 the pass keeps the earlier stop's mark when its own stop fails.
+- **Fixed in:** `v2.193.0` (HB-1416).
+- **Code:** `src/orchestrator/usage/budgets.ts` — `runBudgets`, `recordCutOffPauses`
+
+### A derived image's lines are refused with "COPY --from is not allowed in a derived image"
+- **Symptom:** saving, rebuilding, moving or importing a derived image is refused with "COPY --from is not allowed in a derived image: it copies another image's files into this one (any image on this machine, or one Docker can pull with this machine's logins). Install what you need with RUN instead, such as apt-get install or a download." An image saved before 2.193.0 with such a line no longer builds: its Rebuild is refused at once with those words, and so is a move or an import that has to build it, before anything is built (one onto a machine that already has the same image builds nothing and goes ahead); the image already built, its record and its status stay as they were.
+- **Check:** the image's lines (Settings → Advanced → Runtime images) have a `COPY` (or `ONBUILD COPY`) with `--from`, perhaps after other flags, quoted (`--fr"om"=…`) or split over a line that goes on. A line in a heredoc's text that begins so counts too (the words then add "Hatchabot judges every line as if an instruction began on it").
+- **Cause:** a derived image's lines start no build stage of their own, so `--from` always names another image: any image on the machine (another derived image, which a machine without it cannot rebuild, or one whose files hold keys), or one Docker pulls with the machine's registry logins. A RUN later in the same build could send those files anywhere. It is the reach of `RUN --mount=from=…`, which was refused already, and nothing in the image built shows it.
+- **Fix:** change the lines to install the tool another way, with `RUN apt-get install -y …`, or by downloading its release in a RUN (`RUN curl -fsSL <url> -o /usr/local/bin/<tool> && chmod +x /usr/local/bin/<tool>`). The Runtime images page has no editor for the lines: ask the Hatchabot agent to change the image's lines, or put them in a file and run `hatchabot image derive <name> --from <file>` on the machine, which replaces them and builds the image (add `--base <tag>` to keep a base other than the fleet's default). For a move or an import, change the lines where they come from that way, and move or export again once it has built. Before upgrading such lines still build.
+- **Fixed in:** `v2.193.0` (HB-1473, HB-1470): such lines are refused before anything is built.
+- **Code:** `src/orchestrator/machines/derivedImage.ts` — `dockerfileProblem`, `copyFlags`, `derivedBuildProblem`; `src/api/machine/imageRoutes.ts` — `'/v1/images/:name/rebuild'`; `src/orchestrator/machines/imageRecipe.ts` — `recipeProblem`, `buildRecipeOn`
+
+### A derived image's lines are refused with "ADD of a URL is not allowed in a derived image"
+- **Symptom:** saving, rebuilding, moving or importing a derived image is refused with "ADD of a URL is not allowed in a derived image: Docker fetches it from this machine's own network, where it can reach services only this machine can (a git address, or a source named by a variable such as $X, counts as one). Download it with RUN curl instead, which runs in the build's own network." An image saved before 2.193.0 with such a line no longer builds: its Rebuild is refused at once with those words, and so is a move or an import that has to build it, before anything is built (one onto a machine that already has the same image builds nothing and goes ahead); the image already built, its record and its status stay as they were.
+- **Check:** the image's lines (Settings → Advanced → Runtime images) have an `ADD` (or `ONBUILD ADD`) whose source, after its flags, is a URL (`http://…`, `https://…`, any `scheme://…`) or a git address (`git@host:team/repo.git`, `https://…/repo.git#ref`, `github.com/…`), or holds a `:`, a `$` (a variable such as `$X` or `${X}`) or a `\`. A line in a heredoc's text that begins so counts too (the words then add "Hatchabot judges every line as if an instruction began on it").
+- **Cause:** Docker's daemon fetches an ADD's URL or git address itself, from the machine's own network rather than the build's: it reaches services bound to the machine's loopback, which a build's RUN cannot, and it follows redirects, so a public address can lead there. Lines from an imported image, or lines confirmed without reading them, could read such a service and send what it answers anywhere. A source named by a variable is refused too, since an ARG or ENV can hold a URL.
+- **Fix:** change the lines to download it in a RUN, which runs in the build's own network: `RUN curl -fsSL <url> -o /opt/<file>`, unpacking an archive in the same RUN (`&& tar -xzf /opt/<file> -C /opt`); for a git repository, `RUN git clone --depth 1 <url> /opt/<repo>`. An ADD that stays (of a heredoc, or of a file in the build folder) names its source in full, not through a variable. The Runtime images page has no editor for the lines: ask the Hatchabot agent to change the image's lines, or put them in a file and run `hatchabot image derive <name> --from <file>` on the machine, which replaces them and builds the image (add `--base <tag>` to keep a base other than the fleet's default). For a move or an import, change the lines where they come from that way, and move or export again once it has built. Before upgrading such lines still build.
+- **Fixed in:** `v2.193.0` (HB-1500): such lines are refused before anything is built.
+- **Code:** `src/orchestrator/machines/derivedImage.ts` — `dockerfileProblem`, `addSources`, `fetchedSource`, `derivedBuildProblem`; `src/api/machine/imageRoutes.ts` — `'/v1/images/:name/rebuild'`; `src/orchestrator/machines/imageRecipe.ts` — `recipeProblem`, `buildRecipeOn`
+
+### After a move, people nobody invited are asked to pair with the agent for a few minutes after the invite's half hour
+- **Symptom:** an agent was moved to another machine while an invite's half hour for a first message was open. For up to about five minutes after that half hour ended, someone nobody let in who messages its bot gets OpenClaw's "access not configured" reply with a pairing code, and the app shows "🔑 <name> wants to talk to <agent>".
+- **Check:** the agent's timeline shows the move during the invite's window, and the knock came within about five minutes of the window's end. Knocks later than that are not this: the pairing sweep, every five minutes, puts the door back to rest on the machine the agent is on.
+- **Cause:** the window's end put the door back to rest (`allowlist`) through the machine where the window was opened, not the one the agent had moved to, which stayed `pairing` until the next pairing sweep.
+- **Fix:** nothing to do: the door rests within minutes, by the sweep. Press **Not now** on a knock that came meanwhile. After upgrading, the door rests at the window's end on the machine the agent is on then.
+- **Fixed in:** `v2.193.0` (HB-0649).
+- **Code:** `src/orchestrator/members/claim.ts` — `closeKnockWindow`; `src/orchestrator/members/invitations.ts` — `holdDoorForKnocks`; `src/orchestrator/channels/knocks.ts` — `restDoor`
+
+### An agent stays stopped, with no file, after Hatchabot restarted during its download
+- **Symptom:** **Download copy** was pressed on a running agent, Hatchabot restarted or was upgraded while the copy was being made, and the download failed in the browser (the app shows the browser's network error, such as "Failed to fetch"). The agent then stays **Stopped**.
+- **Check:** the agent's timeline has no "exported" after the download began, and the service restarted at that time (an upgrade, a restart of the service, or the machine rebooting). From v2.193.0 the timeline says "started again: a restart cut off its download, and no file was made" once the next start has run.
+- **Cause:** a download stops a running agent for its copy and starts it again only when the copy fails in the same process. A restart in the copy lost that.
+- **Fix:** before upgrading, press **Start**, then download again. After upgrading, the next start starts it again by itself, unless its file was made, or its owner started or stopped it, or its runner was drained, since. One with a rebuild queued is left to the rebuild, which starts it ("its rebuild starts it"). If the timeline says it "could not be started again", press **Start**.
+- **Fixed in:** `v2.193.0` (HB-1479).
+- **Code:** `src/orchestrator/transfer/copies.ts` — `download`; `src/orchestrator/transfer/transfer.ts` — `startCutOffDownloads`; `src/orchestrator/lifecycle/operationsResume.ts` — `startResumeOperations`
+
+### Tasks adopted from an OpenClaw agent never arrive, for every agent adopted after one whose machine Hatchabot no longer knows
+- **Symptom:** an OpenClaw workspace was adopted into an agent that was stopped (or busy then), and its scheduled tasks never appear in the agent's Tasks page after it runs. Its timeline never says "the adopted workspace's paths and tasks were brought over once it was running". Other adopts made later wait the same way. Related: the same folder adopted again waits up to an hour before its tasks are tried, and the agent's activity fills with "workspace re-point failed: …; it is tried again within the hour", one an hour.
+- **Check:** an agent adopted into earlier still waits for its tasks, and its machine cannot be reached by name: what is done to that agent fails with `No such host: <id>` (its host's record is gone) or `No provider registered for "<kind>"` (its host names a kind of machine this install does not have), in the app or the service's log. The pass that brings tasks over says nothing itself. A runner cannot be removed while an agent is on it, so this follows a database put back by hand, or a change of the install's machine kinds.
+- **Cause:** that pass looked at each waiting agent's gateway through its machine, and a machine this server cannot resolve threw out of the whole pass, every pass, before the adopts after it ran. A folder adopted again kept the older adopt's last try and its day, and each failed re-point was written to the timeline.
+- **Fix:** before upgrading, make that agent's machine known again (its host's record, or the kind of machine it names), or take the agent off it. The other adopts then run at the next pass, within five minutes. After upgrading, nothing to do for the others: such an agent waits without holding up the rest, a folder adopted again is tried at once, and a run of failed re-points is said once.
+- **Fixed in:** `v2.193.0` (HB-1476).
+- **Code:** `src/orchestrator/transfer/adopts.ts` — `finishDeferredAdopts`, `repoint`; `src/api/routes.ts` — `providerFor`; `src/providers/resolveProvider.ts` — `resolveProvider`
+
+### A default base image build cut off by a restart leaves the new OpenClaw a candidate
+- **Symptom:** after Hatchabot restarted (an upgrade, a reboot, a crash) during a default base image build the app ran (`POST /v1/runtime/build` without `candidate`), or just as it ended, the new OpenClaw is not the fleet default and nobody was told: the build log ends "(candidate — :latest untouched)". From `v2.193.0`, This machine's Activity list has a failed "Base image build" row, and it and the Hatchabot agent (asked about the last base build) say "The default base image build for OpenClaw <version> was cut off by a restart, so it was not made the fleet default. If it got to its end, it is kept as hatchabot-runtime:<version> (Settings → Advanced → Runtime images): try it on an agent, then promote it. If it is not there, build it again." Under a `HATCHABOT_IMAGE` pin to another tag it says "hatchabot-runtime:latest was not moved to it" and "then build it again to move hatchabot-runtime:latest": the runtime repository's `:latest`, which a default build moves then, not the pin. When docker says the default's tag already names the candidate (the restart came just after the tag moved), the row succeeds instead, with "The default base image build for OpenClaw <version> was cut off by a restart, but hatchabot-runtime:latest names hatchabot-runtime:<version> now, so it is the fleet default." If docker does not answer within a minute of the start, the build is said to be cut off.
+- **Check:** `docker image ls hatchabot-runtime` lists the version's tag, and `:latest` (or the pin) is a different image id. The service's log shows it started again after the build began.
+- **Cause:** a default build runs as a candidate and takes the default's tag only as it ends. A restart during the build, or between its end and the tag, left the candidate and no record of the build.
+- **Fix:** if the candidate is listed, start an agent on it, then Promote it (under a pin, build it again as the default). If it is not listed, build it again. After upgrading, a cut-off build is said at the next start.
+- **Fixed in:** `v2.193.0` (HB-1255).
+- **Code:** `src/orchestrator/machines/runtimeImages.ts` — `createRuntimeImages`, `startBaseBuild`, `cutOffWords`, `movedBeforeCutOff`, `madeDefault`; `src/orchestrator/lifecycle/operations.ts` — `beginOperation`
+
+### A base image build stays "already running" after it has ended
+- **Symptom:** a new base image build in the app (`POST /v1/runtime/build`, or the Hatchabot agent's candidate build) refuses with "A base image build is already running." long after the build's script has exited (no `build-runtime-image.sh` in `ps`), and the log has stopped growing. Only a restart ended it.
+- **Check:** `ps -ef | grep build-runtime-image` shows nothing; the disk that holds Hatchabot's data hangs or is very slow (`df -h` and `dmesg` show I/O errors or a stuck network mount).
+- **Cause:** an ended build waited without a limit for its log's last writes, and a failed one for the read of its log's end, which it is judged by; on a disk that hangs neither finished.
+- **Fix:** fix the disk, then restart Hatchabot. After upgrading, an ended build waits 10 seconds at most for its log's last writes, and a failed one 10 seconds more for the read of its log's end; then its outcome is its exit code alone ("The build stopped with code N; see its log." for a failure).
+- **Fixed in:** `v2.193.0` (HB-1290).
+- **Code:** `src/orchestrator/machines/runtimeImages.ts` — `BASE_LOG_GRACE_MS`, `createRuntimeImages`; `src/orchestrator/machines/buildFailure.ts` — `buildFailureReason`
+
+### A derived image that built is marked "interrupted by a restart — press Rebuild"
+- **Symptom:** a derived image's build finished (its log ends with the image taking its tag) and Hatchabot was stopped or upgraded within the next few seconds; after the start the Images tab shows the image FAILED with "interrupted by a restart — press Rebuild".
+- **Check:** `docker image inspect hatchabot-runtime:derived-<name>` shows an image made at the build's end, and the build log has no error at its end.
+- **Cause:** the image was marked READY only once its log had closed, up to 10 seconds after the build; a stop in between left it BUILDING, and the next start marks every BUILDING image failed.
+- **Fix:** press Rebuild (it builds the same image again, mostly from docker's cache). After upgrading, an image is READY as soon as it takes its tag.
+- **Fixed in:** `v2.193.0` (HB-1292).
+- **Code:** `src/orchestrator/machines/runtimeImages.ts` — `kickImageBuild`; `src/orchestrator/machines/derivedImage.ts` — `buildDerivedImage`
+
+### A long build's log shows only its first lines for a moment
+- **Symptom:** while a long base or derived image build runs, its log on the Images tab (or `GET /v1/runtime/build`) shows only its first lines, a part of the "bytes of output left out here" note, or nothing, for one refresh, then its end again.
+- **Check:** the build's output is past 4 MiB (the log is cut back to its first and last lines from there).
+- **Cause:** the log was cut to its first lines before its new end was written, so a read between the two found the first lines alone; and a read that took the log's size just before a cut read past its new end, and found nothing.
+- **Fix:** nothing is lost: the next refresh shows the end. After upgrading, the new end is written before the old one is cut, and a read that comes back short takes the log's end again.
+- **Fixed in:** `v2.193.0` (HB-1293).
+- **Code:** `src/orchestrator/machines/derivedImage.ts` — `openBuildLog`, `writeAll`, `readLogTail`
+
+### Two moves or imports at once that build the same image fail or use each other's image
+- **Symptom:** two agents on the same `-plus-` image (a base with packages) are moved to the same machine, or imported, at the same time, and one fails with "the image <tag> could not be built here: The built image could not be checked, so it is not used: …" or with "… is not built on its base", while the other works; or both work, but one was checked against the other's build.
+- **Check:** the two moves or imports started within the time one build takes, and both name the same image tag.
+- **Cause:** every build of a tag builds to its one check name (`<repo>-check:<tag>`) in that machine's docker, and a plain tag has no record that one build claims first, so two builds of it on one machine at once shared that name.
+- **Fix:** move or import the one that failed again. After upgrading, the second build of a tag on a machine waits for the first; builds of it on two machines still go side by side.
+- **Fixed in:** `v2.193.0` (HB-1322).
+- **Code:** `src/orchestrator/machines/imageRecipe.ts` — `buildRecipeOn`, `recipeBuilds`, `recipeMachines`
+
+### A base image build fails with "would run as 'root', not node" or "carries no build-inputs label"
+- **Symptom:** a base image build (the app's, the Hatchabot agent's candidate build, or `scripts/build-runtime-image.sh`) fails with "hatchabot-runtime:<tag> would run as '<user>', not node: docker/Dockerfile.runtime must end with USER node. Removing it." or "hatchabot-runtime:<tag> carries no build-inputs label (org.hatchabot.build-inputs), so no machine could tell what it was built from: docker/Dockerfile.runtime must set it. Removing it.", maybe followed by "hatchabot-runtime:<tag> names the image it named before this build again." Or, for the release's published image it pulled instead of building: "✗ The published image <image>@sha256:… would run as '<user>', not node, which the agents' volumes and Claude Code need. Not using it." or "✗ The published image <image>@sha256:… carries no build-inputs label (org.hatchabot.build-inputs), so no machine could tell what it was built from. Not using it."
+- **Check:** for a pulled image, `docker image inspect --format '{{.Config.User}} {{ index .Config.Labels "org.hatchabot.build-inputs" }}' <the image the message names>` prints a user other than `node`, or no `v1;openclaw=…` label. Otherwise `git status docker/Dockerfile.runtime` (or `git diff`) in the install shows it edited: its last `USER` line is not `USER node`, or its `LABEL org.hatchabot.build-inputs=` line is gone or changed.
+- **Cause:** the Dockerfile was edited by hand. An image that runs as root breaks every agent on it, and one without its build-inputs label cannot be told from the standard image of its OpenClaw on another machine. From `v2.193.0` a locally built base image is checked for both, as derived images and recipes are, before it keeps its tag, and so is the published image a release's manifest names before it is tagged here. A release builds that image from the same Dockerfile, which sets both, so a published image that fails is not one a Hatchabot release built.
+- **Fix:** put back `docker/Dockerfile.runtime` (`git checkout docker/Dockerfile.runtime`), and add packages through the build's extra packages or a derived image instead, then build again. For a pulled image, build from source instead (`BUILD_LOCAL=1 ./scripts/build-runtime-image.sh`), and report it (Report a problem): nothing is tagged from it.
+- **Fixed in:** `v2.193.0` (HB-1326; the pulled image, HB-1511).
+- **Code:** `scripts/build-runtime-image.sh` — `not_used`, `use_pulled`
+
+### A base image built from Settings with no version leaves its agents without memory search
+- **Symptom:** a build of the runtime image from Settings (or `POST /v1/runtime/build`) with no OpenClaw version chosen started while the shared memory search service was off, and agents rebuilt on the new image have no memory search. From `v2.193.0` such a build is refused with `OpenClaw <version> has no memory search engine of its own to bake, so its agents need the shared memory search service: start it first (Settings → Hosts).`
+- **Check:** `docker image inspect --format '{{index .Config.Labels "org.hatchabot.embed-engine"}}' hatchabot-runtime:latest` says `none`, and Settings → Hosts shows the shared memory search service off.
+- **Cause:** with no version given, the build uses the Dockerfile's OpenClaw (2026.8 or later, which has no engine to bake), but whether it needs the shared service was judged as for an OpenClaw that bakes one.
+- **Fix:** start the shared memory search service (Settings → Hosts), then rebuild the agents. After upgrading, the build is refused until the service is on.
+- **Fixed in:** `v2.193.0` (HB-1185).
+- **Code:** `src/api/machine/imageRoutes.ts` — `registerImageRoutes`; `src/orchestrator/machines/buildFailure.ts` — `needsSharedEmbedder`
+
+### Agents die with "exec format error" after Install image to a runner of this machine's own CPU
+- **Symptom:** after Install image, agents built on a runner whose CPU is this machine's fail to start with `exec format error`.
+- **Check:** on this machine, `docker image inspect --format '{{.Architecture}}' hatchabot-runtime:latest` (or the image `HATCHABOT_IMAGE` names) differs from `docker info --format '{{.Architecture}}'` (amd64 is x86_64, arm64 is aarch64): the image was built here for another CPU, under emulation.
+- **Cause:** Install image compared this machine's CPU with the runner's, not the CPU the image was built for, so it copied the image as matching.
+- **Fix:** upgrade and run Install image again: a runner of the image's CPU gets the copy, any other the published image of that OpenClaw. An image that names no CPU is judged by this machine's, as before. From `v2.193.0`, an image that is not on this machine is named: `There is no image <image> on this machine, so nothing was copied: build or pull it here first.` Before upgrading, build the image for this machine's CPU (a build from Settings does), then install again.
+- **Fixed in:** `v2.193.0` (HB-1188).
+- **Code:** `src/orchestrator/machines/runnerSetup.ts` — `installRuntimeImage`, `imageArch`, `dockerArch`
+
+### A runner whose ssh user or host starts with "-" or "." never opens a console
+- **Symptom:** a runner added as `ssh://-name` (or `ssh://-user@host`) never connects, and one whose host starts with "." (an ssh_config alias such as `ssh://.shed`) runs agents but their consoles never open. From `v2.193.0`, adding the first is refused with `A user or host that starts with "-" cannot be reached over ssh: ssh takes it for an option and refuses it, so neither Docker nor an agent's console could reach that runner. Use the machine's own name or address.`
+- **Check:** the runner's address in Settings → Hosts starts its user or host with "-" or ".", or has a port of more than five digits. `ssh -G <host>` answers `hostname contains invalid characters` for a leading "-".
+- **Cause:** adding a runner took names the console tunnel refuses, so the runner was added and its consoles were never tunnelled; a leading "-" is also refused by ssh itself.
+- **Fix:** for a leading "-", remove the runner and add it again by the machine's own name or address. For a leading ".", upgrade: consoles open. Before upgrading, add an ssh_config alias that starts with a letter.
+- **Fixed in:** `v2.193.0` (HB-1258).
+- **Code:** `src/orchestrator/machines/hosts.ts` — `addProblem`; `src/orchestrator/machines/runnerSetup.ts` — `parseSshEndpoint`; `src/providers/localDockerProvider.ts` — `sshTarget`
+
+### Resources counts an agent on a machine it moved off
+- **Symptom:** Resources lists an agent under its previous machine as well as its own, that machine's totals include it, or the agent's peak memory and cap hits are higher than anything it did on its own machine.
+- **Check:** on the previous machine, `docker ps -a` lists a container of the agent's name (a copy a move left there).
+- **Cause:** Resources matched docker stats rows to agents by container name on every machine, so the copy on the old machine was read as the agent.
+- **Fix:** upgrade: only the container on the agent's own machine is the agent. Before upgrading, once the agent runs on its new machine, remove the leftover container on the old one (`docker rm -f <name>` there) and clear the agent's peak and cap hits (the × by its peak in Resources).
+- **Fixed in:** `v2.193.0` (HB-1259).
+- **Code:** `src/orchestrator/machines/resources.ts` — `createResources`, `fleet`
+
+### Importing a copy of this machine's own derived image asks about "a different image" after its base was deleted
+- **Symptom:** importing a copy exported from this machine asks which image to use, with `a different image here already has the name hatchabot-runtime:derived-<name>`, and offers only the default image, though the derived image here is the one the copy was made with.
+- **Check:** the Images tab shows the derived image of that name with the copy's lines, and its base (the image it was built on) is no longer in `docker images`.
+- **Cause:** a derived image here was judged by whether its record builds the same on its base, which cannot be judged once that base is deleted.
+- **Fix:** upgrade and import again: with its base gone, the image itself is judged and taken as the copy's when its lines, its packages and the stamp of what it was built from are the copy's, and the build inputs it took from its base are the ones the copy names. Anything else is still asked about, and so is a copy from before the build-inputs label, which names none. Before upgrading, rebuild the derived image on a base that is here (Change base), then import.
+- **Fixed in:** `v2.193.0` (HB-1331).
+- **Code:** `src/orchestrator/machines/imageRecipe.ts` — `sameImageHere`, `builtAsRecord`; `src/orchestrator/transfer/transfer.ts` — `settleImage`
+
+### Putting an agent to sleep by hand fails with "it is no longer running"
+- **Symptom:** you press Sleep on an agent, and the app shows an error, "it is no longer running" (an HTTP 500), not a reason it cannot sleep. Sometimes the agent was already asleep by then, and the error still came. The service's log may also show `hibernate.failed` with the same words for the idle sweep.
+- **Check:** the agent stopped (it crashed, or another Stop or the idle sweep reached it) in the moment between your press and the sleep itself: its timeline shows it stopped, or `agent.hibernated`, at that time.
+- **Cause:** the sleep looks at the agent again just before it stops it. An agent no longer running at that second was an error, not a reason it may not sleep, and one put to sleep by the sweep in that moment was not taken as asleep.
+- **Fix:** before upgrading, look at the agent: it is stopped or asleep already, and nothing else needs doing. After upgrading, the app says "It cannot sleep just now: it is no longer running." (409), an agent already asleep is answered as asleep, and the sweep logs nothing for it.
+- **Fixed in:** `v2.193.0` (HB-1175).
+- **Code:** `src/orchestrator/lifecycle/hibernate.ts` — `hibernateAgent`, `NoLongerSleepy`; `src/api/agents/lifecycleRoutes.ts` — `'/v1/agents/:id/hibernate'`
+
+### A switch to an AI source fails with "That AI source was deleted meanwhile" after the source was deleted while the switch was slow
+- **Symptom:** an agent's switch to another AI source (alone or with a memory limit change) takes more than ten minutes, usually because Docker was slow to apply the memory limit, and then fails with "That AI source was deleted meanwhile. Pick another one and try again." Someone had deleted that source in Settings → AI during the switch, and the delete was allowed.
+- **Check:** the source's delete is in the activity after the switch began and before it ended, more than ten minutes after it began. A delete within the first ten minutes is refused with "An agent is switching to it; try again in a moment."
+- **Cause:** a switch holds the source it goes to until it ends, and the source cannot be deleted while it is held. The hold still lapsed after ten minutes, whether or not the switch was still at work.
+- **Fix:** before upgrading, add the source again (or pick another) and switch the agent again. After upgrading, the source cannot be deleted until the switch ends, however long it takes.
+- **Fixed in:** `v2.193.0` (HB-1413).
+- **Code:** `src/orchestrator/lifecycle/sourceHolds.ts` — `createSourceHolds`, `withSourceHold`, `sourceHeld`; `src/api/usage/aiSourceRoutes.ts` — `'/v1/ai-profiles/:id'` (DELETE)
+
+### An agent you stopped starts again on the 1st, or when a budget is raised, after Hatchabot restarted during the Stop
+- **Symptom:** you stopped an agent that a monthly budget had paused before (a rebuild had brought it back up), or drained the runner it was on (Settings → Hosts → Drain), Hatchabot restarted (an upgrade, a reboot) while the stop was under way, and later the agent started again by itself: on the 1st of the month, or when a budget was raised or removed. Its timeline shows `budget.resumed`.
+- **Check:** the agent's timeline shows your Stop (or the drain), then Hatchabot starting, then the start at the budget's end, with no `budget.pause_disowned` after your Stop.
+- **Cause:** your Stop, and a drain's stop of each agent, made the stop yours (so the end of the budget's pause starts nothing) only after Docker had stopped the container. A restart in that stop left the pause the budget's, and the next budget pass started what you had stopped.
+- **Fix:** before upgrading, stop the agent again; with no restart during that stop, it stays stopped. After upgrading, the stop is yours before Docker is asked, so a restart in the middle changes nothing.
+- **Fixed in:** `v2.193.0` (HB-1480; a runner's drain, HB-1517).
+- **Code:** `src/orchestrator/lifecycle/power.ts` — `stopRunning`; `src/orchestrator/machines/hosts.ts` — `createHosts`, `drain`; `src/orchestrator/usage/monthlyBudgets.ts` — `disownPauseOnStop`; `src/store/store.ts` — `disownBudgetPause`
+
+### An agent starts again by itself right after you stopped it, just after Hatchabot restarted, or its timeline says "Cannot start while RUNNING"
+- **Symptom:** soon after Hatchabot started (an upgrade, a reboot), you pressed Start on an agent and then Stop, and a moment later it started again by itself. Or you pressed Start only, and its timeline shows a failed start just after your own, "Cannot start while RUNNING" or "Another operation is already running on this agent.", and the operation's outcome says it was not started though it is running.
+- **Check:** the agent had an operation that finished before the restart and still owed it a start (a workspace adopt, a restore from a backup): its activity shows that operation, then Hatchabot starting, then your Start. Slower on a runner machine, which is asked whether a rebuild is needed first.
+- **Cause:** at its start, Hatchabot makes the starts such operations still owe, as Start does. It looked whether the start was still owed only before its own checks, which ask the machine first; your Start and Stop in that time did not stop it from starting the agent afterwards. One whose checks ended, or that began, while your Start was still starting or rebuilding the agent was refused as busy, and that was written as a failed start.
+- **Fix:** before upgrading, stop the agent again once Hatchabot has finished starting (a minute or two); a failed start on the timeline next to your own Start can be ignored. After upgrading, such a start is judged again once its checks are done and whenever it is refused, at once and again once your Start or Stop lets go of the agent; one you took over is not made, and says nothing.
+- **Fixed in:** `v2.193.0` (HB-1252).
+- **Code:** `src/orchestrator/lifecycle/operationsResume.ts` — `startAsStartDoes`, `startsStillOwed`; `src/orchestrator/lifecycle/power.ts` — `startStopped`, `stopRunning`; `src/api/routes.ts` — `startStopped`
+
+### A snapshot taken by hand, or Verify now on access, says to try again though nothing changed the agent
+- **Symptom:** taking a snapshot of an agent by hand fails with "A rebuild or restore started while the snapshot read its files; take it again.", or Verify now on its access says "it was stopped, rebuilt or moved while it was being looked at, so what was found there is not kept — verify it again", though no rebuild, setup or restore ran on it.
+- **Check:** at that moment, a rebuild or a setup of that agent was asked for and refused because something else held it: its activity shows a rebuild or setup that failed at once with "Another operation is already running on this agent.", or a setup left to Hatchabot's next pass after a restart.
+- **Cause:** a rebuild or setup counted as replacing the agent's files as it was asked for, before it took the agent, so one that was refused counted all the same, and the snapshot or the check threw away what it had read.
+- **Fix:** before and after upgrading, take the snapshot or verify again. After upgrading, a refused rebuild or setup counts nothing.
+- **Fixed in:** `v2.193.0` (HB-1491).
+- **Code:** `src/orchestrator/lifecycle/operations.ts` — `noteFilesReplacing`, `beginOperation`, `handleFor`; `src/orchestrator/lifecycle/provision.ts` — `runProvisionSteps`, `rebuildAgent`, `finishInterruptedRebuild`; `src/orchestrator/lifecycle/operationsResume.ts` — `resumeBackground`; `src/orchestrator/backups/agentSnapshots.ts`
+
+### After a switch of AI source with "recover after", the agent forgot the conversation and its page offers Recover context
+- **Symptom:** you switched agents to another AI source with "recover after" (and a rebuild), Hatchabot restarted during the rebuild, and afterwards an agent runs on its new source but has lost its conversation: its page offers Recover context, and its timeline has no `transcript.recover_after_switch`.
+- **Check:** its rebuild had already made the new container when Hatchabot stopped: its activity shows the rebuild finished after the restart with "Interrupted by a restart after it came up; the rest of its rebuild ran again, and it is running."
+- **Cause:** the recovery the switch asked for was chained to its rebuild in the process that ended. A rebuild queued again at the start has it chained again; one the start finishes itself had none.
+- **Fix:** before upgrading, press Recover context on the agent's page. After upgrading, the recovery runs once such a rebuild is done, on the new source.
+- **Fixed in:** `v2.193.0` (HB-1445).
+- **Code:** `src/orchestrator/lifecycle/operationsResume.ts` — `resumeBackground`; `src/orchestrator/memory/contextRecovery.ts` — `afterRebuild`; `src/api/routes.ts` — `recoverAfterRebuild`
+
+### After a restart, an agent's monthly budget says it is on a cheaper model, but it runs its own; or a model you chose went back
+- **Symptom:** an agent's tile says "Over its $X budget for <month>: on <cheaper model> until <date> — raise the budget to switch back now", while it still runs (and spends on) its own model; its page shows the cheaper model as waiting. Or, just after Hatchabot started, a model you chose for an agent on its page went back to what it was.
+- **Check:** Hatchabot restarted while a budget pass was moving the agent to or back to a cheaper model, and the agent's runtime then refused that model, or a source switch made before the budget's was waiting for its rebuild: its timeline shows `model.after_restart` with `refused`, `failed` or `rebuild` at the start. (A source you switched it to after the budget's switch, which offers the cheaper model, is not this: the model and the budget's switch stand, and its rebuild puts the model on.) For a choice that went back: several agents had a budget's model change waiting at the restart, and you chose the model while the start was still working through them.
+- **Cause:** the next start undoes a budget's switch its runtime refused, but not the cheaper model put back after a pause that did not happen, nor one answered "rebuild" on the source the budget's switch was made on; it read whether a model had been chosen since only when that agent's turn came, so a choice made before that was undone; and the undoing could drop a switch another budget had made that month.
+- **Fix:** before upgrading, choose the agent's model on its page (or raise the budget, then lower it again). After upgrading, these are undone as a budget pass undoes them, a model chosen after Hatchabot started is kept, and only the budget's own switch is dropped.
+- **Fixed in:** `v2.193.0` (HB-1444).
+- **Code:** `src/orchestrator/lifecycle/modelRuntime.ts` — `applyOwed`, `serveOwed`; `src/orchestrator/usage/monthlyBudgets.ts` — `cheaperRefused`, `reapplyCheaper`, `downgrade`; `src/orchestrator/usage/budgets.ts` — `runBudgets`; `src/store/store.ts` — `dropCheaperPause`
+
+### Adopting an OpenClaw workspace again is refused with "is a spare bot in the pool" after the first adopt failed
+- **Symptom:** an adopt (in the app or `hatchabot adopt`) handed its bot to the new agent, the agent could not start, and the message said to remove it and adopt again. You removed it, and the adopt again is refused: "@<bot> is a spare bot in the pool. …" (or, from the CLI with --reuse-bot, refused the bot).
+- **Check:** the failed agent still showed its bot (@name on its tile) when you removed it, and the delete said the bot was parked in the Bot pool. That happens when the failed setup could not remove its container (Docker refused), which keeps the bot with it.
+- **Cause:** a failed setup usually lets its bot go, so removing the agent parks nothing. One that could not remove its container keeps the bot, and a plain delete parks it in the pool, which an adopt then refuses.
+- **Fix:** before and after upgrading: take the bot out of the pool (⚙ Settings → Messaging → Telegram), then adopt again. After upgrading, the CLI says to remove it with `hatchabot delete <agent> --yes --no-recycle`, which keeps the bot out of the pool, and the app says the bot will be parked and must be taken out of the pool first.
+- **Fixed in:** `v2.193.0` (HB-1426).
+- **Code:** `src/cli.ts` — the adopt case; `web/app/create.js` — `runAdopt`; `src/orchestrator/lifecycle/provision.ts` — `rollback`
+
+### An unused invite's note sends you to the agent's Telegram tab, which has no Members
+- **Symptom:** a push that an invite went unused sends you to the agent's Telegram tab, which has no Members: `⏳ Someone opened your invite to "<agent>" but never messaged it.` with `Open that agent → Telegram → Members and press "Let them in again" when they are ready.`, or `…, but no message from them was let in.` or `…, but its time to message it ran out while Hatchabot was restarting.`, whose advice says `open that agent → Telegram → Members, press "Let them in again" and ask them to write again`. The join may have been on Discord or Slack.
+- **Check:** the agent's **Sharing** tab lists the person under **Members** with "hasn't messaged yet" and **Let them in again**.
+- **Cause:** the note named the Telegram tab for every app; Members are under the agent's Sharing tab, whatever app the person joined with.
+- **Fix:** open the agent → **Sharing** → **Members** and press **Let them in again**. After upgrading the note says so.
+- **Fixed in:** `v2.193.0` (HB-1219).
+- **Code:** `src/orchestrator/members/invitations.ts` — `neverMessaged`
+
+### You are told someone never messaged an agent after you removed them
+- **Symptom:** after you removed someone who had joined by an invite and not written yet, a push still says `⏳ Someone opened your invite to "<agent>" but never messaged it.`, about half an hour after they joined.
+- **Check:** the person is no longer under the agent's Sharing → Members.
+- **Cause:** the watch for their first message ran on to the end of its window and told you of it without asking whether they were still to come.
+- **Fix:** nothing to do: ignore the note. After upgrading nothing is said for someone removed meanwhile.
+- **Fixed in:** `v2.193.0` (HB-1223).
+- **Code:** `src/orchestrator/members/invitations.ts` — `watchJoin`, `unlinkedMember`
+
+### An invited person's first message shows as a stranger's request after a deploy and a later restart
+- **Symptom:** someone who opened your invite writes to the agent's bot, and instead of being let in, their message shows under Alerts as `🔑 … wants to talk to …` (or is turned away, under Invite only); Hatchabot had been upgraded and restarted again since they joined.
+- **Check:** the upgrade's new process started while the old one was still running (a deploy's overlap), within their window.
+- **Cause:** in the overlap the new process took the join up with a window of its own; the old one, taken over, removed the kept join from the store, so the restart after that had nothing to watch.
+- **Fix:** let them in under Alerts, or Sharing → Members → **Let them in again** and ask them to write again. The fix is in the old process, so it holds from the first deploy after `v2.193.0` is running: the deploy to `v2.193.0` itself can still drop such a join.
+- **Fixed in:** `v2.193.0` (HB-1224).
+- **Code:** `src/orchestrator/members/invitations.ts` — `letJoinGo`, `watchJoin`
+
+### No word that an invite went unused when its agent moved or failed during a restart
+- **Symptom:** someone opened your invite and never got in, and you were never told; or you were told `…, but its time to message it ran out while Hatchabot was restarting.` though Hatchabot had been stopped for days.
+- **Check:** in the agent's log, `claim.window_abandoned` (the agent moved to another machine, or failed) just before Hatchabot restarted; or the agent failed while Hatchabot was down; or Hatchabot was down longer than a restart.
+- **Cause:** the watch for their first message gives the window up first and tells you after; a restart in between left the join with its window closed, and the next start let it go in silence. An agent that failed while nothing watched (Hatchabot down) had its join let go in silence too, and its window kept until its time ran out. The "restarting" note was chosen by the window still being stored, whatever kept Hatchabot from watching it.
+- **Fix:** Sharing → Members → **Let them in again**, and ask them to write again. After upgrading the next start tells you, once across restarts, closes a failed agent's window, the note says the time ran out `while Hatchabot was not watching for their message` (for an agent that failed meanwhile, `…, but it was not watched while the agent had failed, so it was closed unused.`), and a window that had passed someone over says `…, but no message from them was let in.` as the watch would have, not `…never messaged it.`
+- **Fixed in:** `v2.193.0` (HB-1412, HB-1523).
+- **Code:** `src/orchestrator/members/invitations.ts` — `resumePendingJoins`, `neverMessaged`
+
+### An invite's door is shut though its 30 minutes are still running
+- **Symptom:** you copied a Telegram invite again just as another window on the agent was closing (an earlier invite's, someone's first-message window, or the door being put back to rest by the five-minute sweep or by turning Allow knocks off), or turned on letting anyone ask (Allow knocks) just then; the dialog said the door is open, but the person's message never shows as wanting to join, and they get no pairing reply.
+- **Check:** in the agent's log, a `channel.dm_policy` write to `allowlist` landed after the one to `pairing` of that press, with the window still open.
+- **Cause:** each write of the door back to rest checked for windows, then wrote; the press (or the switch) landing during that write opened the door, and the rest, landing after it, shut it again. An agent open to anyone is left alone by the sweep that puts doors right. The other way round, a window that closed while the door was being opened again for it left the door open with no window until the next sweep.
+- **Fix:** copy the invite again once its window has ended; for Allow knocks, turn it off and on again. After upgrading every write of the door to rest looks again once it lands and writes the door as the agent's windows and Allow knocks now say.
+- **Fixed in:** `v2.193.0` (HB-1372, HB-1521).
+- **Code:** `src/orchestrator/members/claim.ts` — `closeKnockWindow`, `doorAsItIs`; `src/orchestrator/channels/knocks.ts` — `restDoor`
+
+### The same "wants to talk" push comes twice after an agent's start
+- **Symptom:** a `🔑 … wants to talk to "<agent>".` push you already had comes again a few minutes later, just after the agent was started or upgraded.
+- **Check:** the agent's OpenClaw was started (or migrated to a new version) between the two pushes, and nobody turned the request away meanwhile.
+- **Cause:** a migration that commits its schema in steps leaves a moment with no pairing table; a sweep in that moment found no store at all, read it as nobody knocking, and forgot the knock it had told you of.
+- **Fix:** nothing to do: let them in, or turn them away, under Alerts as usual. After upgrading a read that finds no store keeps what you were told.
+- **Fixed in:** `v2.193.0` (HB-1369).
+- **Code:** `src/orchestrator/members/claim.ts` — `pairingListShell`, `listPairingRequests`; `src/orchestrator/channels/knocks.ts` — `sweepPendingPairings`
+
+### The Alerts count says a card is there, but the card is not listed
+- **Symptom:** the home screen's Alerts heading counts a card from your Hatchabot agent (a model or cost proposal), but no card is listed under it; it appears only after some other card comes or goes.
+- **Check:** the card was a Usage → Recommended item until a moment ago: its agent was archived, or it was told Not now there.
+- **Cause:** the page redrew the cards only when their ids changed, and a card that leaves Usage → Recommended keeps its id.
+- **Fix:** upgrade: the card is listed under Alerts as soon as it leaves Usage → Recommended. Before upgrading, reload the page.
+- **Fixed in:** `v2.193.0` (HB-1458).
+- **Code:** `web/app/cards.js` — `loadProposals`
+
+### The machine line keeps saying a backup is a day old while backups are late
+- **Symptom:** the home screen's machine line keeps saying `💾 Backup <date> (1d ago)`, with no late warning and no Alert, for days, though no backup has been made since.
+- **Check:** the page cannot read the machine just now (Settings → Backups shows an error, or the server's log shows `/v1/backups` failing), and the date shown is older than the "ago" says.
+- **Cause:** after a failed read the line keeps what the last good read said, and kept the backup's age and warning as they were then: they were never worked out again, and nothing said the reading was old.
+- **Fix:** upgrade: a part kept from an earlier read says `from the last good read, <when>`, on the line and in its Alert, and a kept backup ages, so a late one is warned of. Then find why the read fails (`hatchabot doctor`). Before upgrading, reload the page: a line with nothing kept shows what is read now.
+- **Fixed in:** `v2.193.0` (HB-1304).
+- **Code:** `web/app/spend.js` — `v2LoadMachine`, `v2BackupOf`, `v2KeptSince`, `v2PaintMachine`, `v2MachineAlerts`
+
+### A base image build that failed says nothing on Runtime images
+- **Symptom:** a base image build (asked of the Hatchabot agent) ends, and Settings → Advanced → Runtime images shows no new image and no reason; a build cut off by a restart says nothing there either.
+- **Check:** `GET /v1/runtime/build` (or the Activity list) has `ok: false` and an `error` for the last build.
+- **Cause:** the tab showed a base build only while it ran; how it ended reached the owner only through Activity and the Hatchabot agent.
+- **Fix:** upgrade: the tab says how the last base build ended (✓ finished, or ⚠ with its reason) until another starts or Hatchabot restarts; after a restart it says only a build the restart cut off, in the restart's words. Before upgrading, and for a build before the last restart, read the reason in Activity, or ask the Hatchabot agent.
+- **Fixed in:** `v2.193.0` (HB-1510).
+- **Code:** `web/app/images.js` — `pollBaseBuild`, `baseBuildLine`
+
+### An agent's budget limit box goes back to its old value after a save
+- **Symptom:** on an agent's Usage tab, saving its alert step and then its monthly limit quickly, the limit box shows the old limit again, though the save said it worked.
+- **Check:** close and open the agent's sheet: the limit shown then is the one saved.
+- **Cause:** each save reads the budgets again, and the reads were not numbered: the first one, landing last, drew the old limit over the new.
+- **Fix:** upgrade: only the newest read is drawn, and every box saved shows what the server keeps. Before upgrading, open the sheet again to see the limit saved.
+- **Fixed in:** `v2.193.0` (HB-1308).
+- **Code:** `web/app/spend.js` — `v2LoadBudgetRow`
+
+### The home screen is slow to show a new or renamed agent
+- **Symptom:** an agent renamed, added or stopped elsewhere (another tab, the phone, the CLI) takes several seconds more than usual to show on the home screen or in an open sheet, now and then.
+- **Check:** several agents run with a chat app, and the slow updates come every third poll (about every 25 s): the server's `/v1/pending` read is slow while it asks each agent's container who is knocking.
+- **Cause:** that poll waited for the knocks to be read before it drew anything.
+- **Fix:** upgrade: the list is drawn at once, and the knocks when their read lands.
+- **Fixed in:** `v2.193.0` (HB-1303).
+- **Code:** `web/app/cards.js` — `refreshNow`
+
+### A backup set says "incomplete (the run did not finish)" though it finished
+- **Symptom:** Settings → Backups marks a set `⚠ incomplete (the run did not finish)` though the run ended, for example with `✗ … captured, but the saved key decrypts none of the backed-up secrets` or with every runner asleep.
+- **Check:** the set's `backup-status.json` has a `finishedAt` and no `failedVolumes`.
+- **Cause:** every incomplete set with no failed volume was said to be unfinished.
+- **Fix:** upgrade: an incomplete set says why: agents failed, volumes left out because their runner did not answer, the run ended with a problem, or the run did not finish. For the reason of a run that ended with a problem, read the backup service's log, or press Back up now, which shows the run's last line.
+- **Fixed in:** `v2.193.0` (HB-1451).
+- **Code:** `web/app/settings.js` — `loadBackups`
+
+### A local source's default model is listed twice, with and without :latest
+- **Symptom:** Settings → AI sources, a local (Ollama) source's default model list shows `llama3` and `llama3:latest` as two models.
+- **Check:** the source's model is set with no tag, and Ollama lists it as `:latest`.
+- **Cause:** Ollama takes a name with no tag as its `:latest`, and the list took them as two names.
+- **Fix:** upgrade: the model is listed once, as the source has it set. Before upgrading, either one is the same model.
+- **Fixed in:** `v2.193.0` (HB-1423).
+- **Code:** `web/app/usage.js` — `defaultModelControl`, `sameOllamaModel`
+
+### The hatchabot command cannot reach Hatchabot after it was set to serve HTTPS or to listen on one address
+- **Symptom:** you added HATCHABOT_TLS_CERT (or HATCHABOT_BIND) to .env and ran setup again. The web app works, but the hatchabot command's calls to the service fail to connect, or get a plain-HTTP error from an HTTPS listener, unless you pass --url.
+- **Check:** `grep HATCHABOT_URL ~/.config/hatchabot/env` shows the address an older setup saved, such as http://127.0.0.1:8443, on the port the install still uses but with the old scheme or address.
+- **Cause:** setup saves the command the address the service listens at, but only when no address is saved yet. One an older setup saved stayed, even though it named this install's listener as it no longer is.
+- **Fix:** before upgrading, set HATCHABOT_URL in ~/.config/hatchabot/env to the listener: https://localhost:PORT with TLS, or http://BIND-ADDRESS:PORT. After upgrading, setup corrects such an address and says so: one on loopback (any of its names) or the bind address, on this install's port. An address on another host, port or path is kept: another install's, or one you set by hand.
+- **Fixed in:** `v2.193.0` (HB-1430).
+- **Code:** `scripts/setup-host.sh` — `own_listener`, `CLI_URL`
+
+### hatchabot doctor still lists backup sets "kept only for volumes no agent here has had" after the database was restored
+- **Symptom:** after you restore a database by hand, hatchabot doctor still warns that backup sets are kept past HATCHABOT_BACKUP_KEEP_DAYS only for volumes no agent here has had. It names volumes of agents the restored database knows, and tells you to restore a database or remove the sets.
+- **Check:** the agents those volumes belong to are in the restored database (in the app, or as deleted agents), and no nightly backup has run since the restore.
+- **Cause:** doctor read that list from the record of the last nightly backup, which was written before the restore. Only the next run writes a new one.
+- **Fix:** before upgrading, nothing needs doing: the next nightly backup (or Back up now) writes a new record, and the sets go by age as usual. After upgrading, doctor leaves out the sets, and the volumes, that the database names now. A record written by an older release has no such list at all, so doctor lists nothing until the next nightly run writes one.
+- **Fixed in:** `v2.193.0` (HB-1433).
+- **Code:** `src/doctor.ts` — `registryVolumes`, `keptUnlistedSets`, `backupFacts`
+
+### An upgrade fetches the default runtime image on an install whose .env still uses the AGENTCLAW_ names
+- **Symptom:** on an install from before the rename, whose .env sets AGENTCLAW_IMAGE (or AGENTCLAW_IMAGE_REGISTRY), hatchabot upgrade and setup check and fetch hatchabot-runtime:latest, while the agents run on the image AGENTCLAW_IMAGE names, which never gets updated. With AGENTCLAW_TLS_CERT or AGENTCLAW_BIND, setup saves the hatchabot command an address the service does not listen at.
+- **Check:** `grep -E '^(HATCHABOT|AGENTCLAW)_' .env` shows the AGENTCLAW_ line, with no HATCHABOT_ line of the same name.
+- **Cause:** the service uses an AGENTCLAW_ setting when its HATCHABOT_ one is not set. The way the upgrade and setup read .env took only the new names.
+- **Fix:** rename each AGENTCLAW_ line that has no HATCHABOT_ line of its own to the HATCHABOT_ name, then ./scripts/restart.sh. After upgrading, the upgrade reads the old names of the image and mirror settings as the service does, and setup reads them for the image, the mirror, the TLS certificate and the bind address. So do the restart's and the deploy's health checks and the installer's first-run link (AGENTCLAW_TLS_CERT, AGENTCLAW_BIND), which before read only the new names and asked plain http on this machine.
+- **Fixed in:** `v2.193.0` (HB-1379, HB-1529).
+- **Code:** `scripts/upgrade-helpers.sh` — `env_named`, `service_port`; `scripts/setup-host.sh` — `env_named`; `scripts/upgrade.sh` — `HATCHABOT_IMAGE_REGISTRY`; `scripts/restart.sh` — `LISTENER`; `scripts/deploy-release.sh` — `serving_wait`; `scripts/first-run-link.sh` — `env_named`; `src/envCompat.ts` — `applyLegacyEnv`
+
+### hatchabot doctor says .env has no HATCHABOT_SECRET_KEY though it has one, because the file was saved with Windows line endings
+- **Symptom:** hatchabot doctor fails with ".env has no HATCHABOT_SECRET_KEY", or reports default settings, though .env has those lines. On a Mac, the service may not start, or listens somewhere other than you set. The file was edited on Windows, or copied with a tool that wrote Windows line endings.
+- **Check:** `grep -c $'\r' .env` prints more than 0 (or `file .env` says "with CRLF line terminators").
+- **Cause:** each reader of .env treats a carriage return its own way. systemd (the service on Linux) ends the value there. A shell (the Mac's launchd job) keeps it as part of the value. Hatchabot's own reading of the file, doctor's included, skipped the line.
+- **Fix:** `perl -pi -e 's/\r//g' .env`, then ./scripts/restart.sh. After upgrading, doctor and the app's own checks read such a file as systemd does, and doctor warns about it and gives that command (the Mac's service still keeps the carriage return in the value).
+- **Fixed in:** `v2.193.0` (HB-1379, HB-1530).
+- **Code:** `src/doctor.ts` — `carriageReturnLines`, `doctorReport`; `src/config/envFile.ts` — `activeValues`, `assignedIn`
+
+### On a Mac, an upgrade, setup or a backup run by hand uses other settings than the service, for a .env line that names a variable
+- **Symptom:** on a Mac, .env has a line that uses a variable set in your shell's profile (HATCHABOT_IMAGE=$MY_IMAGE, or a path under a variable of your own). Run from your shell, hatchabot upgrade or setup checks or fetches another runtime image than the agents use. A backup run by hand saves a key the service does not have, so its credentials do not decrypt after a restore, or looks in another backups folder. All the while, the launchd service reads that variable as empty.
+- **Check:** the variable the line uses is set in your shell's profile (~/.zprofile, ~/.zshrc, ~/.bash_profile) and not in .env itself.
+- **Cause:** these scripts source .env, as the launchd job does, but in a subshell of the shell that ran them, with its whole environment and its input. The launchd job has only HOME, PATH, USER, LOGNAME, SHELL and TMPDIR.
+- **Fix:** before upgrading, set the variable in .env itself, above the line that uses it, or write the value out in full. After upgrading, they source .env with launchd's few settings, with this shell's PATH, and nothing on their input, as the job does. A .env line that uses PATH still reads this shell's PATH, not the one the job is given.
+- **Fixed in:** `v2.193.0` (HB-1233, HB-1381).
+- **Code:** `scripts/backup-volumes.sh` — `LAUNCHD_ENV`; `scripts/upgrade-helpers.sh` — `env_named`; `scripts/setup-host.sh` — `env_named`; `scripts/restart.sh` — `env_named`; `scripts/launchd-plist.sh`
+
+### A nightly backup keeps an agent's copy taken while a rebuild or an app update was changing its files
+- **Symptom:** a restore from a nightly set brings back an agent whose files are a mix of before and after (workspace files missing or from two states), yet the set is complete. On the night of that set, a rebuild, setup, app update or roll back, Archive, or move to another machine of that agent started while the backup was copying it, and was left held for your choice (Hatchabot restarted during it, or it could not be put right after a restart).
+- **Check:** the agent's timeline shows the change starting during that night's backup and held after it. The backup's log has a ✓ line for the agent's volume that night.
+- **Cause:** after each archive, the backup asks whether a change that replaces the agent's files began or moved on during the copy. It always caught a held restore, snapshot restore, import or workspace adopt, whose hold leaves the files half replaced. It skipped every other held change, those whose hold leaves the files whole, even one that ran during the copy. Only a held move to another Hatchabot should be skipped: that move is asked about again every ten minutes.
+- **Fix:** before upgrading, restore that agent from an older set, or from the next night's. After upgrading, such a copy is left out, and the next backup takes the volume. Only a held move to another Hatchabot is still not a reason to leave it out.
+- **Fixed in:** `v2.193.0` (HB-1206).
+- **Code:** `scripts/backup-volumes.sh` — `replacing`
+
+### uninstall --purge takes minutes before it removes anything
+- **Symptom:** ./scripts/uninstall.sh --purge sits for minutes before removing anything, on an install whose data folder holds many files (an import, photos kept there).
+- **Check:** during the wait, `ps -ef` shows many short-lived head and tr processes under uninstall.sh.
+- **Cause:** before removing the data folder, the purge looks there for another install's database. It read the first bytes of each file with two processes of their own.
+- **Fix:** before upgrading, wait: it finishes, and decides the same either way. After upgrading, the shell itself reads each header, with no extra process per file.
+- **Fixed in:** `v2.193.0` (HB-1153).
+- **Code:** `scripts/uninstall.sh` — `is_database`, `other_databases`
+
+### uninstall --purge says it will delete agent volumes and the database on an install that has no database
+- **Symptom:** ./scripts/uninstall.sh --purge, on an install with no database (one never started, or a database moved elsewhere), says "MODE: --purge — agent volumes, the database … will be DELETED". It then finds no agent and removes no agent's volume. A purge refused because the database is named only in your shell did not say what it would still remove.
+- **Check:** there is no database at the path the uninstall names.
+- **Cause:** the warning was the same whether a database was found or not.
+- **Fix:** nothing to do. After upgrading, the warning says there is no database, so no agent's volumes will be removed. It says the runtime images and the docker network are kept while containers of another install are on the machine (with no database, this install's own agents count as another's), and deleted when there are none; a purge with a database says the same of them. The refusal names what a purge would still remove: the data folder unless a database is in it, the hatchabot command's sign-in and the channel pin.
+- **Fixed in:** `v2.193.0` (HB-1383).
+- **Code:** `scripts/uninstall.sh` — `DB_FOUND`, `OTHERS_N`, `other_installs`, `GOES`
+
+### An upgrade ends with "Then run hatchabot upgrade" right after "Rolling back to …", with nothing saying the rollback failed
+- **Symptom:** hatchabot upgrade (or a deploy) prints "Rolling back to vX…", then an error, then "Then run hatchabot upgrade: it puts vX back first, from its record.", and exits 1, as if the rollback had worked.
+- **Check:** the lines above name the step that failed: the checkout back, the dependencies' lock held by another install for half an hour, or, in a deploy, systemctl restarting the old release.
+- **Cause:** when the rollback itself failed, the upgrade said only what to run next.
+- **Fix:** run what it says, hatchabot upgrade: it puts the previous release back first, from its record. After upgrading, it first says that the rollback did not finish, and a deploy whose systemctl did not restart the old release says so.
+- **Fixed in:** `v2.193.0` (HB-1383).
+- **Code:** `scripts/upgrade.sh` — `rollback_or_redo`; `scripts/deploy-release.sh` — `rollback_or_redo`, `rollback()`
+
+### After a host migration stopped part-way, ~/agentclaw-backups is gone and running it again does not put the link back
+- **Symptom:** the migration to the new name stopped (Ctrl-C, a failure) while it moved the backups. ~/hatchabot-backups holds them, there is no ~/agentclaw-backups, and running the migration again does not make the link. AgentClaw, started again to roll back, makes an empty backups folder there.
+- **Check:** `ls -ld ~/agentclaw-backups ~/hatchabot-backups` shows only the second.
+- **Cause:** that step moved the folder, then made a link at the old path. Run again, it looked only for the old folder, which was gone.
+- **Fix:** before upgrading, `ln -s ~/hatchabot-backups ~/agentclaw-backups`. After upgrading, the link is made first, beside the old path, and renamed into place once the backups have moved. A run again finishes it, and a run that stops in between says how to finish by hand.
+- **Fixed in:** `v2.193.0` (HB-1350).
+- **Code:** `scripts/migrate-rename-host.sh` — `BACKUPS_LINK`, `on_exit`
+
+### Restore drills leave a killed drill's container and volume behind for good
+- **Symptom:** containers and volumes from a restore drill that was killed (a reboot, kill -9) days ago are still there, and later drills never remove them. On a machine shared by installs, they may be another install's.
+- **Check:** `docker ps -a --filter label=hatchabot.restore-drill` and `docker volume ls --filter label=hatchabot.restore-drill` list them. The process number in their names (hatchabot-restore-drill-PID-N) is alive, but `ps -o lstart=,comm= -p PID` shows another program, started later.
+- **Cause:** each drill first removes what a killed drill left behind, but it judged that drill only by whether its process number was alive. Once the system gave that number to another program, the leftovers were kept as if the drill still ran.
+- **Fix:** before upgrading, remove them once no drill is running: `docker rm -f NAME`, then `docker volume rm NAME`. After upgrading, a drill labels what it makes with when it started, and a later drill removes what a killed one left: at once when its process number is free, and three hours after that drill began when another program has the number since. Leftovers from an older drill, without those labels, are still judged by the process number alone.
+- **Fixed in:** `v2.193.0` (HB-1373).
+- **Code:** `scripts/restore-drill.sh` — `drill_gone`, `proc_start`, `MADE_LABELS`
+
+### `hatchabot upgrade-image` or the build script says "promoted to :latest", but the fleet stays on the old image
+- **Symptom:** with HATCHABOT_IMAGE set to a version tag or a digest, the build run by `hatchabot upgrade-image` (not `--candidate`) or by `scripts/build-runtime-image.sh` by hand ends `Built hatchabot-runtime:<version> (promoted to :latest)` (or `Pulled …`), yet the fleet default did not change and only agents pinned to `hatchabot-runtime:latest` show "update available". After upgrading it ends `Built hatchabot-runtime:<version> (moved hatchabot-runtime:latest; the fleet default stays <pin>)` and `To make it the fleet default, set HATCHABOT_IMAGE in .env to hatchabot-runtime:<version> and restart Hatchabot.` (A default build from Settings → Advanced → Runtime images runs the script as a candidate, so its log said "(candidate — :latest untouched)" instead, and its notice named the pin; that notice now ends with the same step.)
+- **Check:** the `HATCHABOT_IMAGE=` line in Hatchabot's .env names a tag other than `:latest`, or `@sha256:…`.
+- **Cause:** the build script said "promoted" whenever it moved `<repo>:latest`; under such a pin the fleet default is the pinned image, which the build leaves alone (and Promote is off), and nothing said how to move the fleet onto the build.
+- **Fix:** before or after upgrading, set `HATCHABOT_IMAGE` in .env to the built tag (or to `<repo>:latest`) and restart Hatchabot, then rebuild the agents that should adopt it (memory kept). After upgrading the build says so itself.
+- **Fixed in:** `v2.193.0` (HB-1355).
+- **Code:** `scripts/build-runtime-image.sh` — `moved_latest`; `src/cli.ts` — the upgrade-image case; `src/orchestrator/machines/runtimeImages.ts` — `startBaseBuild`
+
+### A base image build's log ends "(candidate — :latest untouched)" for a build that became the default
+- **Symptom:** after a default base image build from Settings → Advanced → Runtime images (not a candidate), its log ends `Built hatchabot-runtime:<version> (candidate — :latest untouched)` (or `Pulled …`), though the notice says it is now the default. After upgrading a line follows it: `Then Hatchabot made it the fleet default: hatchabot-runtime:latest names hatchabot-runtime:<version> now.`, under a pinned HATCHABOT_IMAGE `Then Hatchabot moved hatchabot-runtime:latest to it: … The fleet default stays <pin>, as HATCHABOT_IMAGE pins it.`, or `Then Hatchabot did not make it the fleet default: <why>`.
+- **Check:** `docker image inspect --format '{{.Id}}' hatchabot-runtime:latest` and the same for `hatchabot-runtime:<version>` give the same id: the build was made the default.
+- **Cause:** the app builds a default image as a candidate, so the script leaves :latest alone, and makes it the default itself once the build has ended and its checks still hold; the log held only the script's words.
+- **Fix:** nothing in the image: go by the notice, or compare the ids above. After upgrading the log says what was done.
+- **Fixed in:** `v2.193.0` (HB-1508).
+- **Code:** `src/orchestrator/machines/runtimeImages.ts` — `startBaseBuild`, `madeDefault`; `src/orchestrator/machines/derivedImage.ts` — `appendBuildLogLine`
+
+### The skills live test fails S3b with "in the agent's usage as …, twice or more"
+- **Symptom:** `node scripts/live.mjs run skills` fails S3b with `The practice's <n> tokens are in the agent's usage as <m>, twice or more` (or `… twice`), though the practice was counted once; or it passed while the agent's own transcripts held a copy of the run that counted fewer tokens than Practice's record.
+- **Check:** the disposable agent made a turn of its own while the practice ran, or the failure goes away on a second run.
+- **Cause:** the check held the rise of the agent's whole usage total to under twice the practice's tokens, so a call of its own meanwhile pushed it over, and a copy counting fewer tokens than the record stayed under.
+- **Fix:** before upgrading, run the test again. After upgrading it reads each part of the agent's usage apart and names a copy by its calls: `The practice's 2 calls on <model> are in the agent's own usage too: … unless another turn of the agent's ran on <model> meanwhile (run the test again)`. A call of the agent's own on another model, or fewer calls on the practice's model than it made there, passes; as many there (a heartbeat beside a one-call practice) still reads as a copy, so run it again. `The practice was recorded 2 times in the agent's usage, not once` and `The practice's record in the agent's usage holds no calls: Practice took what the run reported, not its transcript in its own state folder …` are real failures of Practice's record: see "A skill practice task is unsupported, times out, or cannot verify instruction use".
+- **Fixed in:** `v2.193.0` (HB-1249).
+- **Code:** `scripts/skills-scenarios.mjs` — `S3b`
+
+### The join page says the agent isn't running when it has no Telegram bot
+- **Symptom:** someone who joins with Telegram sees `You're in 🎉` with the step `Open … in Telegram below.`, no button below it, and `The agent isn't running right now — ask the owner to start it, then message the bot.`, though the agent is running. With Discord or Slack, a join whose app gave no link still says `Open … in Discord below` with no button there.
+- **Check:** the agent has no Telegram bot (its Messaging tab shows none), or, for Discord or Slack, the notice says `gave no link to it, so there is no button here`.
+- **Cause:** the join page took a missing bot name for a stopped agent, and its steps promised a button whether or not there was one.
+- **Fix:** give the agent a Telegram bot (its Messaging tab), then the person messages it. After upgrading, the page says `… has no Telegram bot yet, so there is no button here. Ask the person who invited you to give it one, then message it.`, and with no link its step reads `Find … in Discord and send it a direct message`.
+- **Fixed in:** `v2.193.0` (HB-1279).
+- **Code:** `web/app/join.js` — `join`
+
+### A password member on a Google install sees nothing under Settings → Access
+- **Symptom:** with Google sign-in and password accounts beside it, someone signed in with a password account opens Settings → Access and sees neither their own password and recovery code nor anything else; on an install with password accounts only, `Loading…` stays there.
+- **Check:** the browser's network panel shows `GET /v1/local-accounts/me` failing (a 5xx, or no answer) when the tab opens.
+- **Cause:** any failure of that read was taken to mean the Google owner, who has no password account, so the member's own section was hidden, and the roster then refused them.
+- **Fix:** open the tab again once the machine answers. After upgrading, only a 404 means the Google owner: any other failure shows their own section with `Your account could not be read just now: <why>. Open this again in a moment.`
+- **Fixed in:** `v2.193.0` (HB-1281).
+- **Code:** `web/app/signin.js` — `loadAccounts`
+
+### Someone invited by Telegram messages the bot and nothing shows under Alerts
+- **Symptom:** the owner pressed Copy Telegram invite (or Share), sent it, and the person's message never showed as a request under Alerts. The toast after the press gave only a reason, such as `Telegram did not answer.`, not that the invite had been copied anyway.
+- **Check:** the toast after the press was not `Telegram invite copied — paste it to them. For the next 30 minutes their message shows under Alerts…`.
+- **Cause:** the invite is copied first (the press is what lets the page write the clipboard), then the 30-minute knock window is asked for; when that was refused, the invite was already out with the door shut.
+- **Fix:** press Copy Telegram invite again once the machine answers (it opens the window), and ask them to message the bot again. After upgrading, the toast says `The invite is copied, but their message will not show under Alerts until this works: press Copy Telegram invite again in a moment.`
+- **Fixed in:** `v2.193.0` (HB-1363).
+- **Code:** `web/app/panels.js` — `openInviteKnockWindow`, `copyInviteTg`, `shareInviteTg`
+
+### A folder removed from an agent comes back, or the Data tab shows an older list
+- **Symptom:** two quick × presses on an agent's older shared folders (ones with no Make writable button), and the folder the first one removed is back; or after two quick changes on the Data or Advanced tab, the list shows one of them undone, until the sheet is opened again.
+- **Check:** open the agent's sheet again: the list as the machine has it is drawn then.
+- **Cause:** each change answers with the agent's whole list, and the answers were drawn as they came, an older one over a newer; and a legacy folder's × sends the whole list of those left, worked out from the list drawn, which the first press had not yet redrawn.
+- **Fix:** press × again on the folder that came back, once nothing is being saved. After upgrading, the newest answer is the one drawn, and a legacy folder's × pressed while another change to its folders is out says `Wait for the last change to its folders to be saved, then press × again.`
+- **Fixed in:** `v2.193.0` (HB-1485).
+- **Code:** `web/app/connections.js` — `sheetSave`, `removeDataSource`
+
+### An adopt says "@default is still live" or offers to take over "@default"
+- **Symptom:** adopting a hand-built agent, the steps or refusals name its bot as `@default` (or another name that is not the bot's): `⚠ @default is still live for …`, `Take over its bot @default`, `@default was not taken over: …`, or `Something is still polling @default`.
+- **Check:** in OpenClaw's `openclaw.json`, that name is the account's key under `channels.telegram.accounts`, not the bot's @name in Telegram.
+- **Cause:** the account's key in OpenClaw's config was printed as if it were the bot's handle.
+- **Fix:** nothing to do: it is the bot bound to that account. After upgrading, it is named `its bot (Telegram account "default")`, and the refusal for an account still on says where to switch it off for any key: under channels.telegram.accounts, set "enabled": false on the account.
+- **Fixed in:** `v2.193.0` (HB-1300).
+- **Code:** `web/app/create.js` — `adoptBotName`, `renderAdoptBot`; `src/cli.ts` — `adoptBotName`; `src/orchestrator/agentSecrets/botTokenStep.ts` — `createBotTokenStep`
+
+### The adopt's hand-over steps restart the wrong gateway unit
+- **Symptom:** adopting a hand-built agent whose bot is still live, the steps say `systemctl --user restart openclaw-gateway`, but this machine's OpenClaw gateway runs under another unit (set in `HATCHABOT_OPENCLAW_GATEWAY_UNIT`), so the restart fails or restarts nothing; or `hatchabot adopt --url` to another machine printed this computer's command, not that machine's.
+- **Check:** `HATCHABOT_OPENCLAW_GATEWAY_UNIT` is set in the server's `.env`, or the CLI was run against another machine.
+- **Cause:** the web app and the CLI built the command themselves, from the default unit name and from the CLI's own shell and platform, though the server's own hand-over uses its setting and its machine.
+- **Fix:** restart the unit the setting names (`systemctl --user restart <that unit>`). After upgrading, the inspect answer carries the command the server's hand-over runs, and both print it.
+- **Fixed in:** `v2.193.0` (HB-1282).
+- **Code:** `src/orchestrator/transfer/openclawImport.ts` — `restartByHand`; `src/orchestrator/transfer/adopts.ts` — `inspect`; `web/app/create.js` — `gatewayRestartCmd`; `src/cli.ts` — `gatewayRestartCommand`
+
+### A local source offers its default model's :latest twin under Add a model
+- **Symptom:** a local (Ollama) source whose default model is `llama3` offers `llama3:latest` under Add a model, and adding it shows the same model twice.
+- **Check:** the source's default has no tag, and Ollama lists it as `:latest`.
+- **Cause:** the add list told models apart by their spelling, and Ollama takes a name with no tag as its `:latest`.
+- **Fix:** remove the extra pill (×). After upgrading, the twin is not offered.
+- **Fixed in:** `v2.193.0` (HB-1526).
+- **Code:** `web/app/usage.js` — `renderExtras`, `ollamaTagged`
+
+### Right after install, Docker refuses Hatchabot though you are in the docker group
+- **Symptom:** on Linux, right after the installer added you to the docker group (before you logged out and back in), the service starts but every call to Docker fails with `permission denied while trying to connect to the Docker daemon socket`, and agents cannot be made or started.
+- **Check:** `getent group docker | cut -d: -f4 | wc -c` prints a few thousand or more (a docker group with many members), and `id -nG` in a new shell does not list `docker` yet.
+- **Cause:** the service's start (scripts/with-docker.sh) looks for you in the group's member list to start through `sg docker`. It piped the list to `grep -q`, which stops at its match. With a list over a few KB, the command still writing it died, and the check read as "not a member", so the service started without the group.
+- **Fix:** before upgrading, log out and back in (or reboot), then `./scripts/restart.sh`. After upgrading, the start finds you in the list however long it is.
+- **Fixed in:** `v2.193.0` (HB-1216).
+- **Code:** `scripts/with-docker.sh` — `MEMBERS`
+
+### hatchabot upgrade-image or the upgrade built the runtime image, but the app does not see it
+- **Symptom:** `hatchabot upgrade-image` ends `Built …` (or the upgrade says its image is fetched), yet Settings → Images and `hatchabot images` do not show the new image, and agents rebuilt on it fail or stay on the old one.
+- **Check:** in the shell you ran it from, `env | grep '^DOCKER_'` lists DOCKER_CONTEXT, DOCKER_HOST (with no DOCKER_HOST line in Hatchabot's .env), DOCKER_TLS_VERIFY, DOCKER_CERT_PATH or DOCKER_CONFIG, or `docker context show` names a context other than `default`.
+- **Cause:** the build ran on the Docker daemon this shell points at, not the one the service uses (the one .env names, or the default). doctor already asked the service's daemon.
+- **Fix:** before upgrading, run it with the shell's settings unset: `env -u DOCKER_CONTEXT -u DOCKER_HOST -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH -u DOCKER_CONFIG hatchabot upgrade-image` (keep DOCKER_HOST when .env names it). After upgrading, both drop the shell's daemon settings and use the .env's. The upgrade keeps the shell's only when it cannot read .env, and says so. A DOCKER_HOST set only in systemd's environment (`~/.config/environment.d/`), not in .env, is the service's but is still not the one the image step uses, before or after upgrading: put the same `DOCKER_HOST=` line in .env, then `./scripts/restart.sh`.
+- **Fixed in:** `v2.193.0` (HB-1354).
+- **Code:** `src/cli.ts` — the upgrade-image case; `scripts/upgrade.sh` — `DAEMON_SETTINGS`
+
+### An image built by hand with HATCHABOT_IMAGE_REPO set is not in the image list
+- **Symptom:** `hatchabot upgrade-image` (or the upgrade's image step) ran with HATCHABOT_IMAGE_REPO set in your shell. The image was built or fetched, but Settings → Images and the fleet default do not show it.
+- **Check:** `echo "$HATCHABOT_IMAGE_REPO"` in that shell names a repository other than the one HATCHABOT_IMAGE in .env names (`hatchabot-runtime` by default), and `docker images "$HATCHABOT_IMAGE_REPO"` lists the build.
+- **Cause:** HATCHABOT_IMAGE_REPO is a by-hand override, kept on purpose. A build made with it goes into that repository, where the app and its image list do not look, and nothing said so.
+- **Fix:** before or after upgrading, build again without it (`unset HATCHABOT_IMAGE_REPO`), or tag the build into the fleet's repository: `docker tag <that repository>:<tag> <the fleet's repository>:<tag>`. After upgrading, both warn before the build and give that command, and it is the one way the run says to use the image.
+- **Fixed in:** `v2.193.0` (HB-1386).
+- **Code:** `src/cli.ts` — the upgrade-image case; `scripts/upgrade.sh` — `HATCHABOT_IMAGE_REPO`
+
+### A restart waits ten minutes "for another install of the dependencies" that names no pid, or two installs ran at once through a linked folder
+- **Symptom:** `./scripts/restart.sh` (or the service's start) prints `Waiting for another install of the dependencies in <folder> to finish…` with no `(pid N)`, and goes on only after about ten minutes. Or, with the install folder reached through a symlink, an upgrade and a restart ran npm at once and the service then crashed with `Cannot find module …`.
+- **Check:** for the wait, `ls ~/.local/state/hatchabot/deps-*.lock.d/` shows a lock folder with no `owner` file in it. For the link, `readlink -f` on the folder the service runs from differs from the path the upgrade or the timer was given.
+- **Cause:** a run killed between making the lock and writing its holder left a lock with no holder, which others waited on for ten minutes. And the lock was keyed on the folder's path as given, so two paths to one folder took two locks.
+- **Fix:** before upgrading, when no npm runs in the folder, remove the lock folder (`rm -r ~/.local/state/hatchabot/deps-<n>.lock.d`), then `./scripts/ensure-deps.sh` and `./scripts/restart.sh`. After upgrading, a lock with no holder counts as left over after a minute, and the lock is the folder's however it is reached (a folder with no link keeps the same lock). A run reached through a link also waits for, and takes, the lock a release before `v2.193.0` keys on the path as given, so an upgrade from such a release, or its timer, and a run of this one never install at once. A wait for that lock that runs out names it, and the command that removes it when no npm runs there.
+- **Fixed in:** `v2.193.0` (HB-1377).
+- **Code:** `scripts/ensure-deps.sh` — `DEPS_LOCK`, `DEPS_LOCK_OLD`, `holder_gone`, `take_deps_lock`; `scripts/upgrade-helpers.sh` — `deps_holder_gone`, `deps_take`, `deps_lock`; `scripts/upgrade.sh` — `DEPS_LOCK`, `DEPS_LOCK_OLD`; `scripts/deploy-release.sh` — `DEPS_LOCK`, `DEPS_LOCK_OLD`
+
+### The hatchabot command fails with "Invalid URL" when Hatchabot listens on a link-local IPv6 address
+- **Symptom:** with HATCHABOT_BIND set to a link-local IPv6 address and its zone (such as `fe80::1%eth0`), every `hatchabot` command fails with `Invalid URL`, and `hatchabot doctor` cannot check the listener.
+- **Check:** `grep HATCHABOT_URL ~/.config/hatchabot/env` shows an address with a `%` in its brackets, such as `http://[fe80::1%eth0]:8080`.
+- **Cause:** setup saved the bind address in the URL as it is. A URL writes a zone's `%` as `%25` (RFC 6874). Node's URL parser takes a zone in neither form, so the command cannot reach a listener that has one.
+- **Fix:** listen on an address the command can reach as well: leave HATCHABOT_BIND unset, or set it to an address with no zone, then `./scripts/restart.sh`. Set `HATCHABOT_URL` in ~/.config/hatchabot/env to `http://127.0.0.1:<port>` (https with TLS), or remove the line and run setup again. After upgrading, the restart's, the deploy's and the installer's checks reach such a listener (they write the zone as `%25`, which curl takes), and doctor checks it by its address and port, which Node can ask though its URLs cannot carry a zone. The `hatchabot` command reaches such a listener too, by its address and port (its own certificate there with TLS), when `HATCHABOT_URL` names it with its zone, written `%25` or `%`: setup saves it so (`http://[fe80::1%25eth0]:8080`), keeps one saved that names the bind address (a bare `%` there written `%25`: after a bare one, a zone that starts with 25 is misread) or another port, and points one on this install's port at the listener once HATCHABOT_BIND has no zone. Doctor takes a saved one with this machine's address for this install, as any other, and asks the listener the .env describes, on its port now (HB-1539).
+- **Fixed in:** `v2.193.0` (HB-1378, and the command's own requests HB-1539).
+- **Code:** `scripts/setup-host.sh` — `CLI_ZONED`, `CLI_URL`, `zoned_url`, `own_listener`, `spelt_bare`; `scripts/restart.sh` — `PROBE_HOST`; `scripts/deploy-release.sh` — `serving_wait`; `scripts/first-run-link.sh` — `PROBE_HOST`; `src/doctor.ts` — `serviceUrl`, `probeControlPlane`, `doctorTarget`; `src/config/installTls.ts` — `zonedTarget`, `pinnedFetch`, `installFetch`; `src/cli.ts` — `installRequest`
+
+### An upgrade or deploy went ahead while another was running in another time zone
+- **Symptom:** two upgrades or deploys of one install ran at once (the timer's and one run by hand), and the second said it took the upgrade lock as left over; the install was then left part-way.
+- **Check:** one of the two runs was of a release before `v2.191.0` (an install still on one, or the timer's repair of a cut-off deploy, which runs the deploy script of the release it puts back), and the two were started with different time zones (a shell with `TZ` set, the timer with none).
+- **Cause:** a release before `v2.191.0` compares a run's start time as its own time zone writes it, so a holder started in another zone reads as one that is gone. `v2.191.0` and later also write the holder's start in UTC and read it so, but an older release's check cannot be changed.
+- **Fix:** run the upgrade by hand with the timer's time zone (`env -u TZ`), or wait for the timer's run to end first. Once both sides run `v2.191.0` or later, nothing is needed. If the install was left part-way, run `hatchabot upgrade` (or `scripts/deploy-release.sh <tag>`) again: it puts the previous release back first, from its record.
+- **Fixed in:** `v2.191.0` when both runs are that release or later (HB-1067). A run of an earlier release is not fixed (HB-1217).
+- **Code:** `scripts/upgrade-helpers.sh` — `lock_left_over`, `proc_start_utc`, `started_as`
+
+### Hatchabot listens on a port at random, or does not start, when PORT in .env is empty, 0 or has a note after it
+- **Symptom:** on Linux, after editing .env, the web app is not at its port (`http://<this machine>:8080` by default), and `hatchabot doctor` asks port 8080 and finds nothing there. Or the service does not start, and `journalctl --user -u hatchabot` shows `ERR_SOCKET_BAD_PORT` and `Received type number (NaN)`.
+- **Check:** `grep -n '^[[:space:]]*PORT[[:space:]]*=' .env` shows the last such line as `PORT=`, `PORT=0`, or a port with a note after it (`PORT=9137 # moved`), which systemd keeps as part of the value. For the port at random, `journalctl --user -u hatchabot | grep -i 'listening'` names a port other than 8080.
+- **Cause:** the service read PORT as a number with 8080 only when the line was missing: an empty PORT or 0 asked the system for any free port, and a value with a note in it was no number, which the server refused. doctor takes 8080 for all three (and this release's scripts do too), so it asked another port than the one in use. Agents were also given 0, or the value with its note, as the port in the address they reach Hatchabot at, and `hatchabot accounts create` (with no public address set) gave a claim link of `http://localhost:/?claim=…`, or one with the note in it.
+- **Fix:** before upgrading, write the port alone (`PORT=9137`), with any note on a line of its own above it, or remove the line for 8080, then `./scripts/restart.sh`. After upgrading, the service listens on 8080 for a PORT that is empty, 0 or no number, as doctor and the scripts ask, and agents are given 8080 too (rebuild an agent to give it the new address), as is the claim link.
+- **Fixed in:** `v2.193.0` (HB-1529).
+- **Code:** `src/index.ts` — `PORT`; `src/api/routes.ts` — `createReach`; `src/orchestrator/lifecycle/provision.ts` — `HATCHABOT_INTERNAL_URL`; `src/cli.ts` — `servicePort`
+
+### "No spare bots in the pool" just after another agent let go of its bot
+- **Symptom:** adding Telegram to an agent answers "No spare bots in the pool. Create one with @BotFather and paste its token.", Change bot answers "No spare bot to move to. Add one under ⚙ Settings → Messaging → Telegram → Add a bot, then try again.", or a new agent comes up web-only. A moment later the pool shows a free spare.
+- **Check:** another agent was deleted, archived or had its bot removed a few seconds (up to about a minute) before. Its bot is the spare that shows up afterwards, and the service log has a `pool.farewell` line for that agent (its `agentId`) just after the refusal.
+- **Cause:** a pool bot whose goodbye to its old agent's people was still going out was left out of the spare count and refused to every lease, so the pool looked empty until the goodbye had gone out.
+- **Fix:** before upgrading, try again once the goodbye is out (a minute at most). After upgrading, a bot that is saying goodbye counts as a spare, and a lease waits for its goodbye to go out and the old agent's link to it to go (70 s at most), then takes it, or takes a spare added meanwhile. The goodbye still comes before the new agent's "this bot is now …".
+- **Fixed in:** `v2.193.0` (HB-1266).
+- **Code:** `src/channels/telegramPool.ts` — `provision`, `#lease`, `availableCount`, `#holdForGoodbye`, `GOODBYE_WAIT_MS`
+
+### People on an agent's Telegram got its goodbye twice
+- **Symptom:** after an agent was deleted (or its Telegram bot removed), some or all of its people got "— end of this agent —" (or "— moved off Telegram —") twice.
+- **Check:** Hatchabot restarted while the first Delete (or removal) was running, and the owner pressed it again after the restart. The service log has one `pool.farewell` line for the agent, from the second press (a goodbye a restart cut off writes none), or two when the restart came after the first goodbye had all gone out.
+- **Cause:** the restart came after the bot was released but before the agent's channel row went, so the second press released the bot again and its goodbye went to everyone a second time.
+- **Fix:** nothing is broken: tell the people to ignore the second goodbye. After upgrading, the pool remembers whom a release's goodbye has told, and a release run again for the same agent tells only those it had not (`alreadyTold` in its `pool.farewell` line).
+- **Fixed in:** `v2.193.0` (HB-1267).
+- **Code:** `src/channels/telegramPool.ts` — `release`, `#farewell`, `#noteTold`, `farewell_told`
+
+### A spare Telegram bot stays "in use" by an agent that has another bot
+- **Symptom:** the Bot pool lists a spare as in use by an agent whose Telegram card shows a different bot, and the ready count is one short; or an agent's Telegram bot is also listed as free in the pool, and adding Telegram to another agent answers `@… already belongs to "…"`.
+- **Check:** two Telegram adds for that agent ran at about the same time (a double-click, the page and the CLI, or one from the pool and one with a pasted token); the second answered "It already has a Telegram bot." or was refused as busy.
+- **Cause:** an add that found another bot already connected kept the spare it had leased; and an add refused as busy gave back the spare that the other add, which went on, then connected without a lease.
+- **Fix:** before upgrading, for an agent holding a stray spare, Detach… its own bot on its card, then add Telegram from the pool: the pool hands it the spare it already holds (the stray one is no longer stray, and its own bot is a spare again). For an agent whose bot is also listed free, use Change bot on its card. After upgrading, the unused spare goes back, and an add whose spare went back meanwhile answers "@… went back to the pool while it was being connected; it was not connected. Try again."
+- **Fixed in:** `v2.193.0` (HB-1263).
+- **Code:** `src/api/chat/channelRoutes.ts` — `'/v1/agents/:id/telegram'`, `giveBack`; `src/channels/telegramPool.ts` — `returnUnused`
+
+### The bot inventory says "Telegram rejects this token." for a bot that works
+- **Symptom:** Settings → Messaging → Telegram → the live check marks a bot ❌ with "Telegram rejects this token." (or "Telegram rejects this token — this agent cannot send or receive."), though the bot answers on Telegram and is listed at @BotFather.
+- **Check:** the bot's 🔑 Show fails, because this server has no stored token for it.
+- **Cause:** a bot whose stored token was missing was marked dead, and the page read that as Telegram refusing it, though Telegram was never asked.
+- **Fix:** put the token back: for a spare, Remove it in the inventory and add it again with its token from @BotFather (`/token`); for an agent's bot, Detach… it on the agent's card and add it again. After upgrading, such a bot is marked ⚠ with "This server no longer has this bot's token …" and these steps; one whose token could not be read is marked ⚠ "could not read … Look again in a moment; if this lasts, this install's secret key may have changed", with no Remove.
+- **Fixed in:** `v2.193.0` (HB-1384).
+- **Code:** `src/api/chat/channelRoutes.ts` — `'/v1/bot-inventory'`; `web/app/settings.js` — `loadBotInventory`
+
+### A Slack card says the app lacks users:read, though it has it
+- **Symptom:** connecting or re-checking a Slack app warns "Slack would not say which app the bot token belongs to (the app lacks users:read), so Hatchabot could not check both tokens are from the same app. Make sure they are.", though the app has users:read.
+- **Check:** Slack was rate-limiting or having trouble at the time (other Slack calls answered "too many requests" or a 5xx); a Re-check a minute later clears the warning.
+- **Cause:** the check's bots.info call was limited or answered with an error page, and any answer without the app's id was taken for a missing users:read.
+- **Fix:** press Re-check on the Slack card. After upgrading, Slack not answering says "Slack did not answer which app the bot token belongs to just now (…) … Re-check in a minute, or make sure they are."
+- **Fixed in:** `v2.193.0` (HB-1420).
+- **Code:** `src/channels/slack.ts` — `slackConnector`, `slackBusyWhy`
+
+### A bot renamed after another agent, or "already belongs to", after a restart during a Detach
+- **Symptom:** an agent's Telegram bot was renamed after another agent, and its people got "this bot is now "…"" when nothing had changed for them; or adding Telegram to an agent, or Change bot, answered `@… already belongs to "…"`, and the Change bot's own people could get "— end of this agent —"; or ⚙ Settings → Messaging → Telegram listed an agent's bot as free, and Delete there removed the token that agent runs on.
+- **Check:** Hatchabot restarted while a Detach… or Delete of the agent whose bot it is was going on. That agent's card still shows the bot, while the Bot pool lists the same bot as free.
+- **Cause:** the restart came after the pool let the bot go but before the agent's link to it was removed, so the pool offered a live agent's bot as a spare. A lease renamed it and announced the change before the "already belongs to" check refused it, kept the lease, and a Change bot that hit the check could say goodbye on it for its own agent.
+- **Fix:** run that Detach… or Delete again, so the bot is really let go (an Archive cut off by a restart is finished at the next start); do not Delete it from the Bot pool. Sync its name on the agent's card if it was renamed. After upgrading, a bot an agent's link still names is never offered, counted as ready or removable in the pool, and is shown in use by that agent. An add, a Change bot or a new agent's setup that finds a bot already belongs to another agent gives its lease back without a goodbye. If an agent was left holding such a bot (the pool lists it in use by an agent with no Telegram bot on its card), after upgrading add Telegram to that agent once more, or, for a new agent whose setup failed, press Retry: it answers "already belongs to" and lets go of it. (Delete alone does not: it frees only the bot on the agent's card.)
+- **Fixed in:** `v2.193.0` (HB-1545).
+- **Code:** `src/channels/telegramPool.ts` — `#connectedTo`, `#spareState`, `#releasedFrom`, `availableCount`, `removeFromPool`, `returnUnused`; `src/api/chat/channelRoutes.ts` — `'/v1/agents/:id/channel/swap'`, `'/v1/agents/:id/telegram'`, `'/v1/pool'`; `src/orchestrator/lifecycle/provision.ts` — `runProvisionSteps`
+
+### Download history or Recover context shows one picture where the agent sent two
+- **Symptom:** the agent sent two different pictures in a row (two replies, each only an image), and the file Download history gives, or what Recover context hands the agent, has one `[image]` reply there. The web chat shows both.
+- **Check:** the two replies have the same time in the agent's console (pictures sent in one turn are often stamped the same second).
+- **Cause:** the history renderer took two replies with the same text at the same time as one reply recorded twice (OpenClaw's delivery copy), and every image-only reply reads `[image]`.
+- **Fix:** nothing is lost from the agent: its transcript has both. After upgrading, two replies at one time are one only when they hold the same pictures, or one is marked as the delivery's copy, as the web chat tells them apart.
+- **Fixed in:** `v2.193.0` (HB-1361).
+- **Code:** `src/orchestrator/memory/transcript.ts` — `RENDER_SCRIPT` (`slim`, `feed`, `picturesOf`, `samePictures`)
+
+### After rolling back to an older release, a memory proposal is gone from the master's list
+- **Symptom:** after going back to a release before 2.191.0, a child's proposal that was being merged as you rolled back is not in the master's Proposals list, and its text may or may not be in AGENTS.md.
+- **Check:** the rollback restarted Hatchabot while that merge was running (the master's timeline has no "proposal merged" for it).
+- **Cause:** since 2.191.0 a merge marks its proposal as being merged until its text is in, and the next start of 2.191.0 or newer puts back any that a restart cut off. A release before 2.191.0 knows no such mark: it neither lists the proposal nor puts it back.
+- **Fix:** before upgrading, start 2.191.0 or newer once: it puts the proposal back on the list (the service log has a `proposal.merges_reopened` line), and a merge then appends it once even if its text had landed. From 2.193.0, Hatchabot puts it back as it shuts down, so the older release lists it after the rollback. Only a crash, which runs no shutdown, still leaves it to the next start of 2.191.0 or newer. On a release before 2.178.0, which has no mark of a merged proposal in AGENTS.md, merging a put-back proposal whose text had already landed appends it a second time: look in AGENTS.md before merging it there, and dismiss it if its text is in.
+- **Fixed in:** `v2.193.0` (HB-1171).
+- **Code:** `src/orchestrator/memory/proposals.ts` — `stop`; `src/orchestrator/memory/agentMemory.ts` — `stop`; `src/store/store.ts` — `reopenInterruptedMerges`
+
+### After switching an agent's AI source, it has forgotten the conversation and Recover context is not offered
+- **Symptom:** you switched an agent's AI source with **Recover context after the switch** on, sent it a message as the rebuild finished, and now it does not remember the conversation before the switch. Its card has no "Its chat started fresh …" offer.
+- **Check:** the agent's timeline has "earlier conversation not restored: it was answering something when its rebuild was done".
+- **Cause:** the recovery is not run beside a turn that is answering, and the rebuild's own look at the agent's context came before that turn ended the conversation, so nothing set the offer: only the timeline said so.
+- **Fix:** press **Recover context** on the agent's Personality tab: the old conversation is still on disk. After upgrading, the skipped recovery sets the offer itself when there is a conversation the new source lacks, with the messages the recovery would have restored, so the card offers Recover context (the timeline says "Recover context offered: the earlier conversation was not restored after the source switch"). An offer you dismissed is not made again for the same conversations.
+- **Fixed in:** `v2.193.0` (HB-1176).
+- **Code:** `src/orchestrator/memory/contextRecovery.ts` — `afterRebuild`, `offerRecovery`; `src/orchestrator/lifecycle/rebuildQueue.ts` — `checkContextAfterRebuild`
+
+### Web chat: one or two of the newest messages are missing, though the agent's console has them
+- **Symptom:** 💬 Chat (yours, or a guest's) leaves out a recent message or two: a question and its answer that the agent's console shows, between messages the chat does show.
+- **Check:** in the agent's transcript, just after the missing messages, comes an event stamped over an hour earlier than those around it: a tool's output, or a message recorded again with the time it first had. The machine's clock may also have stepped back a little there.
+- **Cause:** the web chat reads each conversation newest first and stops once nothing older can show. The first event over an hour older than the oldest of the newest 100 ended the read, whatever it was, so the newer messages behind it were never read.
+- **Fix:** nothing is lost: the console has them. After upgrading, only messages with a time say where a conversation ends, and only three of them in a row: tool output stamped far back, and one or two messages far out of place, are read past. Three cases still end the read before a message that should show, as they did before: a clock that stepped back by over an hour, with three messages or more in the hour after the step; a message stamped far ahead of those around it, deep in the conversation; and a message recorded again with a later time whose first copy is further back than the read goes.
+- **Fixed in:** `v2.193.0` (HB-1358).
+- **Code:** `src/orchestrator/conversation/webChat.ts` — `HISTORY_SCRIPT` (`take`, `BEHIND`)
+
+### Web chat: "Couldn't read your conversation just now — try again." every time, and the log says "Invalid time value"
+- **Symptom:** on OpenClaw 2026.7, 💬 Chat never opens a conversation: it says "Couldn't read your conversation just now — try again." however often you try, and the service log has "web chat history read failed" with "Invalid time value". On 2026.9 the chat opens, but a message can be missing (in an archived part of the conversation, the messages before it there too) and a delivery is never confirmed.
+- **Check:** a line of the conversation's file has a `timestamp` that is a number too large (or too far below zero) to be a date.
+- **Cause:** the reader turned a number into a time without checking it was one, and that threw: on 2026.7 the whole read failed; on 2026.9 the message was left out (in an archive, the rest of that archive with it), and the read counted as incomplete.
+- **Fix:** before upgrading, the agent's console still shows the conversation. After upgrading, the chat opens. Such a message has no time: it is put first, as the oldest, so in a chat of over 100 messages it is not among the newest 100 the chat shows.
+- **Fixed in:** `v2.193.0` (HB-1367).
+- **Code:** `src/orchestrator/conversation/webChat.ts` — `HISTORY_SCRIPT` (`take`)
+
+### Web chat: slow to open, or "Couldn't read your conversation just now", for an agent that posts scheduled notices
+- **Symptom:** 💬 Chat with an agent that sends notices on a schedule (a reminder, a digest) is slow to open, or says "Couldn't read your conversation just now — try again." (the service log has "web chat history read failed"), though the chat is not long by what it shows.
+- **Check:** the newest messages in the agent's console are all the agent's own, and your last message to it is far back (weeks, or many notices ago).
+- **Cause:** the agent's replies are held as a run until the reply before them is read, to drop a delivered copy, and while a run was held the reader did not stop: it went back through every notice to your last message, though none of them could show.
+- **Fix:** before upgrading, sending the agent a message puts your last message at the end, and the next opens are quick again. After upgrading, a run is decided at a gap of two minutes, so the read stops an hour past the newest it shows, as for any other chat. Replies in the same words less than two minutes apart are still one run, and are read back to where they began.
+- **Fixed in:** `v2.193.0` (HB-1359).
+- **Code:** `src/orchestrator/conversation/webChat.ts` — `HISTORY_SCRIPT` (`take`, `settle`)
+
+### A class moved an agent to another AI source while its budget had it on a cheaper model, and it ran over its budget on the new source until the 1st
+- **Symptom:** an agent whose budget is set to *cheaper model* at the limit runs on its class's model, past 100% of its budget, and its Usage says "(you took over after its budget acted: left alone until the 1st)" though nobody changed its model by hand.
+- **Check:** this month the agent's budget moved it to a cheaper model, and then an edit of its class moved it to another AI source and off the cheaper model (to the class's own model, or to a source without the cheaper one); Settings → Budgets shows the agent's budget past 100%, set to *cheaper model* at the limit.
+- **Cause:** the class wrote the new source's model over the cheaper one, and the next budget check took that model for one its owner chose: it ended the switch as the owner's taking over and left the agent alone until the 1st. A class with only a source also dropped the model the owner had chosen for the source's default, for good.
+- **Fix:** before upgrading, set the agent's model to the new source's cheapest model by hand, or raise its budget. After upgrading, a class that moves the agent to another source ends the switch as the class's doing, and its Usage says "its class moved it to another AI source, which ended its budget's cheaper model: its budget's first check after it is rebuilt there moves it to that source's cheapest model, if one costs less". After the rebuild, the next budget check (within 10 minutes) moves it down, or says "it is already on the cheapest model it can run there". The class's model (with a class of only a source, the model you chose, if that source offers it and can run it) comes back on the 1st or when the budget is raised. A model set by hand after the class's move wins for the rest of the month. A class whose model is the cheaper one keeps it, and its line says only that it is over, on its class's model. The second switch, after the rebuild, is not told by message: its Usage line says it, and so do the Alerts unless you cleared the budget's earlier line.
+- **Fixed in:** `v2.193.0`
+- **Code:** `src/orchestrator/lifecycle/classChanges.ts` — `applyClassToAgent`, `checkClassFor`; `src/orchestrator/usage/budgets.ts` — `runBudgets`, `budgetLine`, `CLASS_SOURCE`, `CLASS_SOURCE_CHEAPEST`, `ownModelOverClass`
+
+### An agent runs on a cheaper model and its tile does not say why
+- **Symptom:** an agent answers on a cheaper model (for example claude-haiku-4-5) though its own budget is not reached and nobody changed its model; nothing under Alerts on its tile says so.
+- **Check:** Settings → Budgets shows this Hatchabot's monthly budget (the whole machine's) past 100%, set to *cheaper model* at the limit.
+- **Cause:** before v2.193.0 a move by the machine's budget was said only by that budget's line on the Hatchabot agent's tile; the agent's own tile said nothing, and its owner, if not the machine's owner, saw it nowhere.
+- **Fix:** before upgrading, look in Settings → Budgets; the machine's owner raises that budget to switch the agent back now, or it switches back on the 1st. After upgrading, the agent's tile says so under Alerts, to its owner: "On claude-haiku-4-5 until December 1: this Hatchabot's monthly budget moved it — raise that budget to switch back now" ("ask the machine's owner" to an owner who is not the machine's).
+- **Fixed in:** `v2.193.0`
+- **Code:** `src/orchestrator/lifecycle/agentList.ts` — `view` (`budgetCheaper`); `web/app/operations.js` — `agentAttention`
+
+### With no Hatchabot agent, a proxy on the app's port or a failed restore drill is said nowhere on the home screen
+- **Symptom:** no Hatchabot (management) agent is set up, and the home screen never shows "a proxy on this machine sends visitors to port …" or "the last restore drill (…) failed — its backups may not bring every agent back".
+- **Check:** there is no Hatchabot agent's tile on the home screen; the log says a proxy was seen in front of port 8080, or Settings → Backups shows the last restore drill failed.
+- **Cause:** before v2.193.0 the machine's alerts were carried only by the Hatchabot agent's tile, so with none they showed nowhere.
+- **Fix:** before upgrading, check Settings → Backups and the log (or set up a Hatchabot agent). After upgrading, with no Hatchabot agent they are on the machine line at the foot of the home screen.
+- **Fixed in:** `v2.193.0`
+- **Code:** `web/app/spend.js` — `v2PaintMachine`, `v2MachineAlerts`; `web/app/home.js` — `renderV2`
+
+### An agent moved or restored on another machine runs on its dearer model, though its budget here had it on a cheaper one
+- **Symptom:** after a move to another Hatchabot, or a download restored elsewhere, the agent runs on the model you chose (for example claude-opus-4-8), not the cheaper one its monthly budget here had switched it to, and spends past what its budget here allowed.
+- **Check:** before the move or download, its budget here (its own or this Hatchabot's) was past 100%, set to *cheaper model* at the limit; the other machine has no budget for it.
+- **Cause:** budgets do not travel: the file carries the model you chose, never the budget's cheaper one (since v2.191.0), and nothing on the other machine holds it to a budget until one is set there. Until v2.193.0 nothing said so.
+- **Fix:** set a budget for it on the other machine (its Usage tab → Spending), or set its model there by hand. Since v2.193.0 the download's and the move's confirmation, and `hatchabot download` and `hatchabot rehost`, say "Its budget had switched it to …; on the other machine it runs on your own model (…) if the AI source there offers it, else its default, until you set a budget on that machine." (with no model of its own: "… it runs on the default model of its AI source there until you set a budget on that machine").
+- **Fixed in:** `v2.193.0` (said; the switch itself still does not travel)
+- **Code:** `src/orchestrator/lifecycle/agentList.ts` — `view` (`budgetSwitch`); `web/app/moves.js` — `budgetSwitchLostOnExport`, `rehostAgent`; `web/app/templates.js` — `downloadAgent`; `src/cli.ts` — `budgetSwitchNote`
+
+### `hatchabot usage` shows an agent's lifetime cost as included (or local) though it ran on an API key before, or the other way round
+- **Symptom:** the lifetime table of `hatchabot usage` (or the "in all" of an agent's Usage) bills all of an agent's tokens to the source it runs now: "incl." or "local" for an agent that spent on an API key before its switch, or an API cost for one that was on a plan.
+- **Check:** the agent's AI source was changed at some point, here or on another Hatchabot before it was moved or restored here; since v2.193.0 its row is marked `*` when the change was here ("its total includes time on an earlier AI source"), and its Usage line says "by the source it runs now, though its total includes time on an earlier AI source".
+- **Cause:** lifetime totals are read from the agent's transcripts, which do not say which source each call ran on, and are billed by the source its container runs now; the history to split them is not kept.
+- **Fix:** read the lifetime figures as the current source's estimate. For what each source took, use Usage's day, week and month views, which file each reading under the source it was taken on. Since v2.193.0 the lifetime figures say they are billed by the source each agent runs now, and mark those that include time on an earlier one here (an agent moved or restored from another Hatchabot is not marked for its time there).
+- **Fixed in:** `v2.193.0` (said and marked; the numbers are unchanged)
+- **Code:** `src/orchestrator/usage/usageReadings.ts` — `computeFleetUsage`, `ranOnAnEarlierSource`; `src/api/usage/usageRoutes.ts` — `'/v1/agents/:id/usage'`; `src/cli.ts` — `fmtFleetUsage`; `web/app/spend.js` — `billingLine`, `billedNow`
+
+### The same "wants to talk" push again after an agent was stopped or rebuilt
+- **Symptom:** your phone gets `🔑 <name> wants to talk to "<agent>".` a second time for a request you were already told of, after that agent, or your Hatchabot agent (the one that pushes to your phone), had been stopped, rebuilt or asleep for a few minutes.
+- **Check:** the request under Alerts is the same one (the same person, nobody let in or turned away meanwhile), and the agent or your Hatchabot agent was not running for one sweep (five minutes) between the two pushes.
+- **Cause:** the sweep that tells you of requests kept what it had told only for the agents it read that time, and only while it could push to you; an agent that was down for one sweep, or your Hatchabot agent down for one, lost that, and the waiting request was told again once it was back.
+- **Fix:** nothing to do: let them in or turn them away under Alerts. After upgrading a request is told once while either is down; only a restart of Hatchabot tells a waiting request again.
+- **Fixed in:** `v2.193.0` (HB-1370).
+- **Code:** `src/orchestrator/channels/knocks.ts` — `sweepPendingPairings`
+
+### Approving a code by hand says it is no longer pending, on an agent with two chat apps
+- **Symptom:** you approve someone by their pairing code alone (the management chat, or the management tools), on an agent that is on Telegram and Discord (or Slack), and are told `That request is no longer pending. Ask them to message again.`, or `Couldn't read the requests waiting at the agent's door just now — try again in a moment.`, though they are still waiting.
+- **Check:** the code is from someone the agent does not expect (not an invitee, not someone you know from another agent), and its request is on the app other than Telegram.
+- **Cause:** the app a bare code belongs to was looked for among the requests the agent expects only; a stranger's code was found on neither app and sent to Telegram, or, with the other app unreadable, taken for a failed read.
+- **Fix:** before upgrading, let them in from Alerts with the app named (the card does it), or ask them to write to the agent while you have an invite window open. After upgrading the code is found on its own app.
+- **Fixed in:** `v2.193.0` (HB-1371).
+- **Code:** `src/orchestrator/channels/knocks.ts` — `kindForCode`
+
+### A request stays under Alerts for half a minute after letting it in failed
+- **Symptom:** you press **Let them in**, are told an error such as `The agent changed while approving. Refresh and try again.`, and the request still shows as waiting; pressing again says `That request is no longer pending. Ask them to message again.`
+- **Check:** the error came after the agent's runtime had taken the approval (the agent was stopped, rebuilt or moved at that moment).
+- **Cause:** the list of requests is kept for 30 seconds (`HATCHABOT_KNOCK_CACHE_MS`), and a failed approve did not forget it, as a successful one and a turn-away do.
+- **Fix:** wait half a minute and refresh; ask them to write again if their request has gone. After upgrading the list is read again after every approve, whatever its answer.
+- **Fixed in:** `v2.193.0` (HB-1309).
+- **Code:** `src/api/chat/channelRoutes.ts` — `'/v1/agents/:id/pairing/approve'`
+
+### Strangers get pairing codes after you removed someone who had not written yet
+- **Symptom:** right after you removed a member who had joined by an invite and not written yet (or whose Telegram invite you had copied again), people who message the agent's bot get a pairing code instead of silence, for up to half an hour, and nothing shows under Alerts.
+- **Check:** in the agent's log, `member.revoked` for them, and no `claim.window_closed` or `claim.seat_gone` until up to 30 minutes later; the agent rests at Invite only (Allow knocks off).
+- **Cause:** removing a member did not close the windows that waited for them (their first message, or a knock on an invite they had joined by), so the door stayed in pairing until they ran out; the sweep turned the strangers' requests away.
+- **Fix:** before upgrading, nothing harms you: nobody is let in, and the door closes when the window ends. After upgrading removing a member closes their windows and puts the door back to rest at once (`member.windows_closed` in the log).
+- **Fixed in:** `v2.193.0` (HB-1522).
+- **Code:** `src/orchestrator/members/roster.ts` — `remove`, `closeWindowsFor`
+
+### Someone you removed can still talk to the agent on another chat app
+- **Symptom:** you removed a member, Members no longer lists them, but they still get answers from the agent on Discord or Slack (or on Telegram, when they had joined on another app).
+- **Check:** they had a window open for their first message on that app when you removed them, or **Let them in again** was pressed during the removal, and the agent's log shows `claim.bound` for that app between your removal and `member.revoked`.
+- **Cause:** removing someone scrubs the apps they are known on, read before the scrub, and then marks them removed. A window for them on another app, open during the scrub with their seat still active, let their first message there in and bound it meanwhile: on no scrub's list, it stayed let in, in the app's rooms too.
+- **Fix:** delete the agent to be certain, or restore it from a backup (a restore removes again, on every app, everyone removed from it). After upgrading a removal closes their windows before its scrub, scrubs any app they were let in on during it before marking them removed, and takes them out of the rooms again if that came after; **Let them in again** answers `Another operation is already running on this agent.` while a removal runs.
+- **Fixed in:** `v2.193.0` (HB-1553).
+- **Code:** `src/orchestrator/members/roster.ts` — `remove`; `src/orchestrator/members/members.ts` — `revokeMember`
+
+### A moved or imported agent's image is built on a hand-made image that runs otherwise, or is refused as running otherwise
+- **Symptom:** an agent moved to a runner, or imported, runs as root, or with another entrypoint, environment, volume or working folder than on its old machine; one of the two machines has an image built by hand in the runtime repository, `FROM` one of Hatchabot's with only a `USER`, `ENV`, `ENTRYPOINT`, `CMD`, `VOLUME`, `WORKDIR` or `ONBUILD`. After upgrading, the move or import is refused instead: `no image on <machine> runs as <tag> does: <image> there is built the same way and runs otherwise (its user, entrypoint, command, environment, volumes, working folder or the rest of how it runs), so one of them was built by hand: if it is <image>, build … on <machine> (Settings → Advanced → Runtime images) or take <image> out of the runtime repository; if it is <tag>, make it a derived image where it was made, so its lines travel; or run it on that machine's default image` (`here` for an import; for a derived image, `runs as <tag>'s base <base> does: … Build that base the same way on <machine>, or run it on that machine's default image`; for a base taken by its name, from before `v2.191.0`, `<base> there runs otherwise`).
+- **Check:** run `docker image inspect --format '{{json .Config.User}} {{json .Config.Entrypoint}} {{json .Config.Cmd}} {{json .Config.Env}} {{json .Config.Volumes}} {{json .Config.WorkingDir}} {{json .Config.OnBuild}} {{json .Config.Shell}} {{json .Config.StopSignal}}'` for `<image>` on that machine and for the agent's image (a derived image's base) on the old one: they differ in something. `NODE_VERSION` and `YARN_VERSION` in the environment are not compared: ignore them. Both have the same layers (`{{json .RootFS.Layers}}`) or the same `org.hatchabot.build-inputs` label, which is why one stood in for the other.
+- **Cause:** an image stood in for a recipe's base by its layers or by its build-inputs label alone, and an image built `FROM` the base that adds no files has both.
+- **Fix:** after upgrading, a stand-in must also run as the base does, and a base taken by its name must run as the agent's did. The refusal names the fix for each side, as it cannot tell which was built by hand. When the machine's image is the hand-made one: build that OpenClaw there from Settings → Advanced → Runtime images (or Install image; with settings set by hand, `scripts/build-runtime-image.sh` with them), or take the hand-made image out of the runtime repository (`docker tag` it into another repository, then `docker rmi` its name there), then move or import again. When the agent's image (or a derived image's base) is the hand-made one: build one the same way on that machine, make it a derived image on the machine it came from so its lines travel, or run the agent on that machine's default image. A file exported before `v2.193.0`, or from an older Hatchabot, does not say how its base runs and is matched as before.
+- **Fixed in:** `v2.193.0` (HB-1330).
+- **Code:** `src/orchestrator/machines/buildInputs.ts` — `standsFor`, `pickStandIn`; `src/orchestrator/machines/imageRecipe.ts` — `recipeFor`, `wanted`, `runsOtherwise`; `src/providers/provider.ts` — `runConfigId`, `configIdKnown`; `src/providers/localDockerProvider.ts` — `listImageTags`
+
+### An import's reason for rolling back ends in the middle of a word
+- **Symptom:** an import is rolled back, and its reason in Activity starts `the image <tag> could not be built here: no image on this machine is built the way <tag>'s base is: …` and ends cut off, e.g. `…node:24-slim@sha256:eee… and plugi`.
+- **Check:** the file's base was built with settings by hand (a Node image with a digest, plugins), which the reason names one by one.
+- **Cause:** the advice named every setting by hand with its full value, a digest's 64 characters included; the rollback keeps 500 characters of its cause.
+- **Fix:** read what to build from the start of the reason (the first difference, its lists counted as needed); build that image here with `scripts/build-runtime-image.sh` and the settings the file's base had, then import again, or import onto this machine's default image. After upgrading, the reason always fits and is cut at no word: digests are said short, what does not fit of each list (settings by hand, packages, plugins) is counted (`… and 2 more settings set by hand`, `jq and 19 more`, at last `2 packages`), packages the first difference names are not named again, and a refusal still too long ends at a word with `…`.
+- **Fixed in:** `v2.193.0` (HB-1333).
+- **Code:** `src/orchestrator/machines/buildInputs.ts` — `buildAdvice`, `inputsDiffer`, `fitWords`; `src/orchestrator/machines/imageRecipe.ts` — `buildRecipeOn`, `runsOtherwise`; `src/orchestrator/transfer/transfer.ts` — `buildPinned`
+
+### A member's import asks about the image of another household's default
+- **Symptom:** someone who is not the machine's owner imports an agent exported from another household's Hatchabot, and is asked about its image (`only this machine's owner can pin an agent to a particular image`, or that only the owner can build it) instead of the import running on this machine's default image.
+- **Check:** the file's image is the other household's `<repository>:latest` (its default); here it is renamed into this fleet's repository, and this machine's default is pinned to another tag (`HATCHABOT_IMAGE` in `.env`).
+- **Cause:** the renamed `:latest` was taken as a particular image to pin, not as the other fleet's default.
+- **Fix:** choose to run it on the default image. After upgrading, a member's import of another fleet's `:latest` runs on this machine's default, unpinned, with no question; the owner is still asked.
+- **Fixed in:** `v2.193.0` (HB-1332).
+- **Code:** `src/orchestrator/transfer/transfer.ts` — `settleImage`
+
+### `hatchabot image derive` says "Base must be a hatchabot-runtime:* tag."
+- **Symptom:** `hatchabot image derive <name> …` with no `--base` fails with `error: Base must be a hatchabot-runtime:* tag.`
+- **Check:** `HATCHABOT_IMAGE` in `.env` pins the fleet's image by digest (`<repository>@sha256:…`).
+- **Cause:** the fleet's default was given as the base, and a derived image is built only on a tag (recipes, moves and Change base look a base up by its tag).
+- **Fix:** give the base: `--base <repository>:<version>`. After upgrading, it is built on a tag here of that same image and says which (`The fleet's image is pinned by digest: built on <tag>, its tag on this machine.`); with none, it says `The fleet's image is pinned by digest: give --base <repository>:<version>.`
+- **Fixed in:** `v2.193.0` (HB-1353).
+- **Code:** `src/orchestrator/machines/runtimeImages.ts` — `derivedBase`; `src/api/machine/imageRoutes.ts` — `'/v1/images'`
+
+### `hatchabot upgrade-image` refuses to build: the service is older than the CLI, or did not make it the default
+- **Symptom:** `hatchabot upgrade-image` stops with `error: Hatchabot's service is older than this CLI: restart it onto this release (./scripts/restart.sh in its install folder), then build.`, or `error: Hatchabot could not say whether <tag> may be built (…). Try again once it answers.`, or the service's own refusal of the question (`error: That image tag is not valid.`); or, after the build, `error: Then Hatchabot did not make it the fleet default: …` (or `did not move <repository>:latest to it: …`) followed by `It stays a candidate: <tag>, with <repository>:latest untouched.` Before `v2.193.0` it said `⚠ Could not ask Hatchabot whether <tag> may be built (…)` and built anyway, and moved `:latest` itself.
+- **Check:** the first (before the build, or after it, from a service of `v2.191.0` or `v2.192.0`, which answers a once-built check as the one before a build): an upgrade is under way, or the service has not restarted since the release changed (`systemctl --user status hatchabot` on Linux shows it started before the upgrade); the second: the service answers with an error (its log); the third: the reason says the image has no memory search engine of its own while the shared service is off, or names agents on OpenClaw 2026.8 or newer that it would strand.
+- **Cause:** the build is checked by the service; a service older than the CLI has no check to answer with (or, once built, the wrong one), and an answer that failed was taken as none. A default build was checked only before it started (it can take an hour), and not for what the app's own build is checked for as it ends, while the script moved `:latest`.
+- **Fix:** let the upgrade finish, or restart the service onto this release (`./scripts/restart.sh` in the install folder), and build again; or try again once it answers. Refused once built: the image is kept as a candidate. Do what the reason says (turn the shared memory service on under Settings → Hosts, or pin the agents it names to their current image), then Promote it under Settings → Advanced → Runtime images, which asks the same again; with `HATCHABOT_IMAGE` pinning the default, where Promote is off, run `hatchabot upgrade-image --version <version>` again, which asks the same again as it ends (`docker tag` skips every check). Only a service that does not answer at all is warned of and built for, as before.
+- **Fixed in:** `v2.193.0` (HB-1450).
+- **Code:** `src/cli.ts` — the `upgrade-image` case; `src/api/machine/imageRoutes.ts` — `'/v1/runtime/build/check'`; `src/orchestrator/machines/runtimeImages.ts` — `defaultRefusal`, `madeDefault`
+
+### Setup says the runtime image .env pins is not on this machine
+- **Symptom:** setup says `⚠ The runtime image .env pins, <repository>:<version> (HATCHABOT_IMAGE), is not on this machine, and setup does not fetch a pinned image: agents cannot start until it is here …`, and agents then fail to start.
+- **Check:** `docker image inspect <repository>:<version>` says no such image, and `HATCHABOT_IMAGE` in `.env` names it.
+- **Cause:** setup fetched only the release's default image, never a pin.
+- **Fix:** `OPENCLAW_VERSION=<version> NO_LATEST=1 ./scripts/build-runtime-image.sh` (it downloads the published image, or builds it), or take `HATCHABOT_IMAGE` out of `.env` for this release's default. After upgrading, setup does that itself when the pin is an OpenClaw version's own image in the fleet's repository, and says the command again when it could not; any other pin (a digest, a hand-made name) is still only named, with `docker pull <image>`.
+- **Fixed in:** `v2.193.0` (HB-1376).
+- **Code:** `scripts/setup-host.sh`
+
+### Adopting a folder again did not bring a task edited in the old OpenClaw install
+- **Symptom:** a task edited in the old install (its prompt, schedule, name or description) after its folder was adopted is still the old version in the agent's Tasks page after adopting the folder again, and before v2.193.0 nothing said so. Since v2.193.0 the adopt says "N tasks changed in the old workspace since they were carried — not brought" (the page's message, the row in Bring in selected, and `hatchabot adopt` after "adopted N files"); an adopt into an agent that was not running says it on its timeline line "the adopted workspace's paths and tasks were brought over once it was running (… ; N changed in the old workspace since they were carried — not brought)".
+- **Check:** the agent's copy of the task is there (on or off) and differs from the old install's; its timeline has "a task was already brought over and has changed in the old workspace since, so it was not brought again".
+- **Cause:** an adopt knows each task it carried by its id in the old install's task store, and a task whose copy is still there counts as carried, however it looks now, so the copy you reviewed and switched on is never replaced or doubled. Only an edit to its name, description, schedule or prompt counts; who it goes to and where it runs (which Hatchabot re-points on the copy itself), and what OpenClaw records of its runs, do not.
+- **Fix:** to bring the task as the old install has it now, delete the copy in the agent's Tasks page and adopt the folder again: a task whose copy is gone is brought over afresh, and counted from then. Editing the copy to match does not clear the message: what is compared is the old install's task now and as it was when carried, which stays as it was while the copy is there. A task carried before v2.193.0 is never counted as changed (its record holds nothing to compare with): delete its copy and adopt again once, and later edits are counted.
+- **Fixed in:** `v2.193.0` (said; the copy is kept, as before)
+- **Code:** `src/orchestrator/transfer/cronImport.ts` — `migrateCrons`, `sourceTaskFingerprint`; `src/store/store.ts` — `recordCarriedTask`, `carriedTasks`; `web/app/create.js` — `adoptTasksChanged`
+
+### After an adopt, a file outside the agent's workspace that a link in it points at had its paths rewritten
+- **Symptom:** after adopting a workspace, a file outside the agent's own folder (a shared notes file, say) names `/home/node/.openclaw/agents/<agent>/agent/…` where it named the old install's folder; the agent's workspace has a link to that file.
+- **Check:** in the agent's container, `readlink -f` on the link names a path outside `/home/node/.openclaw/agents/<agent>/agent`.
+- **Cause:** the adopt's re-point of the workspace's own paths wrote through every link in the workspace to a file, wherever that file was. The adopt never copies a link, so the link was the agent's own, and the file outside was not the workspace's.
+- **Fix:** put the file's old paths back by hand (or from its own backup). Since v2.193.0 a link is written through only when its real path is inside the workspace; one to a file outside it is left as it is. A hard link is still written in place, wherever the file's other names are: if a file in the workspace is a hard link to one outside it, make it a copy, or a link, before adopting.
+- **Fixed in:** `v2.193.0`
+- **Code:** `src/orchestrator/transfer/cronImport.ts` — `REWRITE_SCRIPT`, `rewriteWorkspaceFiles`
+
+### Recovery readiness says "its archive failed" for an agent that was being restored, imported or moved during the backup
+- **Symptom:** Settings → Backups → Recovery readiness says an agent was left out of recent backups because `its archive failed`, its table says `failed`, the Backups list marks the set `⚠ incomplete (1 agent failed)`, and `hatchabot doctor` says `Last backup set … is incomplete (1 volume failed)`, though nothing failed.
+- **Check:** that backup's output (`journalctl --user -u hatchabot-backup`, or what "Back up now" printed) has `✗ <volume>: its agent is in the middle of <a restore, an import, a move…>, which replaces its files — not in this set (the next backup takes it)`.
+- **Cause:** a volume left out on purpose while its files were being replaced was counted only among the failed volumes in the set's `backup-status.json`, so every reader called it a failed archive.
+- **Fix:** nothing to repair: the next backup takes that agent. After upgrading, sets made from then on name such volumes apart (`replacing`, kept among the failed volumes too for older readers): readiness says `its files were being replaced (a restore, an import or a move): the next backup takes it`, its table `files being replaced`, the Backups list `(N left out while their files were replaced)`, and `hatchabot doctor` `Last backup set … is incomplete (N left out while their files were replaced)` with `Nothing to repair: the next backup takes it` when no volume failed; none is counted as failed. Sets made before still read as before.
+- **Fixed in:** `v2.193.0` (HB-1205).
+- **Code:** `scripts/backup-volumes.sh` — `replacing_list`, `write_status`; `src/orchestrator/backups/backupFiles.ts` — `readSetStatus`; `src/orchestrator/backups/recoveryReadiness.ts` — `LeftOut`; `web/app/settings.js` — `loadReadiness`; `src/doctor.ts` — `backupFacts`, `doctorReport`
+
+### In zram mode, zswap is off after a reboot though a disk swap came back beside zram
+- **Symptom:** on a machine set up with `sudo scripts/enable-compressed-swap.sh --zram`, after a reboot `swapon --show` lists a disk swap (a partition or a swap file) beside `/dev/zram0`, and `cat /sys/module/zswap/parameters/enabled` says `N`: what goes to that disk is not compressed.
+- **Check:** `cat /proc/swaps` lists a swap that is not `/dev/zram…`, and `/etc/fstab` has its line; `journalctl -u hatchabot-compressed-swap` says nothing about it.
+- **Cause:** in zram mode the boot helper turned zswap off every time, even when a disk swap came back through `/etc/fstab`: the state `--zram` itself refuses to set up.
+- **Fix:** turn that swap off (`sudo swapoff <device>`) and take its line out of `/etc/fstab`, or put zswap in front of it instead: `sudo scripts/enable-compressed-swap.sh`, without `--zram`. Upgrading alone does not change the boot helper a setup made before 2.193.0 wrote: after upgrading, `scripts/enable-compressed-swap.sh --status` says `boot helper: … was written by another release of this script …` and gives the command that writes it again with the same settings. `sudo scripts/enable-compressed-swap.sh --zram` (with the `--zram-size` it gives), refused while the disk swap is on, still says `The boot helper is brought up to date; nothing else changed: …`. From then on the boot leaves zswap as it is when a disk swap is on beside zram, and says so in the journal: `zram: a disk swap is on beside zram (<device>), so zswap is left as it is …`, with the script's path in the fix (on a kernel with no zswap: `… and this kernel has no zswap to compress in front of it …`, and the one fix, turning that swap off).
+- **Fixed in:** `v2.193.0` (HB-1459).
+- **Code:** `scripts/enable-compressed-swap.sh` — `HELPER_BODY`, `SELF`, `SELF_Q`, `helper_state`, `again`, `status`
+
+### The follow-latest or channel timer set a good release aside after a cut-off deploy's repair kept failing
+- **Symptom:** the follow-latest timer's log says `Deploying vX.Y.Z did not complete 8 times in a row. It will not be retried; the next tag will be.` (the channel timer: `Upgrading to vX.Y.Z did not complete 8 times in a row.`), and each of those tries stopped at the repair of a deploy or upgrade cut off before, never at the release itself; once the repair went through, the release stayed aside.
+- **Check:** the same ticks show `A deploy of … was cut off part-way — putting vA.B.C back first.` (or `An upgrade of … was cut off part-way`), then `index.lock is in the way`, `Could not check out …` or `Another install of the dependencies … has held … for half an hour`; `cat ~/.local/state/hatchabot/follow-latest-failed` (or `follow-channel-failed-<n>`) names the release.
+- **Cause:** a deploy or upgrade whose repair of one cut off failed before the release was touched exited 3, which the timers count as a failed try of the release.
+- **Fix:** before upgrading, clear what the repair stops at (the lock the message names, once no git or npm runs there), then deploy the release by hand (`scripts/deploy-release.sh vX.Y.Z`, or `hatchabot upgrade <channel>`) or remove the set-aside file above. After upgrading, such a repair says `The repair did not go through (above), and vX.Y.Z was not touched: it is tried again later, less and less often (an hour apart at most). This does not count against vX.Y.Z.` The repair waits on a clock of its own (5, 15, 35, then 55 minutes) and never sets the release aside; the release is deployed on the first tick the repair goes through.
+- **Fixed in:** `v2.193.0` (HB-1431).
+- **Code:** `scripts/deploy-release.sh` — `repair_failed`, `finish`; `scripts/upgrade.sh` — `repair_failed`, `finish`; `scripts/follow-tries.sh` — `repair_open`, `repair_waiting`, `note_repair`, `forget_repair`; `scripts/follow-latest.sh` — `repair_ended`, `repair_cut`; `scripts/follow-channel.sh` — `repair_clock`, `repair_ended`
+
+### Removing a runner is refused for hours while Install image copies to it
+- **Symptom:** Remove on a runner says `The runtime image is being installed on this host — wait for Install image to finish (its row shows how far it has come), then remove it.`, and Install image's row has not moved for a long time; only a restart of Hatchabot ended it.
+- **Check:** the runner is on another CPU than this machine (Install image pulls the published image there, `docker -H … pull --quiet …` running on this machine), or a `docker save`/`docker -H … load` is still running.
+- **Cause:** a pull there has no progress to watch, and both it and the build of this machine's extra packages had 3 hours each; nothing could stop the copy, and removal waited for it.
+- **Fix:** before upgrading, restart Hatchabot (`./scripts/restart.sh`) to end the copy, then remove the runner. After upgrading, Remove offers `Remove anyway? That stops the copy to "<runner>" where it is.`: the copy's docker is stopped, Install image's operation ends `Stopped: Remove anyway was chosen for <runner> while its image was being installed.`, and the runner is removed. A pull is given an hour at most, and then says `… pulling it there did not finish within an hour, so it was stopped: is that runner's link slow, or the pull stuck? Try Install image again, or pull it on that runner by hand (docker pull <image>), then Install image again.` (a pull that finishes there leaves its layers for the next one).
+- **Fixed in:** `v2.193.0` (HB-1254).
+- **Code:** `src/orchestrator/machines/runnerSetup.ts` — `installRuntimeImage`, `dockerRun`, `PULL_CEILING_MS`; `src/orchestrator/machines/imageInstalls.ts` — `stop`; `src/orchestrator/machines/hosts.ts` — `remove`, `IMAGE_COPY`; `src/api/machine/machineRoutes.ts` — `'/v1/hosts/:id'`; `web/app/settings.js` — `deleteHost`
+
+### Saved the agents one can ask, opened another agent, and it still cannot consult them
+- **Symptom:** you ticked agents under an agent's Sharing → **Other agents it can ask**, pressed Save and opened another agent before it answered. Nothing was said and no rebuild was offered, and the first agent still says it cannot reach them. The same opening of another agent meant other answers were lost too: a **Test Gmail** result never appeared, **Share** for web chat and **Let them in again** said nothing, and a bot token's refusal, or a member removed, came with no agent's name.
+- **Check:** open the first agent's Sharing tab. Its peers show as ticked, but the agent has not been rebuilt since you saved them.
+- **Cause:** an answer was shown only while the sheet that sent it was still on screen. Once another agent's sheet opened, the page dropped the answer, so the rebuild the save needs was never offered.
+- **Fix:** before upgrading, rebuild that agent (memory is kept), and press a test or share again on its own sheet. After upgrading, an answer that comes back after you open another agent is shown in a toast that starts with the agent's name (for example `<agent>: Saved — Rebuild this agent before it can consult them.`), and a peer save still offers that agent's rebuild. Nothing is shown once you have signed out or another person is signed in.
+- **Fixed in:** `v2.193.0` (HB-1486).
+- **Code:** `web/app/connections.js` — `savePeers`, `testAgentGmail`, `forAgent`; `web/app/panels.js` — `reopenDoor`, `shareWebChatWith`, `kick`, `showBotToken`; `web/app/settings.js` — `sharingPage`
+
+### Named someone by their Telegram link, and they were never let in
+- **Symptom:** you made an invite for one person, or gave **Let them in again** their handle, by pasting their Telegram link (such as `https://t.me/<name>`) instead of their @handle. They opened the invite and wrote to the bot, but were never let in, and you were told the invite's window closed unused.
+- **Check:** the invite or the door was for the link: the invite dialog said `Only @https://t.me/<name> can use this link.`, or the toast said `Door open for 30 minutes … for @https://t.me/<name> only`.
+- **Cause:** the handle was kept and compared as it was typed, link and all, so it matched nobody's name.
+- **Fix:** before upgrading, open the agent → Sharing → Members, press **Let them in again** and give their @handle (the name after `t.me/`), or invite them again by their @handle. After upgrading, a `t.me/` or `telegram.me/` link is read as the name after it, in an invite and in **Let them in again**, and an invite made earlier for such a link is read the same way. A handle that cannot be one (nothing after the @ or the link, or a name over 64 characters) is asked for again, in both, and refused if sent. Before, `@` alone made it anyone's, while the invite said it was for that handle alone; a bare link matched nobody. An invite made earlier for a bare link, with no name in it, can no longer be used: its page says it names nobody and to ask for a new one. For someone who joined by one, **Let them in again** asks for their @handle. The invite dialog now says whom the invite was kept for.
+- **Fixed in:** `v2.193.0` (HB-1439 review).
+- **Code:** `src/store/store.ts` — `handleText`, `normalizeHandle`, `expectedHandle`, `NAMES_NOBODY`; `src/api/chat/memberRoutes.ts` — `typedHandle`, `NOT_A_HANDLE`; `src/orchestrator/members/invite.ts` — `checkInvite`, `NAMES_NOBODY_INVITE`; `src/orchestrator/members/roster.ts` — `reopen`; `web/app/panels.js` — `askHandle`, `invite`, `reopenDoor`
+
+### After a restore, the Hatchabot agent has two weekly token reviews
+- **Symptom:** after restoring the Hatchabot agent from a backup (Restore, or Finish or Put back on a held restore), its Tasks page lists two weekly reviews: the one you renamed by hand, and a new "Weekly token review" made at its first build after the restore. Or the review's prompt is an older wording, from the backup, although a newer release has another.
+- **Check:** the new "Weekly token review" was made at the first rebuild or start after the restore (its creation time in the Tasks page); the other one is the review you renamed, with the same Monday 09:00 schedule. For the wording: the task's prompt is not the one a fresh agent's review has.
+- **Cause:** a restore marks the review's record by when it was made against when the backup was made. One recorded after the backup was dropped, and the next build looked for the task by its name only; a task can be recorded after the backup and still be in it (a build records a review it finds by its name), and one renamed since was not found, so a second one was made. A record with no task id, from before the backup, was only marked as up to date, so the backup's wording stayed.
+- **Fix:** delete one of the two in the Tasks page (keep yours); nothing comes back. Since v2.193.0 the build after a restore looks for the review by its id first, then by its name, rewords it in place and keeps the name you gave it (only a task still under the name before v2.120, "Weekly model review", is renamed), and makes one only when neither is there. A task of your own named "Weekly token review" can be taken for Hatchabot's after a restore, and gets its prompt (it keeps its name): when the review's task id was never recorded, or when the review was recorded after the backup was made and its id is not in the backup. Give yours another name. Outside a restore, a review whose task id was never recorded is not looked for, and a new release's wording does not reach it (as before).
+- **Fixed in:** `v2.193.0`
+- **Code:** `src/store/store.ts` — `matchManagedCronsToCopy`, `managedCron`; `src/orchestrator/usage/modelReview.ts` — `syncModelReviewCron`
+
+### An imported derived image installs packages its lines do not name
+- **Symptom:** a derived image that came with an import (or a move) installs packages, such as `jq`, that none of its Dockerfile lines install; every Rebuild installs them too. Since v2.193.0 its row in the derived images list says "+ base packages: jq, …" under its lines.
+- **Check:** Settings → Advanced → Derived images shows "+ base packages:" on the image's row; its lines (🔎) do not name them.
+- **Cause:** an import lays on the base here, before the image's own lines, the packages the image's base had on the machine it came from and this machine's base does not, so it builds what it was built on there. They are kept apart from the lines, and every build lays them on.
+- **Fix:** nothing to do: they are what the image had where it came from. They cannot be taken out from the app yet; to build without them, make a new derived image from the same lines under a new name (ask the Hatchabot agent, or `hatchabot image derive <new name> --from <file>`) and pin the agents to it: one derived under the image's own name keeps its base packages.
+- **Fixed in:** `v2.193.0` (named; not editable)
+- **Code:** `src/store/store.ts` — `setDerivedImageBase`; `src/api/machine/imageRoutes.ts`; `web/app/images.js` — `loadDerivedImages`
+
+### `uninstall.sh --purge` said it removed the database, but it is still there
+- **Symptom:** after `./scripts/uninstall.sh --purge`, which said "removed the database in <folder>" (or, when the folder is Hatchabot's own and went whole, "removed <folder>") and "Its agents, volumes and database are gone." (or, with a volume it could not remove or an agent left on a runner, "Its agents and database are gone, but…" or "…their volumes and the database are gone."), the database file is still on disk, with its `-wal`, `-shm` and `.lock` beside it. Since v2.193.0 the purge says "removed the link to the database in <folder>" (or "removed <folder>"), "kept <file>, the database <path> was a link to, and whichever of its -wal, -shm and .lock are beside it: only the link was removed", and that the link to its database is gone and "the database it led to is kept, at <file>".
+- **Check:** `HATCHABOT_DB` in the install's `.env` (or the install's `data/hatchabot.sqlite`) was a link (`ls -l` showed `->`), and the file still there is the one it pointed at.
+- **Cause:** SQLite follows a link to its database, and makes its `-wal` and `-shm`, and the server its lock, beside the file the link leads to. The purge removes the files at the path the install names, which is the link.
+- **Fix:** if no other install uses that database, delete it, with the files beside it named for it (`<name>-wal`, `<name>-shm`, `<name>-journal`, `<name>.lock`). Its agents' volumes were removed by the purge.
+- **Fixed in:** `v2.193.0` (said; the database the link led to is kept)
+- **Code:** `scripts/uninstall.sh` — `rm_db`, `DB_KEPT`
+
+### Someone you removed can still message the agent, though Members no longer lists them
+- **Symptom:** you removed a member (or unlinked your Discord account), Members no longer lists them, but the agent still answers their direct messages on that chat app until its next rebuild; open the agent → Sharing → Access → **Verify now** and it says `removed, but the agent still lets them in`.
+- **Check:** the agent's `openclaw.json` has their chat id under `channels.<app>.accounts.<account>.allowFrom`, and its log has, within seconds of `member.revoked` (or of the time you unlinked: a Discord unlink that works logs nothing), a door write (`channel.dm_policy` with `set`: the five-minute sweep, or another window closing) or a room grant (`member.room_granted`).
+- **Cause:** a removal takes the person's id out of the agent's allowlists on its volume, then marks them removed. Other writes of the same files ran at the same time, each reading the file, changing it and writing it all back: the door put back to rest read the person as still a member and wrote their id back once the scrub was done, and a write that had read the file before the scrub and landed after it (the door opened for an invite, a room grant for someone else, a restore's clean-up) wrote back the copy it had read, with them in it.
+- **Fix:** before upgrading, rebuild the agent: its build writes `openclaw.json` from the members again, and leaves them out; then **Verify now**. Removing them again does nothing once they are listed as removed. On OpenClaw 2026.7 their id can also have been written back into the approvals file (`credentials/<app>-<account>-allowFrom.json`), which a rebuild keeps: add them again (an invite, or **Add** beside their name under Members, for someone who uses another of your agents) and remove them again. After upgrading, a removal and Hatchabot's writes of who may reach the agent on its volume (its door, grants, removals and scrubs, a file size limit, a restore's clean-up) run one at a time, in the order asked for, the door is written with who the members are at that moment, and a grant for someone being removed, or whose chat id was unlinked meanwhile, writes nothing.
+- **Fixed in:** `v2.193.0` (HB-1554).
+- **Code:** `src/orchestrator/members/members.ts` — `inChannelConfigTurn`, `writeDmPolicy`, `revokeMember`; `src/orchestrator/channels/knocks.ts` — `restDoor`; `src/orchestrator/members/claim.ts` — `scrubApproval`
+
+### A runner added through an ssh config alias shows as not answering for half a minute while it is up
+- **Symptom:** now and then, on a busy machine, an ssh:// runner added through an alias in `~/.ssh/config` is said to be down for about 30 seconds, and its agents say "Its machine isn't answering — it may be asleep or offline", though `docker -H ssh://<alias> version` works. It comes back by itself at the next check.
+- **Check:** the alias's `ssh -G <alias>` names another hostname or port, or a proxyjump, and the machine was heavily loaded, or a `Match exec` in the ssh config failed, at that moment.
+- **Cause:** each reach check asks `ssh -G` where the alias goes. When that one ask failed (killed at its 5-second limit, or a failed `Match exec`), the check knocked on the alias's name as written, on port 22, which is not where the runner answers.
+- **Fix:** nothing to do: it recovers by itself. Before upgrading, registering the runner as `ssh://user@<real address>:<port>` avoids it. After upgrading, a failed ask knocks where ssh last said the alias goes.
+- **Fixed in:** `v2.193.0` (HB-1157).
+- **Code:** `src/providers/localDockerProvider.ts` — `sshReachProbe`, `sshRoute`
+
+### After a dropped link during an Inspect or a chat read on a runner, a move or rebuild says the volume is in use
+- **Symptom:** after the connection to a runner dropped while Hatchabot was reading a stopped agent's files there (Inspect, its chats in the web app, a restore's access check), a later move, rebuild or start of that agent waits, or says its volume is in use.
+- **Check:** on the runner, `docker ps --filter label=hatchabot.oneshot` shows a running container whose name has `-ro-` in it.
+- **Cause:** a read-only reader whose docker client was cut off (exit 255 on a dropped link) was not removed, as downloads' and exports' readers were before `v2.191.0`; it could run on there, holding the volume.
+- **Fix:** before upgrading, `docker rm -f <that name>` on the runner. After upgrading it is removed by itself when its client is cut off.
+- **Fixed in:** `v2.193.0` (HB-1399).
+- **Code:** `src/providers/localDockerProvider.ts` — `execShellOnVolume`, `#runOneShot`, `#reapOneShot`
+
+### Memory search says "Couldn't read the memory search engine's settings to start it"
+- **Symptom:** pressing Start under Settings → Hosts → Memory search service, the start at boot, or the health check's start of the service fails, and the owner's Start answers "Couldn't read the memory search engine's settings to start it. Try again in a moment." Memory search is then stopped until the next health check (within about 5 minutes) or a Start. A Restart never says it: it stops the engine first, so there is nothing to read. Before `v2.193.0` such a start said it was up, and an engine whose key or memory limit had changed kept its old ones.
+- **Check:** the service log has `embedder auto-start at boot failed` or `embedder health tick failed` with `embedder inspect failed: …` (often `context deadline exceeded`), and Settings → Hosts → Memory search service shows it stopped. `docker info` (on the runner, for a runner's) is slow or failing.
+- **Cause:** a start reads the running engine's key and memory limit to know whether to replace it. Docker failed that read three times, a second apart (or gave no answer in its time once: a hung daemon is not asked again), so the start stopped rather than keep an engine whose settings it could not read.
+- **Fix:** press Start again in a moment; if Docker keeps failing, restart Docker, then Start. If the engine still has an old memory limit, `docker rm -f` it and Start.
+- **Fixed in:** `v2.193.0` (HB-1402).
+- **Code:** `src/providers/localDockerProvider.ts` — `ensureEmbedder`; `src/providers/provider.ts` — `EmbedderUntouchedError`; `src/embedder/embedder.ts` — `bootStartEmbedder`
+
+### A derived image build that was stopped leaves a process of its build running
+- **Symptom:** after a derived image build was stopped (it reached its time limit, or Hatchabot stopped), a process from one of its build steps is still running and using the CPU or holding a file.
+- **Check:** `ps -eo pid,ppid,sid,args` shows the step's command with a session of its own (it, or a tool it ran, called `setsid`), and no `docker build` above it.
+- **Cause:** the stop killed the build's process group only; a step that starts a session of its own is in no group of the build's, and outlived it.
+- **Fix:** before upgrading, kill that process by its pid. After upgrading, a stop kills every process below the build first, then its group.
+- **Fixed in:** `v2.193.0` (HB-1506).
+- **Code:** `src/orchestrator/machines/derivedImage.ts` — `buildDerivedImage`, `descendants`
+
+### A default base image build keeps running on a Mac after Hatchabot crashed, and ends unseen
+- **Symptom:** on a machine where Hatchabot runs under launchd (macOS), the service died without its stop (a crash, a force quit, `kill -9`) during a default base image build (one started without "candidate"). At the next start the build is said to be cut off, but it went on in the background and wrote to its log and tag. From `v2.193.0` the Activity row and the Hatchabot agent say "The default base image build for OpenClaw <version> was cut off by a restart, so it was not made the fleet default. It was still running after the restart, and was stopped before its end: build it again." (under a `HATCHABOT_IMAGE` pin to another tag: "… so hatchabot-runtime:latest was not moved to it. …", the runtime repository's `:latest`, which such a build moves), and the service log has "base build left running by the process before stopped". A candidate build is not found this way.
+- **Check:** after the start, `ps -eo pid,pgid,args | grep build-runtime-image.sh` shows a build that began before the start.
+- **Cause:** under launchd the build's process group outlives the service when it dies without its stop (under systemd the service's cgroup ends it). The next start did not look for it.
+- **Fix:** before upgrading, kill that build's group (`kill -- -<pgid>`) and build again. After upgrading, the next start stops a default build left running and says so; build it again.
+- **Fixed in:** `v2.193.0` (HB-1507).
+- **Code:** `src/orchestrator/machines/runtimeImages.ts` — `createRuntimeImages`, `leftRunningBuild`, `startBaseBuild`, `stoppedWords`
+
+### An agent imported from an older file runs on this machine's derived image without the file's packages
+- **Symptom:** an agent imported from a file exported by an older Hatchabot (one whose image recipe names no build inputs) was pinned to this machine's derived image of the same name with no question, and a tool the file's image had (a package such as `curl`) is missing in it.
+- **Check:** the file's image recipe has the same lines and base name as this machine's derived image of that name (Settings → Advanced → Runtime images), but other packages.
+- **Cause:** for a file with no build inputs, the import compared only the derived image's base name and lines, not the packages under them.
+- **Fix:** before upgrading, change the agent's image, or rebuild this machine's derived image with the packages it needs. After upgrading, such a file is asked about ("a different image here already has the name <tag>"): choose the default image, or rename or delete the image here and import again, so the file's image is built.
+- **Fixed in:** `v2.193.0` (HB-1513).
+- **Code:** `src/orchestrator/machines/imageRecipe.ts` — `recordBuilds`, `sameImageHere`, `builtAsRecord`
+
+### An import or a move to another server says the image is one "which this machine does not have", though it is there
+- **Symptom:** importing an agent asks which image to use with "This agent is pinned to the image <tag>, which this machine does not have.", though `docker images` lists <tag> here, or with "It can't be built here (a different image here already has the name <tag>)" though no image of that name is listed. Or a move to another Hatchabot server fails with "<server> doesn't have the image <tag> and won't build it for this move", though that server has it. From `v2.193.0` the import says "which this machine has. It can't be pinned to it here (only this machine's owner can pin an agent to a particular image)", "and this machine already has an image of that name. It can't be built here (a different image here already has the name <tag>)", or "It can't be built here (the name <tag> is kept here for a different derived image, in Settings → Advanced → Runtime images)"; and the move says "<server> has the image <tag> but won't pin this agent to it for this move (only that server's owner can pin an agent to a particular image)" or "<server> has another image named <tag> and won't build this one over it for this move (…)" (a server on an older release still answers as before).
+- **Check:** `docker images` (on the server that imports) lists the tag, or Settings → Advanced → Runtime images there lists a derived image of that name; and the import was by someone who is not that machine's owner, or the image or record of that name was built from other lines or packages than the file's.
+- **Cause:** the question said the same words whether the image was missing or was there and could not be used.
+- **Fix:** nothing is wrong: choose the default image (CLI: `--drop-pin` for a move), or have that machine's owner import it, or rename or delete the image there and try again. The words are fixed in the upgrade.
+- **Fixed in:** `v2.193.0` (HB-1515).
+- **Code:** `src/orchestrator/transfer/transfer.ts` — `ImageDecisionNeeded`, `settleImage`; `src/api/data/transferRoutes.ts` — `registerTransferRoutes`; `src/orchestrator/transfer/migrate.ts` — `isDefiniteRefusal`
+
+### Moving an imported agent to a runner builds its derived image again, though the runner has a copy
+- **Symptom:** an agent imported here onto a derived image (the import built it on this machine's image, as a stand-in for the file's base) is moved to a runner that already has a copy of that image, and the move builds the image there again instead of using the copy.
+- **Check:** before the move, `docker image inspect --format '{{index .Config.Labels "org.hatchabot.recipe"}}' <tag>` on the runner gave the same stamp as here, and after it the tag there names a new image id.
+- **Cause:** the import stamped the image with the file's base, while the image's record here names the image it was built on; a move compares the copy's stamp with one made from the record, and they differed.
+- **Fix:** nothing is lost: the build makes the same image, it only takes longer. After upgrading, images an import builds are stamped as their record names them; one an earlier import built may still be built once at its next move.
+- **Fixed in:** `v2.193.0` (HB-1516).
+- **Code:** `src/orchestrator/machines/imageRecipe.ts` — `buildRecipeOn`, `ensureImageOn`; `src/orchestrator/transfer/transfer.ts` — `buildPinned`
+
+### An agent stopped by a runner's drain starts again by itself after Hatchabot restarts
+- **Symptom:** after Settings → Hosts → Drain stopped the agents on a runner, one of them started again by itself a little later, or at Hatchabot's next start. Its Activity shows an earlier workspace adopt, or a download, that a restart had cut off, ending "It was started again, as Start starts it.", or its timeline says "started again: a restart cut off its download".
+- **Check:** the agent's Activity has an operation from before the drain that a restart cut off (an adopt, a download), and no "Its machine has been drained since, so it stays stopped." on it.
+- **Cause:** a restart in the middle of an adopt or a download leaves the agent's start owed, to run at the next boot pass. An owner's Stop settles that owed start; the drain's stop did not, so the pass started what the drain had stopped.
+- **Fix:** before upgrading, stop the agent again (its own Stop settles it). After upgrading, the drain settles it, and the operation says "Its machine has been drained since, so it stays stopped."
+- **Fixed in:** `v2.193.0` (HB-1517).
+- **Code:** `src/orchestrator/machines/hosts.ts` — `createHosts`, `drain`; `src/orchestrator/lifecycle/operations.ts` — `settleStartsOwedOn`
+
+### The access overview says "1 other person" for a chat door open to everybody
+- **Symptom:** an agent's access overview lists "1 other person on Telegram" (or Slack, Discord), with no member named, and the browser's "who can steer it" list says "1 other person on Telegram, let in inside OpenClaw itself", although its door lets in anyone.
+- **Check:** the agent's OpenClaw config has an `allowFrom` of `"*"` for that app, or an open DM policy.
+- **Cause:** the people check counted the ids OpenClaw admits that no member has, and a door open to everybody is recorded as the single id `*`, which was counted as one person.
+- **Fix:** upgrade: the row then says "Anyone on Telegram", with a note that its door is open to everybody inside OpenClaw. Before that, read "1 other person" with an open door as "anyone". To close the door, set the app's `allowFrom` to the ids you mean in OpenClaw.
+- **Fixed in:** `v2.193.0` (HB-1201).
+- **Code:** `src/orchestrator/google/accessOverview.ts` — `ANYONE`, `verifyAgentAccess`; `src/orchestrator/console/browserLogins.ts` — `browserSteerers`
+
+### A deleted Google connection's access stays, behind a proxy that inspects HTTPS
+- **Symptom:** a Google connection deleted under ⚙ Settings → Connections was said "removed and revoked", yet Hatchabot's app is still listed in that Google Account under Security → "Your connections to third-party apps & services". After upgrading, the connection's ending says "an answer that was not Google's (200, text/html): a captive portal or a proxy in the way?", or "the answer was cut off".
+- **Check:** the machine reaches the web through a proxy that inspects HTTPS with a certificate the machine trusts (a company or school network, a security product). On the machine, `curl -s -o /dev/null -w '%{http_code} %{content_type}\n' -X POST -d token=x https://oauth2.googleapis.com/revoke` prints a line starting `400 application/json` when Google answers (`400 application/json; charset=utf-8`); anything else means something is in the way. (A captive portal without a trusted certificate fails the certificate check, which was always "no answer" and asked again.)
+- **Cause:** any 2xx answer, after following redirects, was taken as Google's revoke, and so was a 200 whose body was cut off part way; a proxy's page ended the cleanup with the token still live at Google, and nothing asked again.
+- **Fix:** before upgrading, remove the access by hand in the Google Account. After upgrading, only Google's own answer counts: Hatchabot keeps asking every ten minutes while the proxy is in the way, and the Connections page lists it under "Access still being ended". Letting `oauth2.googleapis.com` through the proxy uninspected lets the revoke reach Google.
+- **Fixed in:** `v2.193.0` (HB-1345).
+- **Code:** `src/orchestrator/google/googleConnections.ts` — `revokeGoogleToken`, `revokeAnsweredByGoogle`
+
+### Removing a Google account says "removed and revoked", but it is still listed
+- **Symptom:** pressing Remove on a Google account under ⚙ Settings → Connections says "<address> removed and revoked.", and the account is still in the list after the page reloads.
+- **Check:** the account was connected again (in another tab, or by another person of the same login) while its removal was taking it off its agents; the log line `connection.unlinked` shows `connectedAgain: true`.
+- **Cause:** the server kept the newer consent and said so (`connectedAgain`), but the page ignored the answer.
+- **Fix:** nothing is wrong: the account stays connected with its newer consent, and it is off the agents it was attached to; attach it again where it is wanted. From this release the page says so. To remove it, press Remove again.
+- **Fixed in:** `v2.193.0` (HB-1202).
+- **Code:** `web/app/connections.js` — `removeConnection`; `src/orchestrator/google/connectionVault.ts` — `remove`
+
+### Where to see a removed Google account whose access is still being ended
+- **Symptom:** a Google account was removed under ⚙ Settings → Connections, and Google did not confirm ending its access (no answer, or an error). Before this release nothing in the app showed it; the only notices were the log lines `connection.token_ended` and `connection.revoke_given_up`, and a chat message to the owner when Hatchabot stopped asking.
+- **Check:** after upgrading, ⚙ Settings → Connections lists it under "Access still being ended": still being asked ("ending its access at Google is not confirmed yet", with Google's last answer), given up ("Hatchabot asked Google N times … and Google never confirmed it"), or, when Google ended it but Hatchabot's copy of the token could not be deleted, "Google's part is done, but Hatchabot's copy of its token could not be deleted yet".
+- **Cause:** a revoke still being retried, or one given up, was kept only for the pass, which the page did not read.
+- **Fix:** one still being asked needs nothing: Hatchabot tries again every ten minutes for at least seven days; one whose copy alone is left needs nothing either, as the next pass deletes it. For one given up, remove the access by hand in that Google Account (Security → "Your connections to third-party apps & services"), then press "Done — I removed it". Before upgrading, look for `connection.revoke_given_up` in the log.
+- **Fixed in:** `v2.193.0` (HB-1336).
+- **Code:** `src/orchestrator/google/connectionVault.ts` — `list`, `dismissEnding`, `dropToken`; `src/store/store.ts` — `connectionCleanupsOf`, `giveUpConnectionCleanup`, `dismissGivenUpCleanup`; `src/api/data/googleRoutes.ts` — `'/v1/connections/ending/:id'`; `web/app/connections.js` — `renderConnEnding`, `dismissConnEnding`
+
+### A Google account connected again with another OAuth client keeps its earlier access
+- **Symptom:** after a new OAuth client (of another Google Cloud project) was saved and an account connected again, the account still lists the earlier client's app in its Google Account under Security → "Your connections to third-party apps & services", and agents that had imported its earlier token can still use it.
+- **Check:** the log line `connection.linked` for the reconnect shows `oldTokenNotRevoked` with Google's answer (a 503, no answer). From this release it also shows `triedAgainLater: true`, and the Connections page lists the account as "connected again with another OAuth client" under "Access still being ended".
+- **Cause:** the revoke of the replaced token was tried once, at the reconnect; a failure was logged and never tried again, as nothing kept the old token or a record of it.
+- **Fix:** before upgrading, remove the earlier client's app by hand in the Google Account (not the one connected now). After upgrading, Hatchabot keeps the old token on record and asks Google again every ten minutes for at least seven days, then messages you which access to remove by hand, and lists it until you press "Done — I removed it".
+- **Fixed in:** `v2.193.0` (HB-1396).
+- **Code:** `src/orchestrator/google/googleClient.ts` — `link`; `src/store/store.ts` — `recordConnectionCleanup`; `src/orchestrator/google/connectionVault.ts` — `retryCleanups`, `endToken`
+
+### An App's install or Update error quotes its config file
+- **Symptom:** installing or updating an App fails with "Could not read <config file> in the agent (…), so its settings were left as they are." and the text in the brackets is part of the config file itself, values such as passwords or keys included.
+- **Check:** the read of the config was cut off part way (a timeout, the agent stopping) or printed nothing on stderr; the error's brackets hold the file's lines, not an error message.
+- **Cause:** the error quoted what the read printed on its output when it said nothing on stderr, and the install's masking of secret values was only worked out after the read.
+- **Fix:** upgrade: the error then quotes only what the read said on stderr, or "it ended with code N, saying nothing", with the values masked. Before that, treat any secret the error showed as seen: change it, and save the App's settings again.
+- **Fixed in:** `v2.193.0` (HB-1196).
+- **Code:** `src/orchestrator/apps/apps.ts` — `installRelease`, `readFailure`, `maskedValues`
+
+### An App Update's test output hides harmless values as "••••••"
+- **Symptom:** after an Update that drops a field from the App's settings, its tests' output and its error show "••••••" in place of plain values such as a timezone, a region or a number.
+- **Check:** the value is in the App's settings under a key the new release no longer declares, and no release of it marked that field secret.
+- **Cause:** every value of four characters or more under a key the new release does not declare was masked.
+- **Fix:** upgrade: a key a known release declared is masked only when one of them had it secret. Before that, read the value from the App's settings page.
+- **Fixed in:** `v2.193.0` (HB-1198).
+- **Code:** `src/orchestrator/apps/apps.ts` — `maskedValues`, `installRelease`
+
+### A refused App Update leaves its new release's code in the agent
+- **Symptom:** an Update refused for its settings (a value missing, a mailbox another agent runs the App on) leaves a new folder under the App's `releases/` in the agent, up to 100 MB, until a later prune.
+- **Check:** the App's `releases/` folder in the agent has a folder named for the refused release's commit, while the App still runs the one it had.
+- **Cause:** the new code was unpacked before its settings were judged.
+- **Fix:** upgrade: the settings are judged first, and a refused Update unpacks nothing. A folder already left stays until a later Update prunes it, once three newer releases are in (the App keeps its three newest release folders), or remove it by hand in the agent.
+- **Fixed in:** `v2.193.0` (HB-1312).
+- **Code:** `src/orchestrator/apps/apps.ts` — `installRelease`
+
+### An App's roll back says "Still on" its release, but the tasks of the one it went back to are on
+- **Symptom:** rolling an App back fails with an error ending "Still on <commit>.", the App's page says nothing changed, and yet the scheduled tasks of the release it went back to are on.
+- **Check:** the error names a failure to write Hatchabot's own record (its database) just after the tasks were put on.
+- **Cause:** a failure after the tasks were switched pointed the App back at the release it was leaving, with the other release's tasks left on, and said it was unchanged.
+- **Fix:** upgrade: such a roll back then waits on the App's page with two choices, use the release it went back to, or stay on the one it had; either settles the tasks. Before that, install the App again on the release you want.
+- **Fixed in:** `v2.193.0` (HB-1311).
+- **Code:** `src/orchestrator/apps/apps.ts` — `switchTo`
+
+### "Put its scheduled tasks back" stays held after the new App release's folder is gone
+- **Symptom:** after an App's replacement whose old tasks would not go back on, "Put its scheduled tasks back" keeps holding with "The hatchabot.json of <app> <commit> cannot be read, so whether its scheduled tasks are off cannot be told, so it is not as it was before: use the new release, or go back to the previous one …", even though the new release's folder was removed from the agent.
+- **Check:** the new release's folder under the App's `releases/` in the agent is gone, and none of its tasks are on.
+- **Cause:** a release folder that is gone and a manifest that could not be read were taken as the same, so either held.
+- **Fix:** choose "Go back" on the App's page: it takes the new release's tasks off and puts the old App's back. Upgrading does not settle an operation already held this way with "Use the new release" and "Go back"; "Go back" is its way out after upgrading too. From this release, a folder gone for good is told apart, and with none of the new release's tasks on, the old ones are put back and it settles by itself.
+- **Fixed in:** `v2.193.0` (HB-1199).
+- **Code:** `src/orchestrator/apps/appOperations.ts` — `tasksBackAgain`; `src/orchestrator/apps/apps.ts` — `releaseManifestState`, `settledAppJobs`
+
+### After a restore, a Google account deleted since can be used for a moment as the agent starts
+- **Symptom:** after restoring an agent from a backup made before one of its Google accounts was deleted or detached, the agent could use that account for the first seconds after it started again, until it was taken off.
+- **Check:** the log has `connection.removed_from_agent` for the account only after the restore's start. From this release it also comes before the start, with `beforeStart: true` ("taken out of it before it started"), and again from the start's sync, which confirms it. `connection.remove_failed` with `beforeStart: true` means the early try did not take it off; the start's sync still does.
+- **Cause:** a restore queued the account to come off again, but the removal ran only at the start's sync, once the agent was up.
+- **Fix:** upgrade: the restore also takes such an account off the agent's volume while it is stopped, before it starts. The removal stays queued, and the start's sync still takes it off and confirms it, as before. Before upgrading, the account still comes off within seconds of the start; to be sure, check the agent's Connections once it is up.
+- **Fixed in:** `v2.193.0` (HB-1207).
+- **Code:** `src/orchestrator/backups/backupFiles.ts` — `applyCurrentSettingsOver`; `src/orchestrator/google/googleConnections.ts` — `removeQueuedOnVolume`, `queueRemovalsSince`, `GOG_HOME`
+
+### An App's Update or roll back fails with "The install did not finish"
+- **Symptom:** pressing Update, Roll back or Stop app on an App fails with "The install did not finish: …", although nothing was being installed.
+- **Check:** the rest of the message names a failure outside the App's own rules: a database write, a machine that stopped answering.
+- **Cause:** every App route worded such a failure as an install's.
+- **Fix:** nothing more than the message says: read what follows "did not finish:" for what failed and where the App is now. From this release it starts "The update did not finish:", "The roll back did not finish:", "Stopping the app did not finish:", "Reading the app did not finish:" or "Saving it to install later did not finish:".
+- **Fixed in:** `v2.193.0` (HB-1573).
+- **Code:** `src/api/data/appRoutes.ts` — `appFail`
+
+### A model added to a source's list is gone again after a new default was applied
+- **Symptom:** in Settings → AI, a model added to a source's "Also switchable" list (or its list edited another way) while that source's new default was being applied to its agents is missing once the apply ends; the apply's list is the one from before the edit.
+- **Check:** the edit and the apply overlapped: the apply was still checking its agents' runtimes (a few seconds per agent on a runner) when the edit was saved.
+- **Cause:** the apply wrote the list the app sent when Save was pressed, read before its runtime checks waited, over whatever was saved in the meantime.
+- **Fix:** add the model again (or take it off again). From v2.193.0 a model added to the source's list, or taken off it, while the apply checked stays added or taken off (one taken off stays on the list while an agent is kept on it); the rest of the list is the one the apply was saved with.
+- **Fixed in:** `v2.193.0` (HB-1340).
+- **Code:** `src/orchestrator/sources/aiSources.ts` — `applyDefaultModel`
+
+### Applying a source's new default ends in an error when the source was deleted meanwhile
+- **Symptom:** in Settings → AI, saving a source's new default for its agents ends in a server error (500), and the source is gone from the list.
+- **Check:** the source was deleted, after its agents were moved to another, while the apply was still checking their runtimes.
+- **Cause:** the apply wrote the new default and then read the source back to answer, and it was no longer there.
+- **Fix:** nothing to do: the source is deleted, and its agents are on the source they were moved to. From v2.193.0 the apply says the source was deleted while it applied and changes nothing.
+- **Fixed in:** `v2.193.0` (HB-1340).
+- **Code:** `src/orchestrator/sources/aiSources.ts` — `applyDefaultModel`; `src/api/usage/aiSourceRoutes.ts` — `/v1/ai-profiles/:id/apply-default-model`
+
+### An agent moved onto a source while its new default was applied follows it unchecked, or another account's is pinned
+- **Symptom:** after a source's new default was applied to its agents, an agent moved onto that source while the apply ran is on the new default though its runtime is too old for it, so its messages fail; or another account's agent that moved onto it then stays pinned to the old default without a check; or the apply's message says an agent "is too old" though its model was changed while it applied.
+- **Check:** the agent was moved onto the source (its AI source changed), or its model was changed, while the apply was still checking runtimes.
+- **Cause:** the apply listed the agents on the source before its runtime checks waited. One of yours that joined meanwhile was neither checked nor held; another account's was held without a check. The app gave every agent it did not switch the same reason, a runtime too old.
+- **Fix:** set its model by hand to one its runtime can use, or rebuild it onto a newer image. From v2.193.0 an agent that joins while the checks run is checked before it follows, unless it joined during the last round of checks; then it is kept on its model, named in the result if it is yours and counted if it is another account's. The message gives each agent's own reason: a runtime too old, its model changed meanwhile, or moved on too late to be checked.
+- **Fixed in:** `v2.193.0` (HB-1342).
+- **Code:** `src/orchestrator/sources/aiSources.ts` — `applyDefaultModel`, `JOIN_ROUNDS`
+
+### A model set by hand early in the month is switched to a cheaper one by its budget
+- **Symptom:** in the first days of a month, a model you chose by hand for an agent whose cheaper-model budget is already reached is moved to the cheapest model by the next budget check, though a choice made by hand is meant to stand until the 1st.
+- **Check:** last month the budget had moved it to a cheaper model, and its class then moved it to another AI source, which ended that switch this month; you chose its model after that.
+- **Cause:** the retag that marks such a switch as overruled by its owner read only this month's record, and the switch it should have marked was last month's.
+- **Fix:** choose its model again after upgrading. From v2.193.0 a model chosen by hand then stands for the rest of the month.
+- **Fixed in:** `v2.193.0` (HB-1552).
+- **Code:** `src/orchestrator/usage/budgets.ts` — `ownModelOverClass`, `runBudgets`
+
+### After the 1st, an agent still runs on its budget's cheaper model and nothing says why
+- **Symptom:** a new month has begun, the agent still runs on the cheaper model its monthly budget moved it to, and neither its tile, Alerts nor Usage → Budgets says so (before v2.193.0).
+- **Check:** in its Setup log or timeline, Hatchabot tried to put its own model back on the 1st and its runtime refused (the agent was asleep, its machine was off, or its gateway was restarting).
+- **Cause:** each pass tries again, but every view read only this month's switch, and the switch was last month's.
+- **Fix:** choose its model now, or wait for a pass to put it back. From v2.193.0 its tile and Alerts say "Its budget's cheaper model ended on <Month> 1, but its own model could not be put back yet: Hatchabot tries again each pass, or choose its model now" (for this Hatchabot's budget: "This Hatchabot's budget's cheaper model ended…"), and its budget's row no longer says "until" the next 1st.
+- **Fixed in:** `v2.193.0` (HB-1496).
+- **Code:** `src/orchestrator/usage/budgets.ts` — `endedSwitchOwed`, `endedSwitchLine`, `cheaperDue`, `budgetView`, `budgetLine`; `src/orchestrator/lifecycle/agentList.ts`; `web/app/spend.js` — `bgState`; `web/app/operations.js`
+
+### "Paused — its monthly budget is used up" after the budget was raised
+- **Symptom:** you raised an agent's budget past what it spent this month (or set it to warn or to a cheaper model) and it stays stopped, its tile still reading "Paused — its monthly budget is used up" (or "Paused — this Hatchabot's monthly budget is used up").
+- **Check:** the start the budget change owed it failed (its machine did not answer, or it was busy); Usage → Budgets shows its spend under the new amount.
+- **Cause:** only a removed budget was taken as ending this month's pause; a raised or changed one was still shown as pausing it, though each pass tries to start it.
+- **Fix:** start it by hand, or wait for the next pass. From v2.193.0 its tile says "Paused — its budget's pause has ended, but it could not be started yet", and Alerts "Its budget was raised, which ended its pause, but it could not be started yet: Hatchabot tries again each pass, or start it now" ("…no longer pauses it…" when it was set to warn or a cheaper model); Recommended no longer offers a raise that it says starts it.
+- **Fixed in:** `v2.193.0` (HB-1496).
+- **Code:** `src/orchestrator/usage/budgets.ts` — `endedPauseOwed`, `pauseEndedNow`, `endedPauseLine`, `budgetView`; `src/orchestrator/lifecycle/agentList.ts`; `src/orchestrator/usage/recommendations.ts`
+
+### A model suggestion's evidence, or a cost badge, names the new source while the agent still runs on the old one
+- **Symptom:** an agent saved onto another AI source but not rebuilt yet: a set_model card's evidence says "now <the new source's default>" with few or no turns, or "(a Claude plan: room in the plan, not money)" for spend on an API key; its cost badge's tooltip says "Counts against your Claude plan", or "Runs on a local model: no API cost", while it is still billed; Usage's chart leaves its refused calls out.
+- **Check:** its tile says a rebuild is needed for the change of source; the figures match the source it was built with.
+- **Cause:** those figures went by the source chosen; the model scorecard already went by the one its container runs (HB-1343).
+- **Fix:** rebuild it to finish the switch, after which both agree. From v2.193.0 they go by the source its container runs until then.
+- **Fixed in:** `v2.193.0` (HB-1498).
+- **Code:** `src/orchestrator/usage/modelLedger.ts` — `assessModelChange`; `src/orchestrator/usage/agentCosts.ts` — `costsFor`, `spendSeries`
+
+### A moved or restored agent's lifetime total has no `*` though it ran on another source
+- **Symptom:** an agent moved here from another Hatchabot, or restored from a download, has lifetime totals (`hatchabot usage`, the "in all" of its Usage page) billed by the source it runs here, with no `*` or "includes time on an earlier AI source", though its history was on the other machine's source.
+- **Check:** the agent came by Move to another Hatchabot, or Download copy and import.
+- **Cause:** the mark is kept in the agent's record here, and an import started a new record with none.
+- **Fix:** nothing to do: the totals were always counted; only the mark was missing. From v2.193.0 a download names the source it ran on (and an earlier one), and the import marks the totals when it lands on another source. A download made before v2.193.0 carries no such mark.
+- **Fixed in:** `v2.193.0` (HB-1551).
+- **Code:** `src/orchestrator/transfer/transfer.ts` — `exportAgent`, `importAgent`; `src/store/store.ts` — `markRanOnAnotherSource`; `src/orchestrator/usage/usageReadings.ts` — `ranOnAnEarlierSource`
+
+### Calls refused during skill Practice are in no count
+- **Symptom:** an agent's source refused calls (rate limits) while it ran skill Practice, and Settings → AI's request and refused counts, Usage's periods and the model scorecard show none of them.
+- **Check:** the agent's Usage page says "N practice runs" in that window, and a practice run there ended with a rate limit.
+- **Cause:** a practice run's record counted only calls that spent tokens, and a refused call spends none.
+- **Fix:** nothing to do. From v2.193.0 a practice run keeps the calls its source refused, and they are counted as refused requests; a run whose every call was refused is counted as a practice run. They are not taken as the source being rate-limited, which its own refusals still tell, and the scorecard keeps them apart from the agent's own turns.
+- **Fixed in:** `v2.193.0` (HB-1497).
+- **Code:** `src/orchestrator/skills/skillTrials.ts` — `skillTrialScript` (`tally`), `runSkillTrial`; `src/orchestrator/usage/practiceUsage.ts` — `recordPracticeUsage`; `src/orchestrator/usage/sourceUsage.ts` — `summarizeSourceUsage`; `src/orchestrator/usage/fleetUsage.ts` — `computeUsagePeriod`; `src/orchestrator/usage/modelScorecard.ts` — `scoreAgent`, `buildScorecard`

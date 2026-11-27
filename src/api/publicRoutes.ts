@@ -189,6 +189,7 @@ export const PUBLIC_RULES: readonly PublicRule[] = [
   r(READ, /^\/v1\/(hosts|images|images\/:name\/log|runtime|runtime\/build|runtime\/build\/check|runtime\/capabilities|runtime\/images|runtime\/images\/:tag\/history|backups|backups\/readiness|bots|bot-inventory|pool|discord-bots|slack-apps|connections|channels\/connectors|channels\/slack\/manifest|machine-defaults|rebuild-policy|rebuild-concurrency|embed-default|embedder|embedder\/guests|media-key|search-key|google-oauth\/client|ops-agent|access)$/, 'signed-in', 'Reading lists and settings (no credential is shown)'),
   r(['POST'], /^\/v1\/ops-agent\/suggest$/, 'signed-in', 'Reading lists and settings (no credential is shown)'),
   r(['DELETE'], /^\/v1\/connections\/:id$/, 'signed-in', 'Removing a Google connection'),
+  r(['DELETE'], /^\/v1\/connections\/ending\/:id$/, 'signed-in', 'Removing a Google connection'),
 ];
 
 /** The rule that names this route, if any. `pattern` is the route's registered URL. */

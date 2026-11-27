@@ -399,11 +399,11 @@ describe('knocks', () => {
     w.channel('a1', 'telegram', 'HomeBot');
     w.channel('a1', 'discord', '200000000000000001');
     w.member('a1', OWNER, { role: 'owner', telegram: '9001', discord: '100000000000000001' });
-    w.requests.set('rt-a1', [{ id: '9099', code: 'STRANGER1' }, { id: '100000000000000001', code: 'OWNERCODE' }]);
+    w.requests.set('rt-a1', [{ id: '9099', code: 'STRANGER1' }, { id: '100000000000000001', code: 'OWNERCODE', kind: 'discord' }]);
     const { pairingRequestsFor, kindForCode } = w.channels.knocks;
-    // The fake container answers the same file for both channels; each answer is marked with the channel asked.
+    // The fake container answers STRANGER1 for both channels; each answer is marked with the channel asked.
     expect((await pairingRequestsFor(a)).map((r) => `${r.kind} ${r.code}`)).toEqual(['discord OWNERCODE']);
-    expect((await pairingRequestsFor(a, true)).map((r) => `${r.kind} ${r.code}`)).toEqual(['telegram STRANGER1', 'telegram OWNERCODE', 'discord STRANGER1', 'discord OWNERCODE']);
+    expect((await pairingRequestsFor(a, true)).map((r) => `${r.kind} ${r.code}`)).toEqual(['telegram STRANGER1', 'discord STRANGER1', 'discord OWNERCODE']);
     expect(await kindForCode(a, 'slack', 'OWNERCODE')).toBe('slack'); // the caller said
     expect(await kindForCode(a, 'irc', 'OWNERCODE')).toBeUndefined();
     expect(await kindForCode(a, undefined, 'OWNERCODE')).toBe('discord'); // two apps: found by its code
@@ -428,6 +428,23 @@ describe('knocks', () => {
     }
     w.pairingBrokenOn = undefined;
     expect(await kindForCode(a, undefined, 'DSC1')).toBe('telegram'); // read, and nowhere: as before
+  });
+
+  it("a code nobody expects is found on its own app too: the approve or the deny of it is the owner's (HB-1371)", async () => {
+    const w = world();
+    const a = w.agent('a1');
+    w.channel('a1', 'telegram', 'HomeBot');
+    w.channel('a1', 'discord', '200000000000000001');
+    w.member('a1', OWNER, { role: 'owner', telegram: '9001', discord: '100000000000000001' });
+    // Someone the agent does not expect knocks on Discord, and tells the owner their code.
+    w.requests.set('rt-a1', [{ id: '100000000000000077', code: 'DSCSTRANGER', kind: 'discord' }]);
+    const { kindForCode, pairingRequestsFor } = w.channels.knocks;
+    expect(await pairingRequestsFor(a)).toEqual([]); // not shown, as before
+    // Was: 'telegram', where it was no longer pending.
+    expect(await kindForCode(a, undefined, 'DSCSTRANGER')).toBe('discord');
+    // Was: 502, as on an app that could not be read, though it was found on the one that could.
+    w.pairingBrokenOn = { kind: 'telegram', code: 1, stdout: '' };
+    expect(await kindForCode(a, undefined, 'DSCSTRANGER')).toBe('discord');
   });
 
   it('reuses one read of an agent\'s knocks for knockCacheMs, and reads again once forgotten', async () => {
@@ -508,6 +525,34 @@ describe('knocks', () => {
     letGo();
     expect((await deny).json()).toEqual({ denied: true });
     expect(await cachedKnocks(a)).toEqual([]); // read again, not the half-minute answer from during the turn-away
+    await app.close();
+  });
+
+  it('an approve refused after the request left the store does not leave the knocks read before it as the answer (HB-1309)', async () => {
+    const w = world({ knockCacheMs: 60_000 });
+    const a = w.agent('a1', { allowKnocks: true });
+    w.channel('a1', 'telegram', 'HomeBot');
+    w.member('a1', OWNER, { role: 'owner', telegram: '9001' });
+    w.requests.set('rt-a1', [{ id: '9099', code: 'LETIN1' }]);
+    const app = Fastify();
+    registerChannelRoutes(app, {
+      store: w.store, secrets: w.secrets, deps: {}, trace: () => () => {},
+      providerFor: w.providerFor, busyNow: () => false,
+      ownedAgent: (_req: unknown, id: string) => w.store.getAgent(id), ownsLocalHost: () => true, channels: w.channels,
+    } as never);
+    const { cachedKnocks } = w.channels.knocks;
+    expect((await cachedKnocks(a)).map((k) => k.code)).toEqual(['LETIN1']);
+    // The runtime approves (the request leaves its store), and the agent is stopped meanwhile.
+    const provider = w.providerFor('h1') as unknown as { exec: (ref: string, argv: string[]) => Promise<unknown> };
+    provider.exec = async (ref, argv) => {
+      if (argv[0] === 'pairing' && argv[1] === 'approve') { w.requests.set(ref, []); w.store.setAgentState('a1', 'STOPPED'); }
+      return { code: 0, stdout: '', stderr: '' };
+    };
+    const r = await app.inject({ method: 'POST', url: '/v1/agents/a1/pairing/approve', payload: { code: 'LETIN1', kind: 'telegram' } });
+    expect(r.statusCode).toBe(400);
+    expect(r.json()).toEqual({ error: 'The agent changed while approving. Refresh and try again.' });
+    // Was: the half-minute answer from before, the request still shown as waiting.
+    expect(await cachedKnocks(a)).toEqual([]);
     await app.close();
   });
 
@@ -699,6 +744,86 @@ describe('knocks', () => {
     // The app's own reads still answer none for a read that failed, as before.
     w.pairingBroken = { code: 1, stdout: '' };
     expect(await cachedKnocks(w.store.getAgent('a1')!)).toEqual([]);
+  });
+
+  it('a read that finds no store at all (a migration between its steps) keeps what the owner was told: the knock is not pushed again (HB-1369)', async () => {
+    const w = world();
+    w.agent('ops1', { ops: true });
+    w.channel('ops1', 'telegram', 'OpsBot');
+    w.agent('a1');
+    w.channel('a1', 'telegram', 'HomeBot');
+    w.member('a1', OWNER, { role: 'owner', telegram: '9001' });
+    w.member('a1', 'user-guest', { telegram: '9042' });
+    w.requests.set('rt-a1', [{ id: '9042', code: 'GUEST1' }]);
+    const { sweepPendingPairings, cachedKnocks } = w.channels.knocks;
+    await sweepPendingPairings();
+    expect(w.pushes).toHaveLength(1);
+    // The gateway's start: its migration has dropped the table and not yet made it again, and there is no file.
+    w.pairingBroken = { code: 0, stdout: JSON.stringify({ version: 1, requests: [], none: true }) };
+    await sweepPendingPairings();
+    w.pairingBroken = undefined;
+    await sweepPendingPairings();
+    // Was: read as nobody knocking, the knock forgotten, and pushed again once the table was back.
+    expect(w.pushes).toHaveLength(1);
+    // The app's own reads take it as nobody knocking, as before.
+    w.pairingBroken = { code: 0, stdout: JSON.stringify({ version: 1, requests: [], none: true }) };
+    expect(await cachedKnocks(w.store.getAgent('a1')!)).toEqual([]);
+  });
+
+  it('an agent the sweep did not read (stopped or rebuilding for a sweep) keeps the knocks it told: back, the same knock is not pushed again (HB-1370)', async () => {
+    const w = world();
+    w.agent('ops1', { ops: true });
+    w.channel('ops1', 'telegram', 'OpsBot');
+    w.agent('a1');
+    w.channel('a1', 'telegram', 'HomeBot');
+    w.member('a1', OWNER, { role: 'owner', telegram: '9001' });
+    w.member('a1', 'user-guest', { telegram: '9042' });
+    w.requests.set('rt-a1', [{ id: '9042', code: 'GUEST1' }]);
+    const { sweepPendingPairings } = w.channels.knocks;
+    await sweepPendingPairings();
+    expect(w.pushes).toHaveLength(1);
+    for (const state of ['STOPPED', 'REBUILDING'] as const) {
+      w.store.setAgentState('a1', state);
+      await sweepPendingPairings();
+      w.store.setAgentState('a1', 'RUNNING');
+      await sweepPendingPairings();
+    }
+    // Was: pushed again each time it was back.
+    expect(w.pushes).toHaveLength(1);
+    // Its knock gone while it is read, it is forgotten, and told again if it comes back, as before.
+    w.requests.set('rt-a1', []);
+    await sweepPendingPairings();
+    w.requests.set('rt-a1', [{ id: '9042', code: 'GUEST1' }]);
+    await sweepPendingPairings();
+    expect(w.pushes).toHaveLength(2);
+  });
+
+  it('a knock told while the owner\'s manager was down for a sweep is not pushed again once it is back (HB-1370 review)', async () => {
+    const w = world();
+    w.agent('ops1', { ops: true });
+    w.channel('ops1', 'telegram', 'OpsBot');
+    w.agent('a1');
+    w.channel('a1', 'telegram', 'HomeBot');
+    w.member('a1', OWNER, { role: 'owner', telegram: '9001' });
+    w.member('a1', 'user-guest', { telegram: '9042' });
+    w.requests.set('rt-a1', [{ id: '9042', code: 'GUEST1' }]);
+    const { sweepPendingPairings } = w.channels.knocks;
+    await sweepPendingPairings();
+    expect(w.pushes).toHaveLength(1);
+    w.store.setAgentState('ops1', 'STOPPED');
+    await sweepPendingPairings();
+    w.store.setAgentState('ops1', 'RUNNING');
+    await sweepPendingPairings();
+    // Was: pushed again once the manager was back.
+    expect(w.pushes).toHaveLength(1);
+    // A knock that came while it was down is told once it is back.
+    w.store.setAgentState('ops1', 'STOPPED');
+    w.requests.set('rt-a1', [{ id: '9042', code: 'GUEST1' }, { id: '9043', code: 'GUEST2' }]);
+    w.member('a1', 'user-guest2', { telegram: '9043' });
+    await sweepPendingPairings();
+    w.store.setAgentState('ops1', 'RUNNING');
+    await sweepPendingPairings();
+    expect(w.pushes).toHaveLength(2);
   });
 
   it("one app's read that fails is that app's alone: the other app's knocks are told, and only its own are kept as told (HB-1050)", async () => {

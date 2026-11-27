@@ -234,7 +234,7 @@ its place in `recovering`, the memory service's (below), through
 | `channelRechecks` | `chatBots.ts` | lock | Nothing: the re-check it held ends with the process. |
 | `knockCache` | `knocks.ts` | cache | Nothing: the knocks are read from the container again. |
 | `knockReads` | `knocks.ts` | lock | Nothing: the read of an agent's knocks under way, shared by the callers that miss `knockCache` meanwhile; it ends with the process. |
-| `announcedPairings` | `knocks.ts` | cache | A knock still waiting is pushed to the owner's phone once more by the next sweep. |
+| `announcedPairings` | `knocks.ts` | cache | A knock still waiting is pushed to the owner's phone once more by the next sweep. Kept for an agent the sweep did not read (down, or its app unread), or whose owner's manager could not be pushed to, until it is deleted, so only a restart tells a knock twice. |
 | `pairingSweeping` | `knocks.ts` | lock | Nothing: one sweep at a time; the next starts a minute after the start. |
 
 A Slack or Discord bot name still owed is kept in its channel's settings
@@ -253,11 +253,13 @@ watches each one again for that time (`resumeFirstContacts`, and
 join kept by an older release, before it kept its time, has its whole
 half hour again. One whose time ran out meanwhile has its window closed and
 is not opened again, so someone who wrote then is not let in; a join's
-owner is told so, once: that its time ran out while Hatchabot was
-restarting, and how to let them in (under Alerts, where their message
-waits only if the agent shows it there, or with Let them in again), or,
-when its window had ended while Hatchabot ran and the restart cut off the
-watch's own word, that it was never messaged. The next sweep puts the door
+owner is told so, once: that its time ran out while Hatchabot was not
+watching for their message, and how to let them in (under Alerts, where
+their message waits only if the agent shows it there, or with Let them in
+again), or, when its window had ended while Hatchabot ran (its time up,
+or given up as the agent moved or failed) and the restart cut off the
+watch's own word, that it was never messaged, or, when its window had
+passed someone over, that no message from them was let in. The next sweep puts the door
 back to rest (`restDoor`).
 
 **The backups service** (`src/orchestrator/backups/`, HB-0808) has no Map
@@ -313,17 +315,22 @@ sweep of guests' consoles ends by itself once none is open.
 
 | State | Where | Kind | What a restart loses |
 | --- | --- | --- | --- |
-| `imageCopies` | `imageInstalls.ts` | cache | The bytes copied so far. The copy is an operation on disk: "interrupted: Install again". |
+| `imageCopies` | `imageInstalls.ts` | cache | The bytes copied so far, and the stop of the copy under way (its `AbortController`, which Remove anyway aborts: `stop`, HB-1254). The copy is an operation on disk: "interrupted: Install again"; a restart ends its docker with it. |
 | `statsCache` | `resources.ts` | cache | Nothing: read again. |
 | `buildingImages` | `runtimeImages.ts` | lock | Nothing: one build of a derived image at a time. A build cut off is marked failed as the service is built (`failInterruptedImageBuilds`, the same boot step as before, now in `createRuntimeImages`). |
-| `derivedHalts` | `runtimeImages.ts` | lock | Nothing: each derived build under way, for `stop()` to end with its process group; a restart has none running, and marks one cut off failed (`failInterruptedImageBuilds`). |
+| `recipeBuilds` | `imageRecipe.ts` | lock | Nothing: one build of a recipe's tag at a time on each machine (a move's, an import's), as each builds to the tag's one check name in that machine's docker (HB-1322). A restart has none running. |
+| `recipeMachines` | `imageRecipe.ts` | cache | Nothing: each machine's number for `recipeBuilds`, by its provider, given again as each is first asked. |
+| `derivedHalts` | `runtimeImages.ts` | lock | Nothing: each derived build under way, for `stop()` to end with its process group. After a stop the restart has none running; after a crash or a SIGKILL, docker's own group can outlive the service (under launchd at least), and is not ended. Either way the start marks one cut off failed (`failInterruptedImageBuilds`), unless its image had taken its tag: it is READY as soon as that is done, not once its log has closed (HB-1292). |
 
 Not Maps: the base build's state (`baseBuild`), the npm dist-tags read
 within the hour (`distTagsCache`) and the read under way that everyone
 asking meanwhile shares (`distTagsRead`, HB-0905) are plain variables in
 `runtimeImages.ts`;
 a base build cut off by a restart is not resumed, as before, and its log
-stays on disk. The base build's ceiling (`HATCHABOT_BASE_BUILD_TIMEOUT_MS`,
+stays on disk. A default one is on disk while it runs (a `base-build`
+operation), so one cut off is said at the next start: on the Activity list
+and as the last base build, with where its candidate is, or that it is the
+default, when docker says the default's tag names it already (HB-1255). The base build's ceiling (`HATCHABOT_BASE_BUILD_TIMEOUT_MS`,
 90 minutes, `unref()`'d, started with each build as before) ends with the
 build or with `stop()`. A runner's removal holds `removingHosts` (the
 registry's, below) through `beginRemoval` and `endRemoval`, and forgets the
@@ -406,12 +413,18 @@ with `stop()`; it was never cleared at shutdown before. The vault's pass
 as the service is built too: a deleted connection's token still to end is
 a row in the store (`connection_cleanups`, put in the connection's place
 in one transaction, `retireConnection`), so what a failure or a restart
-left is tried again from there (HB-0901). A revoke Google has not
-confirmed seven days after the delete (`REVOKE_TRIED_FOR_DAYS`, read from
-the row's `created_at`), and over at least a day of tries at the pass's pace
-(`REVOKE_TRIES_AT_LEAST`, the row's `tries`), is given up: the token is deleted, the row goes,
-and the owner is told on their chat app to remove the access by hand
-(`connection.revoke_given_up`, HB-1203).
+left is tried again from there (HB-0901). So is the token a reconnect with
+another Google Cloud project's client replaced, when Google did not
+confirm its revoke (`<ref>/replaced/<n>`, `recordConnectionCleanup`,
+HB-1396). A revoke Google has not confirmed seven days after the delete
+(`REVOKE_TRIED_FOR_DAYS`, read from the row's `created_at`), and over at
+least a day of tries at the pass's pace (`REVOKE_TRIES_AT_LEAST`, the
+row's `tries`), is given up: the token is deleted, and the row stays as a
+notice (`given_up_at`) that the Connections page lists until its owner
+marks it done (`DELETE /v1/connections/ending/:id`, HB-1336); the owner is
+also told on their chat app to remove the access by hand
+(`connection.revoke_given_up`, HB-1203). A row whose account was removed
+meanwhile (`REMOVED_OWNER`) goes instead, with nobody told.
 
 **The agent lifecycle service** (`src/orchestrator/lifecycle/`, HB-0808 step 11)
 
@@ -474,7 +487,7 @@ timer, as before.
 | State | Where | Kind | What a restart loses |
 | --- | --- | --- | --- |
 | `adoptRan`, `adoptLastTry` | `adopts.ts` | cache | A deferred adopt gets one early look and its day again. The adopts themselves are in the store (`adopt_pending`). |
-| `adoptWaitSaid`, `adoptRefused` | `adopts.ts` | cache | What was said once is said once more: a waiting adopt, a run of refused re-points; and the first pass after a refusal looks at its gateway again before the re-point. (`adoptWaitSaid` was a module-level Set of routes.ts; now one per service, and the service is built once.) |
+| `adoptWaitSaid`, `adoptRefused`, `adoptFailSaid` | `adopts.ts` | cache | What was said once is said once more: a waiting adopt, a run of refused re-points, a run of failed ones; and the first pass after a refusal looks at its gateway again before the re-point. (`adoptWaitSaid` was a module-level Set of routes.ts; now one per service, and the service is built once.) |
 
 No timer, so no `stop()`. A move, a move to another Hatchabot and a full
 copy's import are operations on disk (`operations.ts`), settled at the start
@@ -562,8 +575,8 @@ src/embedder/embedder.ts.
 
 | State | Where | Kind | What a restart loses |
 | --- | --- | --- | --- |
-| `sessionsCache` | `conversations.ts` | cache | Nothing: each agent's sessions file is read again at the next list (the first read waits up to three seconds, then fills the cache behind the answer). "Last active" and the unread mark come back with it; the seen marks are the store's (`agent_seen`). A delete drops the agent's entry (`forgetAgent`, HB-0914). |
-| `quietTasksCache` | `conversations.ts` | cache | Nothing: an agent's quiet tasks are read again at its next read that finds scheduled runs. A delete drops the agent's entry (`forgetAgent`, HB-0914). |
+| `sessionsCache` | `conversations.ts` | cache | Nothing: each agent's sessions file is read again at the next list (the first read waits up to three seconds, then fills the cache behind the answer). "Last active" and the unread mark come back with it; the seen marks are the store's (`agent_seen`). A delete or an archive drops the agent's entry when it is done (`forgetAgent`, HB-0914, HB-1362); an entry read on another machine or container than the agent's now (a move, or one put back) is dropped at its next look, with its quiet tasks: a read under way there may still fill it as it ends, with the place it was read from, and that entry is never answered. One under way across an archive fills nothing. A rebuild keeps it: the new container reads the same volume, and the entry is read again after its minute, as any other. |
+| `quietTasksCache` | `conversations.ts` | cache | Nothing: an agent's quiet tasks are read again at its next read that finds scheduled runs. A delete or an archive drops the agent's entry (`forgetAgent`, HB-0914, HB-1362), and so does the sessions entry's next look after a move; a read under way across a move, a delete or an archive does not put it back. A rebuild keeps it: it is read again once a task has run, or ten minutes on. |
 
 The Recent capture (`RecentTracker`, src/orchestrator/conversation/recent.ts) keeps each
 agent's last line in the store (`setAgentRecent`); its reads in flight
@@ -601,7 +614,10 @@ before; `stop()` ends them now (being `unref()`'d, they never held the
 process). The checkpoint, ask and distillation keep nothing of their own:
 each takes the consult service's `turns`. The merge takes the master's
 core-files turn and its busy flag, and the proposal is claimed in the
-store before anything is written (reopened when the write fails).
+store before anything is written (reopened when the write fails). A claim
+a restart cut off is put back to waiting at the next start (HB-0888), and
+at a shutdown by `stop()` too, so a release from before 2.191.0, which
+knows no 'merging', lists it after a rollback (HB-1171).
 
 **The accounts service** (`src/orchestrator/accounts/`, HB-0808 step 15 part B)
 
@@ -665,6 +681,7 @@ Beside these: the flags that keep one pass of a sweep at a time. All locks.
 | `refusals`, `retried` | `usage/budgets.ts`, `usage/usageAlerts.ts` | cache | A refusal's daily line, or a warning that did not arrive, once more. |
 | `setOwners`, `copiesUnderWay` | `backups/backupFiles.ts` | cache, lock | Nothing: a move's leftover copies are swept at the start. |
 | `memo`, `assertions` | `channels/dmPolicyMemo.ts` | cache | Every door policy is asserted once more. |
+| `channelConfigTurns` | `members/members.ts` | lock | Nothing: one write of an agent's chat-app access on its volume at a time (`inChannelConfigTurn`: its door, a grant or a scrub of someone, a room's users, the rest of an app's section of openclaw.json), in the order asked for, each deciding what it writes in its turn (HB-1554); one per process, kept by its store. Each write of an owner's press waits about half a minute at most for its turn (`PRESS_WAIT_MS`: a press with several apps' doors, and a look again, a few times that), and a turn asked for inside its own agent's turn is refused (`turnsHeld`, an AsyncLocalStorage), not left waiting for itself. What waits ends with the process. A removal cut off in its turn leaves the row active (its flip is the turn's last step), so they are still listed until the owner removes them again; an old process's one-shot still writing is removed before the next process's first write on that volume (HB-0509). |
 | `cache`, `hits` | `machines/runtimeCaps.ts`, `usage/agentCosts.ts` | cache | Nothing. |
 | `probing` | `machines/runtimeCaps.ts` | lock | Nothing: the probe under way per image, which everyone asking meanwhile waits for (HB-1020). |
 | `settled` | `settings/webSearch.ts` | cache | Nothing: each agent's search setting is looked at once more. |
@@ -686,7 +703,8 @@ Beside these: the flags that keep one pass of a sweep at a time. All locks.
 | `#modelGens` | `store/store.ts` | lock | Nothing: write counts that two steps of one request compare. |
 | `#pending`, `#changedAt` | `channels/telegramManual.ts` | cache | Nothing: a pasted token is held on disk and read back at the start. |
 | `#nameTurns` | `channels/telegramPool.ts` | lock | Nothing: one name write per pool bot at a time; a name still owed is in the pool's table (`desired_name`) and the sweep writes it. |
-| `#sayingGoodbye` | `channels/telegramPool.ts` | lock | Nothing: a freed pool bot is not leased while its farewell goes out; a farewell a restart cut off is over, and the bot is free as its release left it. |
+| `#sayingGoodbye` | `channels/telegramPool.ts` | lock | Nothing: a freed pool bot is not leased while a farewell goes out (a count per bot, one for each release saying goodbye), and a lease that finds only such bots waits for the first to be out, or for any spare freed meanwhile (`#spareFreed`), 70 s at most, then looks once more. A farewell a restart cut off stops there; whom it told is in the pool's table (`farewell_told`), so the same release run again tells only the rest. |
+| `#releasedFrom` | `channels/telegramPool.ts` | lock | Nothing: which agent this process let each pool bot go from, and when, so that a lease waits for that agent's channel row to go rather than call the bot connected, for 70 s from the let-go (or its farewell's end) at most; a row still there after that is a live agent's, as after a restart. After a restart, a row a detach or delete left keeps its bot out of the pool (never offered, nor removed) until that Detach or Delete is run again. |
 | `IN_FLIGHT`, `VOLUME_LOCKS` | `providers/localDockerProvider.ts` | lock | Nothing: one-shots a process left are swept, and each volume is looked at once after a start. |
 | `COPYING` | `providers/localDockerProvider.ts` | lock | Nothing: a model copy ends with its process, and the next process's sweep takes the container it read from. |
 | `GIVEN_UP`, `LOOKED`, `UNLISTED`, `#infoCache` | `providers/localDockerProvider.ts` | cache | Nothing: one look per volume. |

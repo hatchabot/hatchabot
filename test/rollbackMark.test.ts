@@ -151,7 +151,7 @@ describe('the rollback note beside the database (HB-0840)', () => {
       expect(['drop', 'keep'], kind).toContain(fate);
       expect(why.length, kind).toBeGreaterThan(10);
     }
-    expect([...ROLLBACK_DROPS].sort()).toEqual(['budget-pause', 'class-detach', 'model-apply']);
+    expect([...ROLLBACK_DROPS].sort()).toEqual(['budget-pause', 'class-detach', 'download-stop', 'knock-door', 'model-apply']);
   });
 
   it('no kind a release has kept holds of leaves AgentHoldKind or HOLDS_AFTER_ROLLBACK without a decision, and each new one is added here (HB-1455)', () => {
@@ -160,7 +160,9 @@ describe('the rollback note beside the database (HB-0840)', () => {
     // decision: delete its rows (at each start, since a rollback can write them again), or keep it placed.
     // Every kind a release has kept holds of (all nine were in v2.191.0). A kind placed in
     // HOLDS_AFTER_ROLLBACK is added here too, and never taken out: the second loop below holds to that.
-    const EVER_KEPT = ['budget-pause', 'class-detach', 'docs-sync', 'embed-reindex', 'first-contact', 'model-apply', 'model-waits-image', 'pending-joins', 'skip-pool'];
+    const EVER_KEPT = ['budget-pause', 'class-detach', 'docs-sync', 'embed-reindex', 'first-contact', 'model-apply', 'model-waits-image', 'pending-joins', 'skip-pool',
+      'download-stop', // 2.193.0 (HB-1479)
+      'knock-door']; // 2.193.0 (HB-1264)
     const placed = Object.keys(HOLDS_AFTER_ROLLBACK);
     for (const kind of EVER_KEPT) expect(placed, `${kind} was released: retire it only by deleting its rows, or keep it in HOLDS_AFTER_ROLLBACK (src/store/rollbackMark.ts)`).toContain(kind);
     for (const kind of placed) expect(EVER_KEPT, `${kind} is new: add it to EVER_KEPT here once it is placed`).toContain(kind);

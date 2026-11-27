@@ -63,6 +63,8 @@ export /** How many agents to sample at once, and how long one whole pass may ta
 const PASS_CONCURRENCY = Math.max(1, Number(process.env.HATCHABOT_USAGE_CONCURRENCY) || 6);
 const PASS_BUDGET_MS = Math.max(10_000, Number(process.env.HATCHABOT_USAGE_PASS_MS) || 5 * 60_000);
 const RETAIN_MS = 8 * DAY;
+/** The changes of source an agent ran on: as long as the hour buckets a month's spend is charted from (HB-1180). */
+const SOURCE_CHANGES_RETAIN_MS = 31 * DAY;
 /** Web search counts are kept longer: a month's chart, and last year's for comparison (HB-0532). */
 const SEARCH_RETAIN_MS = 400 * DAY;
 
@@ -365,7 +367,7 @@ export async function sampleSourceUsage(deps: SampleDeps, now = Date.now()): Pro
   };
   await Promise.all(Array.from({ length: Math.min(PASS_CONCURRENCY, queue.length) }, worker));
   if (queue.length) deps.log?.('usage.sample_incomplete', { remaining: queue.length });
-  store.pruneSourceUsage(new Date(now - RETAIN_MS).toISOString());
+  store.pruneSourceUsage(new Date(now - RETAIN_MS).toISOString(), new Date(now - SOURCE_CHANGES_RETAIN_MS).toISOString());
   store.pruneSearchHours(new Date(now - SEARCH_RETAIN_MS).toISOString());
   store.pruneLoopMarks(new Date(now - RETAIN_MS).toISOString());
   return { agents, calls, limited };
@@ -423,6 +425,12 @@ export function summarizeSourceUsage(store: Store, ownerId: string, now = Date.n
   // were 2,000 reads of the same fifty rows (HB-0908).
   const cursors = new Map<string, ReturnType<Store['usageCursor']>>();
   const cursorOf = (id: string) => { if (!cursors.has(id)) cursors.set(id, store.usageCursor(id)); return cursors.get(id); };
+  // Practice runs' calls, which the logs these counts come from do not hold,
+  // on the source each recorded: counted in the requests as their tokens are
+  // (Store.tokenIncreasesByAgent), and the calls it refused in them as
+  // refused (HB-1497), never as the source's last success or as a refusal
+  // that makes it rate-limited (HB-1270), which come from its own hits.
+  const practice = store.practiceUsageFor(new Set([...mine, ...all].map((a) => a.id)), t7).filter((r) => r.profileId && (r.calls > 0 || (r.refused ?? 0) > 0));
   for (const p of store.listAIProfiles(ownerId)) {
     // Agents CURRENTLY on this source — what "8 agents" means.
     const my = mine.filter((a) => a.aiProfileId === p.id);
@@ -433,7 +441,8 @@ export function summarizeSourceUsage(store: Store, ownerId: string, now = Date.n
     // would go looking for it (audit 2026-09-16).
     const myIds = new Set(mine.map((a) => a.id));
     const nameOf = new Map(mine.map((a) => [a.id, a.name]));
-    const rows = store.modelCallHoursFor(p.id, d7);
+    const practiceHere = practice.filter((r) => r.profileId === p.id && r.at <= new Date(now).toISOString());
+    const rows = [...store.modelCallHoursFor(p.id, d7), ...practiceHere.map((r) => ({ agentId: r.agentId, hour: hourOf(r.at), ok: r.calls, limited: r.refused ?? 0, failed: 0 }))];
     const mineRows = rows.filter((r) => myIds.has(r.agentId));
     const w = (from: string, list = mineRows): Omit<SourceWindow, 'tokens'> => list.filter((r) => r.hour >= from)
       .reduce((s, r) => ({ requests: s.requests + r.ok + r.limited + r.failed, limited: s.limited + r.limited, failed: s.failed + r.failed }), { requests: 0, limited: 0, failed: 0 });
@@ -443,7 +452,10 @@ export function summarizeSourceUsage(store: Store, ownerId: string, now = Date.n
     // them, which use the exact time (night review, 2026-09-27).
     const slotRows = store.modelCallSlotsFor(p.id, slotOf(t24));
     const mineSlots = slotRows.filter((r) => myIds.has(r.agentId));
-    const ws = (fromIso: string, list = mineSlots): Omit<SourceWindow, 'tokens'> => list.filter((r) => r.slot >= slotOf(fromIso))
+    const practiceSlots = practiceHere.filter((r) => r.at >= t24).map((r) => ({ agentId: r.agentId, slot: slotOf(r.at), ok: r.calls, limited: r.refused ?? 0, failed: 0 }));
+    const countSlots = [...slotRows, ...practiceSlots];
+    const mineCountSlots = countSlots.filter((r) => myIds.has(r.agentId));
+    const ws = (fromIso: string, list = mineCountSlots): Omit<SourceWindow, 'tokens'> => list.filter((r) => r.slot >= slotOf(fromIso))
       .reduce((s, r) => ({ requests: s.requests + r.ok + r.limited + r.failed, limited: s.limited + r.limited, failed: s.failed + r.failed }), { requests: 0, limited: 0, failed: 0 });
     // Successes ON this source, whoever is on it now: an agent switched to it
     // brings no success from its old one (#114), and one switched away keeps
@@ -496,7 +508,7 @@ export function summarizeSourceUsage(store: Store, ownerId: string, now = Date.n
     }
     const slotStart = slotOf(new Date(now - DAY).toISOString());
     const slotMap = new Map<string, { ok: number; limited: number }>();
-    for (const r of store.modelCallSlotsFor(p.id, slotStart)) {
+    for (const r of [...store.modelCallSlotsFor(p.id, slotStart), ...practiceSlots.filter((x) => x.slot >= slotStart)]) {
       if (!myIds.has(r.agentId)) continue;
       const b = slotMap.get(r.slot) ?? { ok: 0, limited: 0 };
       b.ok += r.ok + r.failed; b.limited += r.limited;
@@ -519,7 +531,7 @@ export function summarizeSourceUsage(store: Store, ownerId: string, now = Date.n
       const theirIds = new Set(theirs.map((a) => a.id));
       if (theirIds.size) {
         const theirRows = rows.filter((r) => theirIds.has(r.agentId));
-        entry.others = { agents: theirIds.size, liveAgents: theirs.filter((a) => a.state !== 'ARCHIVED').length, requests5h: ws(t5, slotRows.filter((r) => theirIds.has(r.agentId))).requests, requests7d: w(d7, theirRows).requests };
+        entry.others = { agents: theirIds.size, liveAgents: theirs.filter((a) => a.state !== 'ARCHIVED').length, requests5h: ws(t5, countSlots.filter((r) => theirIds.has(r.agentId))).requests, requests7d: w(d7, theirRows).requests };
       }
     }
     out.push(entry);

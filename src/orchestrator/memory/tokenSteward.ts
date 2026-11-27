@@ -87,6 +87,9 @@ export function createTokenSteward(deps: TokenStewardDeps): TokenSteward {
     // refusal and the ledger read the source chosen instead (HB-1170).
     const fresh = store.getAgent(agent.id) ?? agent;
     const running = cappedModelOf(store, fresh);
+    // Nothing says what its container runs (the source it was built with is
+    // gone, with no record of it kept): a cap then named no model (HB-1344).
+    if (raw !== null && !running) return refused(409, "Hatchabot can't tell which model its container runs (the AI source it was built with is gone): set a cap after its next rebuild.");
     if (raw !== null && running?.profile.vendor === 'local') {
       // On its way to a source that bills, it can have one once it runs there;
       // on its way to another local model, it never needs one.

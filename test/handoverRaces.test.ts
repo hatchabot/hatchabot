@@ -46,7 +46,6 @@ function hold(provider: MockProvider, method: 'provision' | 'exec', when: (arg: 
   return { entered: enteredP, release };
 }
 
-afterEach(() => { for (const id of ['a1', 'b1']) clearBusy(id); });
 
 describe('changing the Telegram bot (2026-10-09)', () => {
   it('an agent that will not stop keeps its bot: nothing parked, nothing released, the row unchanged', async () => {

@@ -1,13 +1,15 @@
-import { spawn } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
+import { execFileSync, spawn } from 'node:child_process';
+import { existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { Agent, Host } from '../../domain/types.js';
 import { needsPortHeal } from '../../openclaw/configWriter.js';
 import { fetchOpenclawDistTags, type OpenclawDistTags } from '../../openclaw/npmVersion.js';
 import { quoteOutput } from '../../ops/notify.js';
+import { beginOperation, currentBootId, handleFor, type OpHandle } from '../lifecycle/operations.js';
 import type { ImagesInUse, RuntimeProvider } from '../../providers/provider.js';
 import type { Store } from '../../store/store.js';
-import { buildDerivedImage, buildLogPath, checkTag, openBuildLog, readLogTail } from './derivedImage.js';
+import { appendBuildLogLine, baseProblem, buildDerivedImage, buildLogPath, checkTag, descendants, openBuildLog, readLogTail } from './derivedImage.js';
+import { isDerived, VERSION_TAG } from './buildInputs.js';
 import { buildFailureReason, needsSharedEmbedder } from './buildFailure.js';
 import { APT_PACKAGE_NAME } from './imageRecipe.js';
 import { imageRepository } from '../../domain/imageRepository.js';
@@ -22,7 +24,14 @@ export type BaseBuild = { running: boolean; version?: string; candidate: boolean
 export type MakeDefault = { hostId: string; tag: string; latest: string; version: string };
 
 /** What a base build is asked for (the script's settings). */
-export type BaseBuildOpts = { version?: string; candidate: boolean; logPath: string; packages?: string; engine?: 'none' };
+export type BaseBuildOpts = {
+  version?: string; candidate: boolean; logPath: string; packages?: string; engine?: 'none';
+  /** Told the script's pid (the leader of its process group) once it has started: the record keeps it (HB-1507). */
+  started?: (pid: number) => void;
+};
+
+/** How long a base build that has ended waits for its log to be written before the log is let go, as a derived build waits (HB-1290). */
+export const BASE_LOG_GRACE_MS = 10_000;
 
 /**
  * Runtime images on this machine (HB-0808): the base image built for an
@@ -57,6 +66,14 @@ export interface RuntimeImages {
   kickImageBuild(name: string): void;
   /** Docker's view of which images are held, or null when it cannot be asked. */
   readImagesInUse(localHost: Host | undefined): Promise<ImagesInUse | null>;
+  /** Why a built default build may not move `latest` now (an engine-free image with the shared service off, agents it would strand), or nothing (HB-1450 review). */
+  defaultRefusal(d: MakeDefault): Promise<string | undefined>;
+  /**
+   * What a derived image is built on when it names no base: the fleet's
+   * default; one pinned by digest, a tag here of that very image, `said`
+   * naming it. A problem when there is none (HB-1353).
+   */
+  derivedBase(localHost: Host | undefined): Promise<{ base: string; said?: string } | { problem: string }>;
   /** Everything that stops a tag being deleted, each with how to clear it. */
   imageBlockers(tag: string, me: string, localHost: Host | undefined, inUse: ImagesInUse | null): ImageBlocker[];
   /** The base build: running, or how the last one ended. */
@@ -93,10 +110,11 @@ export interface RuntimeImagesDeps {
    * Promote holds it. Unset, it is not asked.
    */
   sharedMemorySearchOn?: () => boolean;
-  /** Test seams: the derived build, the base build and the npm read. */
+  /** Test seams: the derived build, the base build and the npm read, and how long an ended base build waits for its log. */
   buildImage?: typeof buildDerivedImage;
   buildBase?: (opts: BaseBuildOpts) => Promise<{ ok: boolean; error?: string }>;
   openclawDistTags?: () => Promise<OpenclawDistTags>;
+  baseLogGraceMs?: number;
 }
 
 /** The refusal when a tag is still needed: each blocker and how to clear it. */
@@ -166,7 +184,8 @@ export function baseBuildTag(env: NodeJS.ProcessEnv, defaultVersion: string | un
     if (names.length > 40 || /[^a-z0-9. ]/.test(extras)) plus = `${plus}-${posixCksum(extras)}`;
     tag = `${version}${plus}`;
   }
-  const rule = needsSharedEmbedder(version) ? 'none' : 'baked';
+  // Not a version the rule can read: the script's own rule bakes (runtime-pins.mjs).
+  const rule = needsSharedEmbedder(version) === true ? 'none' : 'baked';
   if ((env.EMBED_ENGINE || rule) === 'none' && rule === 'baked' && tag === `${version}${plus}`) tag = `${version}-lite${plus}`;
   const custom = ['LLAMA_CPP_PROVIDER_VERSION', 'NODE_IMAGE', 'CHANNEL_PLUGIN_VERSION', 'BAKED_PLUGINS', 'PLUGIN_INSTALL']
     .filter((v) => env[v]).map((v) => `${v}=${env[v]} `).join('');
@@ -238,6 +257,29 @@ export function promoteRefusal(defaultBase: string): string | null {
  */
 export const baseBuildRepo = (defaultBase: string, env: NodeJS.ProcessEnv = process.env): string => env.HATCHABOT_IMAGE_REPO || imageRepository(defaultBase);
 
+/**
+ * The process group a base build of a process before this one left running
+ * (HB-1507), by the pid its record kept: still the leader of a group of its
+ * own, running the build script, and started when the record says (within
+ * five minutes: a pid given to another process since, after a reboot, is
+ * not taken for it). Undefined when it is not, or the process table cannot
+ * say. Under launchd a crash or a SIGKILL of the service left the build's
+ * group running; under systemd the service's cgroup ends it with the service.
+ */
+export function leftRunningBuild(pid: unknown, at: unknown): number | undefined {
+  if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 1 || pid === process.pid || typeof at !== 'string') return undefined;
+  const since = Date.parse(at);
+  if (!Number.isFinite(since)) return undefined;
+  const ps = ['/bin/ps', '/usr/bin/ps'].find((p) => existsSync(p));
+  if (!ps) return undefined;
+  let said: string;
+  try { said = execFileSync(ps, ['-o', 'pgid=,etime=,args=', '-p', String(pid)], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }); } catch { return undefined; }
+  const m = /^\s*(\d+)\s+(?:(?:(\d+)-)?(\d+):)?(\d+):(\d+)\s+(.*)$/.exec(said.split('\n')[0] ?? '');
+  if (!m || Number(m[1]) !== pid || !/(?:^|[\s/])scripts\/build-runtime-image\.sh(?:\s|$)/.test(m[6]!)) return undefined;
+  const ran = (((Number(m[2] ?? 0) * 24 + Number(m[3] ?? 0)) * 60 + Number(m[4])) * 60 + Number(m[5])) * 1000;
+  return Math.abs(Date.now() - ran - since) <= 5 * 60_000 ? pid : undefined;
+}
+
 /** Names for a refusal: five at most, and how many more. */
 export const someNames = (names: string[]) => `${names.slice(0, 5).join(', ')}${names.length > 5 ? ` and ${names.length - 5} more` : ''}`;
 
@@ -270,6 +312,47 @@ export function createRuntimeImages(deps: RuntimeImagesDeps): RuntimeImages {
   // not BUILDING for ever with Rebuild and Delete greyed out (night review).
   store.failInterruptedImageBuilds();
   let baseBuild: BaseBuild = { running: false, candidate: true };
+  /**
+   * A default base build a restart cut off (HB-1255): it builds as a
+   * candidate and takes the default's tag only as it ends (madeDefault), so a
+   * restart during the build, or between its end and the tag, left a
+   * candidate and no word of it. Each is recorded on disk while it runs (an
+   * operation, `base-build`), and one a process before this left running is
+   * said now: on the Activity list, and as the last base build. Unless the
+   * default's tag names its candidate already, as docker says: cut off after
+   * the tag moved, it is the default (review of HB-1255).
+   */
+  for (const op of store.operationsWithStatus(['queued', 'running', 'interrupted'])) {
+    if (op.kind !== 'base-build' || op.bootId === currentBootId()) continue;
+    const p = op.params ?? {};
+    // Still running: the process before this one died without its stop (a
+    // crash, a SIGKILL under launchd), and its build's group ran on, to end
+    // unseen onto the tag and log the next build takes. Stopped now, as the
+    // service's stop stops it, and said so (HB-1507).
+    const left = leftRunningBuild(p.pid, p.pidAt);
+    if (left) {
+      for (const pid of descendants(left)) { try { process.kill(pid, 'SIGKILL'); } catch { /* gone already */ } }
+      try { process.kill(-left, 'SIGKILL'); } catch { /* gone already */ }
+      log.info({ op: op.id, pid: left }, 'base build left running by the process before stopped');
+    }
+    const error = left ? stoppedWords(p) : cutOffWords(p);
+    const cutOff: BaseBuild = { running: false, candidate: false, ...(typeof p.version === 'string' ? { version: p.version } : {}), startedAt: op.requestedAt, ok: false, error };
+    baseBuild = cutOff;
+    const h = handleFor(store, op.id);
+    // This process's to settle once docker has answered, not the boot's
+    // pass's ("Interrupted by a restart."). Cut off again meanwhile, the
+    // start after asks again.
+    try { h.start(); } catch { continue; }
+    // Stopped before its end: the default's tag was not moved to it.
+    if (left) { try { h.fail(error); } catch { /* closing: the start after says it */ } continue; }
+    void movedBeforeCutOff(op.hostId, p)
+      .then((made) => {
+        if (!made) return h.fail(error);
+        h.done(made);
+        if (baseBuild === cutOff) baseBuild = { ...cutOff, ok: true, error: undefined };
+      })
+      .catch(() => { /* closing: the start after says it */ });
+  }
   /**
    * Stop the base build under way, its ceiling and its whole process group,
    * for stop(). Its own group outlived the service: launchd ends only a
@@ -308,9 +391,21 @@ export function createRuntimeImages(deps: RuntimeImagesDeps): RuntimeImages {
        * killed. Killed alone, the script left a hung docker or npm call
        * holding its output open: 'close' never came, and "a build is already
        * running" outlived the time limit (HB-0883).
+       *
+       * And every process below it, as the table has them just before: a
+       * step that starts a session of its own (setsid) is in no group of the
+       * build's, and outlived the group's kill (HB-1186). One that has also
+       * left the tree (a daemon, its parent gone) is not found; under systemd
+       * the service's cgroup still ends it with the service.
        */
       const stopAll = () => {
         if (!child) return;
+        // Only while the script has not been reaped: its number is its own until then.
+        const below = child.pid && child.exitCode === null && child.signalCode === null ? descendants(child.pid) : [];
+        // Those below first, while the processes above them still stand: one
+        // killed stays its parent's to reap, so its number cannot be given to
+        // another process before the kills below it are done.
+        for (const pid of below) { try { process.kill(pid, 'SIGKILL'); } catch { /* gone already */ } }
         try { if (child.pid) process.kill(-child.pid, 'SIGKILL'); else child.kill('SIGKILL'); } catch { child.kill('SIGKILL'); }
       };
       out.on('error', (err) => {
@@ -347,6 +442,7 @@ export function createRuntimeImages(deps: RuntimeImagesDeps): RuntimeImages {
           return settle({ ok: false, error: (err as Error)?.message ?? String(err) });
         }
         running = true;
+        if (proc.pid) opts.started?.(proc.pid);
         // Before the pipes: a child that could not start (EMFILE) has no
         // output streams, and emits its error.
         let ended = () => { running = false; };
@@ -363,16 +459,31 @@ export function createRuntimeImages(deps: RuntimeImagesDeps): RuntimeImages {
         proc.on('close', (code) => {
           ended();
           if (logError) { out.destroy(); return settle({ ok: false, error: logError }); }
+          let judged = false;
           byExitCode = () => {
+            if (judged) return;
+            judged = true;
+            clearTimeout(grace);
             if (shutDown) return settle({ ok: false, error: 'The build was stopped as Hatchabot stopped.' });
             if (timedOut) return settle({ ok: false, error: `The build ran past its time limit${limitMs >= 60_000 ? ` of ${Math.round(limitMs / 60_000)} minutes` : ''} and was stopped.` });
             if (code === 0) return settle({ ok: true });
             // The log's end, read from there (HB-0884); no log: the code is all we have.
+            // The read is given the log's while too: on a disk that hangs it
+            // never ended, and nor did a failed build (review of HB-1290).
+            const byCodeAlone = () => settle({ ok: false, error: buildFailureReason('', code) });
+            const reading = setTimeout(byCodeAlone, deps.baseLogGraceMs ?? BASE_LOG_GRACE_MS);
+            reading.unref();
             void readLogTail(opts.logPath, 200_000).then(
-              (log) => settle({ ok: false, error: buildFailureReason(log, code) }),
-              () => settle({ ok: false, error: buildFailureReason('', code) }),
+              (log) => { clearTimeout(reading); settle({ ok: false, error: buildFailureReason(log, code) }); },
+              () => { clearTimeout(reading); byCodeAlone(); },
             );
           };
+          // The log's end, given a while: one whose writes do not finish (a
+          // disk that hangs) held "a build is already running" for good, as
+          // the derived build's did before HB-1026 (HB-1290). Then it is let
+          // go, and the outcome is the script's exit code.
+          const grace = setTimeout(() => { out.destroy(); byExitCode?.(); }, deps.baseLogGraceMs ?? BASE_LOG_GRACE_MS);
+          grace.unref();
           out.end(byExitCode);
         });
       });
@@ -386,7 +497,13 @@ export function createRuntimeImages(deps: RuntimeImagesDeps): RuntimeImages {
     const halt = new AbortController();
     derivedHalts.add(halt);
     const build = deps.buildImage ?? buildDerivedImage;
-    void build({ name, base: rec.base, basePackages: rec.basePackages, dockerfile: rec.dockerfile, tag: rec.tag, dataDir: buildDataDir, signal: halt.signal })
+    void build({
+      name, base: rec.base, basePackages: rec.basePackages, dockerfile: rec.dockerfile, tag: rec.tag, dataDir: buildDataDir, signal: halt.signal,
+      // READY as soon as its image has taken its tag, not once its log has
+      // closed: a service stop in the log's grace (up to 10 seconds) left the
+      // record BUILDING, and the start after marked a good image failed (HB-1292).
+      onOutcome: (res) => { if (res.ok) { try { store.setDerivedImageStatus(name, 'READY', null); } catch { /* closing: the start after marks it failed */ } } },
+    })
       .then((res) => {
         // Stopped with the service: the database may be closing. The start
         // after marks it failed (failInterruptedImageBuilds), unless its
@@ -419,6 +536,31 @@ export function createRuntimeImages(deps: RuntimeImagesDeps): RuntimeImages {
   const readImagesInUse = async (localHost: Host | undefined): Promise<ImagesInUse | null> => {
     try { return localHost ? await providerFor(localHost.id).imagesInUse() : null; } catch { return null; }
   };
+  /**
+   * The default as a derived image's base. One pinned by digest
+   * (HATCHABOT_IMAGE=<repo>@sha256:…) is no tag, and a base is one: recipes,
+   * moves, stand-ins and Change base look it up by its tag, so the create was
+   * refused with "Base must be a <repo>:* tag." (HB-1353). A tag of the fleet's
+   * repository here that names that very image, as docker says, stands for
+   * it: a version's own name first (a promote moves `latest`), then by name,
+   * `latest` last; never a derived image's.
+   */
+  const derivedBase: RuntimeImages['derivedBase'] = async (localHost) => {
+    if (!/@sha256:[a-f0-9]{64}$/.test(DEFAULT_BASE)) return { base: DEFAULT_BASE };
+    const refused = { problem: `The fleet's image is pinned by digest: give --base ${RUNTIME_REPO}:<version>.` };
+    if (!localHost) return refused;
+    const provider = providerFor(localHost.id);
+    const [pinned, tags] = await Promise.all([provider.currentImageInfo(DEFAULT_BASE).catch(() => ({} as { imageId?: string })), provider.listImageTags().catch(() => undefined)]);
+    const short = (id: string) => id.replace(/^sha256:/, '').slice(0, 12);
+    if (!pinned.imageId || !tags) return refused;
+    const rank = (tag: string) => { const name = tag.slice(RUNTIME_REPO.length + 1); return VERSION_TAG.test(name) ? 0 : name === 'latest' ? 2 : 1; };
+    const same = tags
+      .filter((t) => t.tag.startsWith(`${RUNTIME_REPO}:`) && !isDerived(t) && !baseProblem(t.tag, RUNTIME_REPO) && t.imageId && short(t.imageId) === short(pinned.imageId!))
+      .sort((a, b) => rank(a.tag) - rank(b.tag) || (a.tag < b.tag ? -1 : a.tag > b.tag ? 1 : 0));
+    const tag = same[0]?.tag;
+    return tag ? { base: tag, said: `The fleet's image is pinned by digest: built on ${tag}, its tag on this machine.` } : refused;
+  };
+
   /**
    * Everything that stops a tag being deleted, each with how to clear it. The
    * one list behind "Used by" and both deletes, so "nothing" means it deletes.
@@ -467,13 +609,14 @@ export function createRuntimeImages(deps: RuntimeImagesDeps): RuntimeImages {
   };
 
   /**
-   * A default build's end: `latest` moved, as the script moved it, with
-   * Promote's checks asked again now, not only as it began. An agent that
-   * reached 2026.8 or newer during the build (up to 90 minutes) was stranded
-   * by the default the script then moved (HB-1187). Why it was not moved, or
-   * nothing.
+   * Why a built default build may not move `latest` now, or nothing:
+   * Promote's checks, asked as it ends (an engine-free image with the shared
+   * memory service off, agents it would strand). Pins are not among them: the
+   * build itself has made its tag name the new image (HB-1450 review). The
+   * app's build asks it (madeDefault), and the CLI's, once built
+   * (GET /v1/runtime/build/check?built=1).
    */
-  const madeDefault = async (d: MakeDefault): Promise<string | undefined> => {
+  const defaultRefusal = async (d: MakeDefault): Promise<string | undefined> => {
     const provider = providerFor(d.hostId);
     const kept = `It is kept as ${d.tag}`;
     // With HATCHABOT_IMAGE pinned, `latest` is not the default and Promote is
@@ -490,10 +633,65 @@ export function createRuntimeImages(deps: RuntimeImagesDeps): RuntimeImages {
         ? `OpenClaw ${d.version} cannot read the data of agents that reached 2026.8 or newer while it built (${someNames(stuck)}). ${kept}: pin those agents to their current image, ${then}.`
         : `OpenClaw ${d.version} cannot read the data of agents pinned to ${d.latest} that reached 2026.8 or newer while it built (${someNames(stuck)}). ${kept}: pin those agents to a version tag, ${then}.`;
     }
+    return undefined;
+  };
+
+  /**
+   * A default build's end: `latest` moved, as the script moved it, with
+   * Promote's checks asked again now, not only as it began. An agent that
+   * reached 2026.8 or newer during the build (up to 90 minutes) was stranded
+   * by the default the script then moved (HB-1187). Why it was not moved, or
+   * nothing.
+   */
+  const madeDefault = async (d: MakeDefault): Promise<string | undefined> => {
+    const refused = await defaultRefusal(d);
+    if (refused) return refused;
+    const provider = providerFor(d.hostId);
+    const kept = `It is kept as ${d.tag}`;
     try { await provider.tagImage(d.tag, d.latest); }
     catch (err) { return `docker could not tag it as ${d.latest} (${String((err as Error)?.message ?? err).slice(0, 200)}). ${kept}.`; }
     return undefined;
   };
+
+  /** What a default build a restart cut off left (HB-1255): its candidate, if it got that far, and how to make it the default. */
+  function cutOffWords(p: Record<string, unknown>): string {
+    const tag = typeof p.tag === 'string' ? p.tag : 'its candidate';
+    const latest = typeof p.latest === 'string' ? p.latest : `${RUNTIME_REPO}:latest`;
+    const moves = movesFleetDefault(latest, DEFAULT_BASE);
+    const then = moves ? 'then promote it' : `then build it again to move ${latest}`;
+    return `${cutOffHead(p)}. If it got to its end, it is kept as ${tag} (Settings → Advanced → Runtime images): try it on an agent, ${then}. If it is not there, build it again.`;
+  }
+  /** A default build the process before left running, stopped at this start (HB-1507). */
+  function stoppedWords(p: Record<string, unknown>): string {
+    return `${cutOffHead(p)}. It was still running after the restart, and was stopped before its end: build it again.`;
+  }
+  function cutOffHead(p: Record<string, unknown>): string {
+    const latest = typeof p.latest === 'string' ? p.latest : `${RUNTIME_REPO}:latest`;
+    const moves = movesFleetDefault(latest, DEFAULT_BASE);
+    return `The default base image build${typeof p.version === 'string' ? ` for OpenClaw ${p.version}` : ''} was cut off by a restart, so ${moves ? 'it was not made the fleet default' : `${latest} was not moved to it`}`;
+  }
+
+  /**
+   * A cut-off default build whose tag had moved (review of HB-1255): the
+   * default's tag and its candidate are one image, as docker says. Its
+   * words, or undefined: they are not, or docker did not say within a
+   * minute.
+   */
+  async function movedBeforeCutOff(hostId: string | null | undefined, p: Record<string, unknown>): Promise<string | undefined> {
+    const { tag, latest } = p;
+    if (!hostId || typeof tag !== 'string' || typeof latest !== 'string') return undefined;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const provider = providerFor(hostId);
+      if (!provider.inspectImage) return undefined;
+      const answered = Promise.all([provider.inspectImage(tag), provider.inspectImage(latest)]);
+      const unanswered = new Promise<never>((_, no) => { timer = setTimeout(() => no(new Error('docker did not answer')), 60_000); timer.unref(); });
+      const [built, named] = await Promise.race([answered, unanswered]);
+      if (!built.id || built.id !== named.id) return undefined;
+    } catch { return undefined; } finally { clearTimeout(timer); }
+    const moves = movesFleetDefault(latest, DEFAULT_BASE);
+    return `The default base image build${typeof p.version === 'string' ? ` for OpenClaw ${p.version}` : ''} was cut off by a restart, but ${latest} names ${tag} now, ${moves ? 'so it is the fleet default' : 'as the build was to leave it'}.`;
+  }
 
   /** The base build, started by POST /v1/runtime/build once its checks pass. */
   const startBaseBuild: RuntimeImages['startBaseBuild'] = ({ version, candidate, packages, engine, forOwner, makeDefault }) => {
@@ -515,27 +713,52 @@ export function createRuntimeImages(deps: RuntimeImagesDeps): RuntimeImages {
     const pinned = promoteRefusal(DEFAULT_BASE);
     const what = `base image${candidate ? ' candidate' : isDefault ? ' default' : ''} for OpenClaw ${version ?? 'the newest version'}` +
       (packages ? ` with ${packages.split(' ').join(', ')}` : '') + (engine ? ' without its own memory search engine' : '');
-    void run({ version, candidate: candidate || !!promote, logPath, packages, engine })
+    // On disk until it has taken the default's tag or failed: what a restart
+    // may not lose, said at the next start (HB-1255). Its end is written as
+    // best it can be: the database may be closing.
+    let op: OpHandle | undefined;
+    if (promote) {
+      try { op = beginOperation(store, 'base-build', null, { version: promote.version, tag: promote.tag, latest: promote.latest }, { hostId: promote.hostId, requestedBy: forOwner }); } catch { /* the build goes ahead unrecorded */ }
+    }
+    const record = (ended: (h: OpHandle) => void) => { try { if (op) ended(op); } catch { /* closing: the start after says it was cut off */ } };
+    // The script builds a default as a candidate and says so as it ends ("candidate — :latest
+    // untouched"); what was done with it then is said after that, as the log's last line (HB-1508).
+    // Not waited on: the outcome is the build's however the log's disk is.
+    const thenSaid = (line: string) => { void appendBuildLogLine(logPath, line).catch(() => {}); };
+    // Its group's leader, on the record: a process that dies without its
+    // stop leaves the group running under launchd, and the next start stops
+    // it (HB-1507).
+    const started = (pid: number) => record((h) => { store.updateOperation(h.id, { params: { ...h.get().params, pid, pidAt: new Date().toISOString() } }); });
+    void run({ version, candidate: candidate || !!promote, logPath, packages, engine, started })
       .then(async (r) => {
         const notMade = r.ok && promote ? await madeDefault(promote) : undefined;
         if (notMade) {
           const notWhat = isDefault ? 'not made the default' : `${latest} was not moved to it`;
+          record((h) => h.fail(`Built, but ${notWhat}: ${notMade}`));
           baseBuild = { ...baseBuild, running: false, ok: false, error: `Built, but ${notWhat}: ${notMade}` };
           notify(forOwner, `The ${what} finished building, but ${isDefault ? 'was ' : ''}${notWhat}: ${notMade}`);
+          thenSaid(`Then Hatchabot ${isDefault ? 'did not make it the fleet default' : `did not move ${latest} to it`}: ${notMade}`);
           return;
         }
+        if (r.ok && promote) {
+          thenSaid(isDefault
+            ? `Then Hatchabot made it the fleet default: ${latest} names ${promote.tag} now.`
+            : `Then Hatchabot moved ${latest} to it: ${latest} names ${promote.tag} now. The fleet default stays ${DEFAULT_BASE}, as HATCHABOT_IMAGE pins it.`);
+        }
+        record((h) => (r.ok ? h.done(isDefault ? `Built ${promote!.tag}; it is the fleet default now.` : `Built ${promote!.tag}; ${latest} names it now.`) : h.fail(r.error ?? 'The build failed.')));
         baseBuild = { ...baseBuild, running: false, ok: r.ok, error: r.error };
         notify(forOwner, r.ok
           ? (!candidate
             ? (isDefault
               ? `The ${what} finished building and is now the fleet default. Nothing restarts by itself: agents on this machine without a pin move onto it when they are rebuilt; agents on runners keep their runner's image.`
-              : `The ${what} finished building and is now ${latest}. The fleet default stays ${DEFAULT_BASE}, as HATCHABOT_IMAGE pins it: only agents pinned to ${latest} move onto it when they are rebuilt.`)
+              : `The ${what} finished building and is now ${latest}. The fleet default stays ${DEFAULT_BASE}, as HATCHABOT_IMAGE pins it: only agents pinned to ${latest} move onto it when they are rebuilt. To make it the fleet default, set HATCHABOT_IMAGE in .env to ${promote?.tag ?? 'its tag'} and restart Hatchabot.`)
             : pinned
               ? `The ${what} finished building. Nothing changes for any agent until it is tried on one. Promote is off while HATCHABOT_IMAGE pins the fleet default to ${DEFAULT_BASE}: to make it the default, set HATCHABOT_IMAGE in .env to its tag and restart Hatchabot.`
               : `The ${what} finished building. Nothing changes for any agent until it is tried on one and promoted.`)
           : `The ${what} FAILED to build. Its last output: "${quoteOutput(r.error)}"`);
       })
       .catch((err) => {
+        record((h) => h.fail(String(err?.message ?? err)));
         baseBuild = { ...baseBuild, running: false, ok: false, error: String(err?.message ?? err) };
         notify(forOwner, `The ${what} FAILED to build. Its last output: "${quoteOutput(err)}"`);
       });
@@ -569,6 +792,8 @@ export function createRuntimeImages(deps: RuntimeImagesDeps): RuntimeImages {
     isBuilding: (name) => buildingImages.has(name),
     kickImageBuild,
     readImagesInUse,
+    defaultRefusal,
+    derivedBase,
     imageBlockers,
     baseBuildNow: () => baseBuild,
     startBaseBuild,

@@ -102,6 +102,36 @@ describe('the list: each check becomes an item, ranked', () => {
     expect(it.rank).toEqual({ group: GROUP['cheaper-model'], money: 60 });
   });
 
+  it("a practice call its source refused is not one of the model's errors on the card (HB-1497)", () => {
+    const w = world();
+    w.agent('stock', 'Stock Watcher');
+    w.store.setModelProfile('stock', steady(NOW), iso(NOW));
+    const card = () => w.list().items.find((x) => x.kind === 'cheaper-model')!.concern;
+    expect(card()).toMatch(/, no errors: /);
+    const at = new Date(NOW - 2 * DAY).toISOString();
+    w.store.addPracticeUsage([{ agentId: 'stock', run: 'r1', model: 'claude-opus-4-8', profileId: 'key', at, day: at.slice(0, 10), skill: 'hatchabot-writing', status: 'timeout',
+      calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, usd: 0, unpricedTokens: 0, refused: 2 }]);
+    // Was: "some errors", the source's refusal of a practice call counted as the model's.
+    expect(card()).toMatch(/, no errors: /);
+  });
+
+  it('during a switch of source its scorecard row is the source and model its container runs, and no cheaper model is offered until the rebuild (HB-1343)', async () => {
+    const { buildScorecard } = await import('../src/orchestrator/usage/modelScorecard.js');
+    const w = world();
+    w.store.insertAIProfile({ id: 'plan', ownerId: OWNER, name: 'Family plan', vendor: 'anthropic', kind: 'subscription', model: 'claude-sonnet-5', models: ['claude-sonnet-5', 'claude-haiku-4-5'], secretRef: 'ai/plan', createdAt: 'now' } as never);
+    // Saved onto the plan, still running Opus 4.8 on the key until its rebuild.
+    w.agent('stock', 'Stock Watcher', { aiProfileId: 'plan' });
+    w.store.setAgentApplied('stock', 'key', 'claude-opus-4-8');
+    w.store.setModelProfile('stock', steady(NOW), iso(NOW));
+    const row = buildScorecard(w.store, OWNER, { now: NOW }).rows.find((r) => r.id === 'stock')!;
+    // Was: the plan's name, billing and default model, over figures run on the key's Opus.
+    expect(row).toMatchObject({ source: 'Family key', billing: 'api', model: 'claude-opus-4-8', turnsOnModel: 200, monthlyUSD: 75 });
+    expect(w.list().items.filter((x) => x.kind === 'cheaper-model')).toEqual([]);
+    // Rebuilt onto the plan: its own figures from then on, and advice again.
+    w.store.setAgentApplied('stock', 'plan', 'claude-sonnet-5');
+    expect(buildScorecard(w.store, OWNER, { now: NOW }).rows.find((r) => r.id === 'stock')).toMatchObject({ source: 'Family plan', billing: 'plan', model: 'claude-sonnet-5' });
+  });
+
   it('thin evidence (fewer than 10 turns on its model) gives no cheaper-model item', () => {
     const w = world();
     w.agent('stock', 'Stock Watcher');
@@ -201,6 +231,19 @@ describe('the list: each check becomes an item, ranked', () => {
     expect(NO_BUDGET_FROM_USD).toBe(20);
     w.store.setBudget('stock', OWNER, 100, 'warn', iso(NOW));
     expect(w.list().items.some((x) => x.kind === 'no-budget')).toBe(false);
+  });
+
+  it("a pause its budget no longer holds, still owed its start, is not called the budget's doing, nor said to end with a raise (HB-1496)", () => {
+    const w = world();
+    w.agent('a1', 'Garden Notes', { state: 'STOPPED' });
+    w.store.setCostDays('a1', new Map([['2026-10-05', 55]]));
+    w.store.addBudgetPause('a1', '2026-10', 'a1', iso(NOW - HOUR));
+    // Set to warn after it paused it, and the start it was then owed failed.
+    w.store.setBudget('a1', OWNER, 50, 'warn', iso(NOW));
+    const lim = w.list().items.find((x) => x.id === 'budget:a1')!;
+    // Was: "Garden Notes is paused by its budget", raising it "starts it again now".
+    expect(lim.title).toBe('Garden Notes passed its $50 budget');
+    expect(lim.effect!.text).not.toContain('starts it again');
   });
 
   it('a budget at 100% and one past 80% before mid-month; the machine\'s for its owner', () => {

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { hibernateAfterMs, hibernateAgent, hibernateBlocker, hibernateSweep, resetHibernateState, wakeAgent, wakeSweep, WAKE_GIVE_UP, type HibernateDeps } from '../src/orchestrator/lifecycle/hibernate.js';
+import { hibernateAfterMs, hibernateAgent, hibernateBlocker, hibernateSweep, NoLongerSleepy, resetHibernateState, wakeAgent, wakeSweep, WAKE_GIVE_UP, type HibernateDeps } from '../src/orchestrator/lifecycle/hibernate.js';
 import { as, makeWorld, seedRunningAgent, type World } from './support/world.js';
 
 /**
@@ -86,6 +86,39 @@ describe('the idle rule', () => {
     expect(await hibernateBlocker(deps, w.store.getAgent(due)!, now, 6 * HOUR)).toBe('a required rebuild comes first');
     expect(await hibernateSweep(deps, now, 6 * HOUR)).toEqual([odd]);
     expect(w.store.getAgent(due)!.state).toBe('RUNNING');
+  });
+});
+
+describe('put to sleep as it stops of its own accord (HB-1175)', () => {
+  it('stopped between the ask and the sleep: it may not sleep, and says why; the idle sweep has nothing to report', async () => {
+    const w = await makeWorld();
+    const id = await seedRunningAgent(w);
+    // It crashes (or another Stop lands) after the route's look and before the sleep's own.
+    const deps = depsFor(w, { settle: async (agentId) => { w.store.setAgentState(agentId, 'STOPPED'); } });
+    // Was: a plain Error, which the route answered 500.
+    const sleep = hibernateAgent(deps, w.store.getAgent(id)!, 'by hand');
+    await expect(sleep).rejects.toBeInstanceOf(NoLongerSleepy);
+    await expect(sleep).rejects.toThrow('it is no longer running');
+    expect(w.store.getAgent(id)).toMatchObject({ state: 'STOPPED' });
+    expect(w.store.getAgent(id)!.hibernatedAt).toBeUndefined();
+    // The sweep reached it as it stopped: no failure in its log.
+    const other = await seedRunningAgent(w, { id: 'a2', slug: 'garden', accountId: 'gardenbot' });
+    const sweepDeps = depsFor(w, { settle: async (agentId) => { if (agentId === other) w.store.setAgentState(agentId, 'STOPPED'); } });
+    expect(await hibernateSweep(sweepDeps, Date.now(), 6 * HOUR)).toEqual([]);
+    expect(sweepDeps.events.filter(([, e]) => e === 'hibernate.failed')).toEqual([]);
+  });
+
+  it('put to sleep meanwhile (the sweep, or another tap): it is asleep, and that is the answer', async () => {
+    const w = await makeWorld();
+    const id = await seedRunningAgent(w);
+    const first = depsFor(w);
+    // The sweep's sleep finishes while this one waits to look again.
+    const deps = depsFor(w, { settle: async (agentId) => { await hibernateAgent(first, w.store.getAgent(agentId)!, 'quiet'); } });
+    const slept = await hibernateAgent(deps, w.store.getAgent(id)!, 'by hand');
+    expect(slept).toMatchObject({ id, state: 'STOPPED' });
+    expect(slept.hibernatedAt).toBeTruthy();
+    // One sleep, not two.
+    expect([...first.events, ...deps.events].filter(([, e]) => e === 'agent.hibernated')).toHaveLength(1);
   });
 });
 

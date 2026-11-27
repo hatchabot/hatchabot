@@ -130,7 +130,8 @@ console.log('MARK ' + JSON.stringify(markFolder(${JSON.stringify(p)})));`;
     };
     expect(doctorReport(facts).filter((l) => /data folder/.test(l.text))).toEqual([{
       level: 'fail',
-      text: "Another Hatchabot install's database is in this install's data folder /made-up/shared: /made-up/shared/hatchabot.sqlite, which its install marked at its start with /made-up/shared/hatchabot.sqlite.uses-this-folder. The two installs keep the same files beside their databases, the memory search service's keys among them, so each overwrites the other's",
+      text: "Another Hatchabot install's database is in this install's data folder /made-up/shared: /made-up/shared/hatchabot.sqlite, which its install marked at its start with /made-up/shared/hatchabot.sqlite.uses-this-folder. The two installs keep the same files beside their databases, so each overwrites the other's. "
+        + "Memory search's keys are among them: they flip between the two installs as each starts or builds an agent, so memory search fails for one install's agents or the other's until one of the databases is moved out",
       fix: sharedFolderFix('/made-up/shared/two.sqlite'),
     }]);
     expect(sharedFolderFix('/made-up/shared/two.sqlite')).toBe(`Stop this install. Move its database /made-up/shared/two.sqlite to a folder of its own, keeping its name, with the files named for it (two.sqlite-wal, two.sqlite-shm, two.sqlite-journal, two.sqlite.lock, two.sqlite.rolled-back, two.sqlite.rolled-back.prev and two.sqlite.uses-this-folder, whichever are there) and its folder ${COPIES('two.sqlite')}, if there is one (a move that was cut off left it, with an agent's tokens in it), and set HATCHABOT_DB to its new path. `
@@ -139,7 +140,8 @@ console.log('MARK ' + JSON.stringify(markFolder(${JSON.stringify(p)})));`;
       + 'If no install uses another database there any more (a copy left behind, say), delete that database, or its .uses-this-folder mark, instead. More: docs/troubleshooting.md, "Two installs share one data folder"');
     const several = doctorReport({ ...facts, db: { ...facts.db, sharedWith: { folder: '/made-up/shared', others: ['/made-up/shared/a.sqlite', '/made-up/shared/b.sqlite'] } } });
     expect(several.filter((l) => /data folder/.test(l.text)).map((l) => l.text)).toEqual([
-      "Other Hatchabot installs' databases are in this install's data folder /made-up/shared: /made-up/shared/a.sqlite, /made-up/shared/b.sqlite, each marked at its install's start with a <database>.uses-this-folder file beside it. These installs keep the same files beside their databases, the memory search service's keys among them, so each overwrites the others'",
+      "Other Hatchabot installs' databases are in this install's data folder /made-up/shared: /made-up/shared/a.sqlite, /made-up/shared/b.sqlite, each marked at its install's start with a <database>.uses-this-folder file beside it. These installs keep the same files beside their databases, so each overwrites the others'. "
+        + "Memory search's keys are among them: they flip from one install to another as each starts or builds an agent, so memory search fails for all but one install's agents until each database is in a folder of its own",
     ]);
     expect(doctorReport({ ...facts, db: { path: '/made-up/shared/two.sqlite', present: true } }).filter((l) => /data folder/.test(l.text))).toEqual([]);
   });

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { exchangeGoogleCode, GOOGLE_CLIENT_REF, grantedServices, OAuthStateJar, revokeGoogleToken, sameGoogleGrant, withGoogleGrantTurn, withVaultTurn, type OAuthClient } from './googleConnections.js';
+import { COPY_NOT_DELETED, exchangeGoogleCode, GOOGLE_CLIENT_REF, grantedServices, OAuthStateJar, revokeGoogleToken, sameGoogleGrant, withGoogleGrantTurn, withVaultTurn, type OAuthClient } from './googleConnections.js';
 import type { ClientSecretDelivery } from './clientSecretDelivery.js';
 import type { GoogleDeps, GoogleHelpers } from './connectionsAndAccess.js';
 
@@ -94,6 +94,26 @@ export function createGoogleClient(deps: GoogleDeps, helpers: GoogleHelpers, del
     // The token this one replaces, and the client that made it (HB-1338).
     const was = existing ? store.getConnection(existing.id) : undefined;
     const replaced = was ? await secrets.get(secretRef).catch(() => undefined) : undefined;
+    // Made with a client of another Google Cloud project, it may be a grant
+    // of its own, to revoke below. It is kept under a ref of its own, with a
+    // record of it still to end, before the new token takes its place: a
+    // revoke Google did not confirm was logged and never tried again, the
+    // record being keyed by the ref the new token now holds (HB-1396). The
+    // vault's pass tries it again, judging the grant afresh, and gives it up
+    // as it does a deleted connection's.
+    const ownProject = !!was && !!replaced && replaced !== refreshToken && !sameGoogleGrant(was.clientId, client.clientId);
+    let kept: string | undefined;
+    if (ownProject) {
+      kept = `${secretRef}/replaced/${randomUUID().slice(0, 8)}`;
+      try {
+        store.recordConnectionCleanup({ secretRef: kept, kind: 'google', ownerId: claim.ownerId, email, clientId: was.clientId ?? null });
+        await secrets.put(kept, replaced);
+      } catch (err) {
+        store.settleConnectionCleanup(kept);
+        kept = undefined;
+        deps.warn({ email, error: String((err as Error)?.message ?? err).slice(0, 200) }, 'connection.replaced_token_not_kept');
+      }
+    }
     await secrets.put(secretRef, refreshToken);
     store.insertConnection({ id, ownerId: claim.ownerId, kind: 'google', email, services: granted, secretRef, clientId: client.clientId });
     // The replaced token was left working at Google, and agents that had
@@ -101,13 +121,25 @@ export function createGoogleClient(deps: GoogleDeps, helpers: GoogleHelpers, del
     // a grant of its own: made with a client of another Google Cloud
     // project, and held by no connection here, anyone's (endToken's rule).
     // Under the same grant, revoking it would end the new token as well,
-    // so it stays. A revoke that fails is logged; the reconnect stands.
+    // so it stays. A revoke Google does not confirm is logged, and its
+    // record kept for the pass; the reconnect stands.
     let oldToken: Record<string, unknown> = {};
-    if (was && replaced && replaced !== refreshToken && !sameGoogleGrant(was.clientId, client.clientId)
-        && !store.connectionClientsOf('google', email).some((other) => sameGoogleGrant(was.clientId, other))) {
-      const r = await revokeGoogleToken(replaced, oauthFetch);
-      oldToken = r.ended ? { oldTokenRevoked: true, ...(r.already ? { alreadyGone: true } : {}) } : { oldTokenNotRevoked: r.error };
+    /** The copy kept for the pass, deleted and its record settled; one the secret store keeps stays on record, and the pass deletes it. */
+    const dropKept = async (ref: string): Promise<void> => {
+      try { await secrets.delete(ref); store.settleConnectionCleanup(ref); }
+      catch (err) { store.connectionCleanupFailed(ref, `${COPY_NOT_DELETED}: ${String((err as Error)?.message ?? err)}`); }
+    };
+    if (ownProject && !store.connectionClientsOf('google', email).some((other) => sameGoogleGrant(was!.clientId, other))) {
+      const r = await revokeGoogleToken(replaced!, oauthFetch);
+      oldToken = r.ended ? { oldTokenRevoked: true, ...(r.already ? { alreadyGone: true } : {}) } : { oldTokenNotRevoked: r.error, ...(kept ? { triedAgainLater: true } : {}) };
       if (!r.ended) deps.warn({ email, error: r.error }, 'connection.replaced_token_not_revoked');
+      if (kept) {
+        if (r.ended) await dropKept(kept);
+        else store.connectionCleanupFailed(kept, `Google did not revoke it: ${r.error}`);
+      }
+    } else if (kept) {
+      // Another connection here shares its grant: revoking it would end theirs too.
+      await dropKept(kept);
     }
     trace()('connection.linked', { email, services: granted, ...(refused.length ? { refused } : {}), ...oldToken });
     return { email, granted, refused };

@@ -8,7 +8,7 @@ import { pipeline } from 'node:stream/promises';
 import { semaphore } from '../../util/queues.js';
 import { z } from 'zod';
 import { CuratedSkillSelectionSchema } from '../../openclaw/skills.js';
-import type { Agent, AIProfile, GroupAccess, MemberRole, TemplateParam } from '../../domain/types.js';
+import type { Agent, AIProfile, GroupAccess, Host, MemberRole, TemplateParam } from '../../domain/types.js';
 import {
   buildRuntimeSpec,
   forgetEmbedDecision,
@@ -27,7 +27,7 @@ import { clearStaleRuntimePins } from '../sources/runtimePins.js';
 import { beginOperation, forgetFilesReplacing, handleFor, rethrowIfCrash } from '../lifecycle/operations.js';
 import { ENV_NAME_RE, envValueProblem, MAX_IMPORTED_ENV_VARS, reservedEnvProblem } from '../../domain/envPolicy.js';
 import { buildRecipeOn, derivedByTag, namedHere, recipeFor, recipeProblem, recordBuilds, sameImageHere, standInAmong, type ImageRecipe } from '../machines/imageRecipe.js';
-import { isDerived, parseBuildInputs, VERSION_TAG } from '../machines/buildInputs.js';
+import { fitWords, isDerived, parseBuildInputs, VERSION_TAG } from '../machines/buildInputs.js';
 import { DERIVED_TAG_PREFIX } from '../machines/derivedImage.js';
 import { defaultMemoryCap, formatMemoryCap, memberMemoryMax, parseMemoryCap } from '../../domain/memoryCap.js';
 import { formatSwapAllowance, parseSwapAllowance } from '../../domain/swap.js';
@@ -41,6 +41,8 @@ import { validGitMountName, normalizeGitUrl } from '../apps/gitSource.js';
 import { STATE_CACHE_EXCLUDES } from '../../providers/volumeCopy.js';
 import { manifestSchema as appManifestSchema } from '../apps/apps.js';
 import { TelegramUnavailableError } from '../../channels/telegramManual.js';
+import { ranOnAnEarlierSource } from '../usage/usageReadings.js';
+import { SOURCE_MODELS_MAX } from '../sources/aiSources.js';
 
 /**
  * Export/import: an agent as a single portable file, so "move it to another
@@ -111,15 +113,65 @@ const inflating = semaphore(WHOLE_INFLATES_AT_ONCE);
  * and `read` throw.
  */
 export async function inflateWhole<T>(data: Buffer, maxOutputLength: number, read: (text: string) => T): Promise<T> {
+  return inflatedWhole(data, maxOutputLength, (bytes) => read(bytes.toString('utf8')));
+}
+/** inflateWhole's bytes, before they are text, read (and awaited) while the slot is held. */
+async function inflatedWhole<T>(data: Buffer, maxOutputLength: number, read: (bytes: Buffer) => T | Promise<T>): Promise<T> {
   await inflating.acquire();
   try {
-    return read((await gunzipAsync(data, { maxOutputLength })).toString('utf8'));
+    return await read(await gunzipAsync(data, { maxOutputLength }));
   } finally {
     inflating.release();
   }
 }
 /** The state's bytes taken at a time: a multiple of 3, so its pieces' base64 is the whole's. */
 const STATE_PIECE_BYTES = 3 * 256 * 1024;
+/** The state's base64 read back at a time: a multiple of 4, so each piece decodes alone. */
+const STATE_READ_CHARS = 4 * 256 * 1024;
+/** How packExport's manifest ends: its last key, the state, then the object's close. */
+const STATE_KEY = Buffer.from(',"state":"', 'latin1');
+const STATE_TAIL = /^[A-Za-z0-9+/_-]*={0,2}$/;
+
+/**
+ * A full copy's file read back without holding the event loop for its
+ * state (HB-1168): the manifest's JSON is parsed with its state left out
+ * (`state` is ''), and the state's base64 decoded a piece at a time into
+ * `state`, other work running between the pieces. Parsed whole, a large
+ * agent's (up to 192 MiB of state) stopped every other request for a third
+ * of a second or more, and held its text three times over. A file not laid
+ * out as packExport writes it (its state not last, or anything but base64
+ * in it) is parsed whole, as before, and `state` is left out: the caller
+ * decodes `raw.state`. Throws as gunzip and JSON.parse throw.
+ */
+export async function unpackExport(data: Buffer): Promise<{ raw: unknown; state?: Buffer }> {
+  return inflatedWhole(data, MAX_STATE_BYTES, async (bytes) => {
+    const whole = () => ({ raw: JSON.parse(bytes.toString('utf8')) as unknown });
+    const end = bytes.length - 2;
+    const at = bytes.lastIndexOf(STATE_KEY);
+    if (at < 0 || bytes[end] !== 0x22 || bytes[end + 1] !== 0x7d) return whole();
+    let raw: unknown;
+    // Up to and with the comma: an ASCII byte, never inside a character.
+    try { raw = JSON.parse(`${bytes.toString('utf8', 0, at + 1)}"state":""}`); } catch { return whole(); }
+    const from = at + STATE_KEY.length;
+    // The key's own quote taken for the string's close (`"state":"}`): not JSON.
+    if (from > end) return whole();
+    const state = Buffer.allocUnsafe(Math.ceil((end - from) / 4) * 3);
+    let made = 0;
+    for (let i = from; i < end; i += STATE_READ_CHARS) {
+      const piece = bytes.toString('latin1', i, Math.min(end, i + STATE_READ_CHARS));
+      const last = i + STATE_READ_CHARS >= end;
+      // A whole piece decodes to all of its bytes only when every character
+      // is base64's (anything else is skipped, '=' ends it): then the JSON's
+      // string is plain, and decoded alone it is what the whole decodes to.
+      if (last && !STATE_TAIL.test(piece)) return whole();
+      const wrote = state.write(piece, made, 'base64');
+      if (!last && wrote !== piece.length / 4 * 3) return whole();
+      made += wrote;
+      if (!last) await new Promise<void>((r) => setImmediate(r));
+    }
+    return { raw, state: state.subarray(0, made) };
+  });
+}
 
 /**
  * The file: the manifest's JSON with `state` as the state's base64,
@@ -211,7 +263,15 @@ export interface ExportManifest {
      *  by (audit #006). Who may use those is judged where they are asked. */
     app?: { app: string; source: string; ref: string; sha: string; manifest: unknown; previousSha?: string; previousManifest?: unknown; installedAt: string; testOk?: boolean };
   };
-  ai: { vendor: string; model: string; models?: string[] };
+  /**
+   * `ranOn`: the source its container ran on there (its applied source), and
+   * `ranBefore`: an earlier one it ran on before that, when its record kept
+   * one (usageReadings' ranOnAnEarlierSource). Its transcripts come with it,
+   * so its lifetime totals here include that time: the import marks them so
+   * when it lands on another source (HB-1551). Ids of the other machine,
+   * never looked up here; absent in older files, which stay unmarked.
+   */
+  ai: { vendor: string; model: string; models?: string[]; ranOn?: string; ranBefore?: string };
   /** Absent when the agent is web-only (no Telegram bot). */
   channel?: { kind: 'telegram'; accountId: string; deepLink: string; botToken: string };
   memberships: Array<{
@@ -271,6 +331,9 @@ export class TemplateTaskRefused extends TransferError {
 /**
  * The file carries an image this machine lacks: someone has to decide whether
  * to build it here (only the machine's owner may) or use the default image.
+ * `has`: an image of that name is here, the file's own (`same`) or one not
+ * taken for it (`other`); the words said "which this machine does not have"
+ * of either (HB-1515).
  */
 export class ImageDecisionNeeded extends TransferError {
   constructor(
@@ -279,11 +342,14 @@ export class ImageDecisionNeeded extends TransferError {
     readonly problem: string | undefined,
     readonly mayBuild: boolean,
     where = 'this machine',
+    readonly has?: 'same' | 'other',
   ) {
     super(
-      `This agent is pinned to the image ${image}, which ${where} does not have. ` +
+      (has === 'same' ? `This agent is pinned to the image ${image}, which ${where} has. `
+        : has === 'other' ? `This agent is pinned to the image ${image}, and ${where} already has an image of that name. `
+          : `This agent is pinned to the image ${image}, which ${where} does not have. `) +
         (problem
-          ? `It can't be built here (${problem}), so it can only run on the default image.`
+          ? `It can't be ${has === 'same' ? 'pinned to it' : 'built'} here (${problem}), so it can only run on the default image.`
           : mayBuild
             ? 'Build it here from the recipe in the file, or run it on the default image.'
             : `Only the owner of ${where} can build images, so it can run on the default image, or ask them to import it.`),
@@ -376,7 +442,10 @@ const ManifestSchema = z.object({
   ai: z.object({
     vendor: z.string().max(32),
     model: z.string().max(256).catch(''),
-    models: z.array(z.string().max(256)).max(16).optional().catch(undefined),
+    models: z.array(z.string().max(256)).max(SOURCE_MODELS_MAX).optional().catch(undefined),
+    // Marks only (HB-1551): never looked up as a source here.
+    ranOn: z.string().min(1).max(128).optional().catch(undefined),
+    ranBefore: z.string().min(1).max(128).optional().catch(undefined),
   }),
   channel: z.object({
     kind: z.literal('telegram'),
@@ -423,6 +492,9 @@ const ManifestSchema = z.object({
           // Hatchabot drops both and builds on the base by name, as before.
           inputs: z.string().max(2000).optional(),
           layers: z.string().max(80).optional(),
+          // How its base runs (HB-1330): an older Hatchabot drops it, and a
+          // file without it is matched by its inputs and layers alone.
+          config: z.string().max(80).optional(),
         })
         .optional(),
       problem: z.string().max(300).optional(),
@@ -575,7 +647,7 @@ export async function exportAgent(
     );
     image = 'problem' in r
       ? { tag: agent.image, problem: r.problem }
-      : { tag: agent.image, recipe: { base: r.base, packages: r.packages, lines: r.lines, channels: r.channels, inputs: r.inputs, layers: r.layers } };
+      : { tag: agent.image, recipe: { base: r.base, packages: r.packages, lines: r.lines, channels: r.channels, inputs: r.inputs, layers: r.layers, config: r.config } };
   }
   const appRow = store.getAgentApp(agentId);
   const installedApp: ExportManifest['agent']['app'] = appRow && {
@@ -645,6 +717,9 @@ export async function exportAgent(
       vendor: profile?.vendor ?? 'anthropic',
       model: profile?.model ?? '',
       models: profile?.models,
+      // What its lifetime totals include (HB-1551).
+      ...(agent.appliedProfileId ? { ranOn: agent.appliedProfileId } : {}),
+      ...(ranOnAnEarlierSource(agent) ? { ranBefore: agent.appliedProfilePrevId } : {}),
     },
     channel: channel ? {
       kind: 'telegram',
@@ -730,6 +805,49 @@ export async function exportAgent(
   store.setAgentExportedAt(agentId, new Date().toISOString());
   log('agent.exported', { agentId, bytes: state.length, ...(dropped.length ? { dropped } : {}) });
   return { filename: `${agent.slug}.hatchabot`, data, dropped };
+}
+
+/**
+ * Downloads a restart cut off (HB-1479): each agent a download stopped for
+ * its copy (`download-stop`, kept from before the stop) is started again, as
+ * Start starts it, unless its file was made after the hold (an exported
+ * agent stays stopped, as after any download) or it is not stopped any more
+ * (started, deleted, rebuilt since). Its owner's Start or Stop since, or a
+ * budget's pause, let the hold go (settleStartsOwedOn). One whose rebuild is
+ * under way or queued is left to it: the rebuild starts it. All at once:
+ * one on a machine that does not answer holds up none of the others, and
+ * none waits behind another's start while its owner starts and stops it.
+ * Still open: an owner's Start then Stop during `startStopped`'s own checks,
+ * before it takes the agent, is followed by this start. Let go once tried:
+ * a start that fails is said on its timeline. Never rejects.
+ */
+export async function startCutOffDownloads(deps: {
+  store: ProvisionDeps['store'];
+  startStopped?: (agentId: string, opts: { ownerAsked: boolean }) => Promise<{ ok: boolean; rebuilding?: boolean; error?: string }>;
+  /** A rebuild of it under way or queued (the rebuild queue's isInFlight). */
+  isInFlight?: (agentId: string) => boolean;
+  logFor?: (agentId: string) => (event: string, detail: Record<string, unknown>) => void;
+}): Promise<void> {
+  const { store } = deps;
+  let kept: Array<{ agentId: string; value: string; at: string }>;
+  try { kept = store.agentHolds('download-stop'); } catch { return; }
+  await Promise.allSettled(kept.map(async (k) => {
+    try {
+      const a = store.getAgent(k.agentId);
+      const owed = a?.state === 'STOPPED' && !(a.exportedAt && a.exportedAt >= k.at);
+      if (owed && deps.isInFlight?.(a.id)) {
+        deps.logFor?.(a.id)('export.cut_off', { started: false, rebuilding: true });
+      } else if (owed) {
+        const r = deps.startStopped
+          ? await deps.startStopped(a.id, { ownerAsked: false }).catch((err: unknown) => { rethrowIfCrash(err); return { ok: false, rebuilding: false, error: String((err as Error)?.message ?? err) }; })
+          : { ok: false, rebuilding: false, error: 'nothing here can start it' };
+        deps.logFor?.(a.id)('export.cut_off', r.ok
+          ? { started: true, ...(r.rebuilding ? { rebuilding: true } : {}) }
+          : { started: false, error: String(r.error ?? 'no reason given').slice(0, 200) });
+      }
+      store.clearAgentHold(k.agentId, 'download-stop', k.value);
+    } catch (err) { rethrowIfCrash(err); }
+  }));
 }
 
 export interface ImportOptions {
@@ -831,6 +949,12 @@ async function settleImage(
   // an import by anyone else pinned whatever tag the file named, a candidate
   // or another owner's derived image included (night review, 2026-09-27).
   if (here && opts.mayBuild) return { pin: image.tag };
+  // Another fleet's `:latest`, renamed into ours, is that fleet's default: a
+  // member's import runs on this machine's default, unpinned, with no
+  // question. They were asked about an image of the default's name that is
+  // not the default here (one pinned by HATCHABOT_IMAGE), or told only the
+  // owner can build it (HB-1332). The owner is still asked.
+  if (!opts.mayBuild && image.tag !== filed.tag && image.tag === `${repo}:latest`) return {};
   // The machine's own default image under another name is no choice at all:
   // pinned for anyone (regression review, 2026-09-28).
   if (here) {
@@ -839,7 +963,7 @@ async function settleImage(
   }
   if (opts.image === 'drop') return {};
   if (here) {
-    throw new ImageDecisionNeeded(image.tag, undefined, "only this machine's owner can pin an agent to a particular image", false, where);
+    throw new ImageDecisionNeeded(image.tag, undefined, "only this machine's owner can pin an agent to a particular image", false, where, 'same');
   }
   const recipe: ImageRecipe | undefined = image.recipe ? { tag: image.tag, ...image.recipe } : undefined;
   let problem = other ?? (recipe ? recipeProblem(recipe, repo) : (image.problem ?? 'the file has no recipe for it'));
@@ -851,15 +975,25 @@ async function settleImage(
   if (existing) {
     const same = recordBuilds(existing, recipe!, await provider.listImageTags().catch(() => undefined));
     if (same === undefined) problem = "this machine's images could not be read just now — try again";
-    else if (!same) problem = `a different image here already has the name ${image.tag}`;
+    // With no image of that name here, it is the record that has the name:
+    // "which this machine does not have. It can't be built here (a different
+    // image here already has the name …)" said both (HB-1515 review).
+    else if (!same) problem = info ? `a different image here already has the name ${image.tag}` : `the name ${image.tag} is kept here for a different derived image, in Settings → Advanced → Runtime images`;
   }
   if (opts.image !== 'build' || problem || !opts.mayBuild) {
-    throw new ImageDecisionNeeded(image.tag, recipe, problem ?? undefined, !!opts.mayBuild, where);
+    throw new ImageDecisionNeeded(image.tag, recipe, problem ?? undefined, !!opts.mayBuild, where, info ? 'other' : undefined);
   }
   return { pin: image.tag, build: recipe! };
 }
 
-async function buildPinned(deps: ProvisionDeps, recipe: ImageRecipe, ownerId: string, checkedOn?: string): Promise<void> {
+/**
+ * How much of an import's cause its rolled-back reason keeps: with its own
+ * words, under the operation's 600-character outcome (operations.ts). A
+ * build's refusal fits its advice in it (buildPinned, HB-1333).
+ */
+const ROLLBACK_CAUSE_ROOM = 500;
+
+async function buildPinned(deps: ProvisionDeps, recipe: ImageRecipe, ownerId: string, checkedOn: { expect?: string | null; named?: string } | undefined, host: Pick<Host, 'kind' | 'name'>): Promise<void> {
   const { store, provider } = deps;
   // The tag after the repository, which may name a registry with a port (HB-1357 review).
   const name = recipe.tag.slice(imageRepository(recipe.tag).length + 1);
@@ -889,16 +1023,26 @@ async function buildPinned(deps: ProvisionDeps, recipe: ImageRecipe, ownerId: st
   // The provider can throw before it has a build result (for example, a
   // full disk while creating the build context). Settle the image record
   // through the same cleanup as a Docker build that returned a failure.
-  const got = await buildRecipeOn(provider, recipe, { where: 'this machine', prefer: existing?.base, expect: checkedOn }).catch((err: unknown) => {
+  // What it says when it cannot build is kept whole in the import's rolled-back reason (HB-1333).
+  // Built where the agent goes: a runner, for an import onto one (its
+  // provider), was told of "this machine" and to build it here (HB-1515
+  // re-review).
+  const here = host.kind === 'local';
+  const where = here ? 'this machine' : host.name;
+  const failed = `the image ${recipe.tag} could not be built ${here ? 'here' : `on ${where}`}: `;
+  const room = ROLLBACK_CAUSE_ROOM - failed.length;
+  // One it throws is cut at a word in the room too, not mid-word by the reason's own cut (HB-1333 review).
+  // Stamped with the base its record here is given (got.base, below), as a Rebuild of it stamps it (HB-1516).
+  const got = await buildRecipeOn(provider, recipe, { where, here, prefer: existing?.base, ...checkedOn, room, asRecord: true }).catch((err: unknown) => {
     rethrowIfCrash(err);
-    return { ok: false as const, problem: String(err instanceof Error ? err.message : err).slice(0, 800) };
+    return { ok: false as const, problem: fitWords(String(err instanceof Error ? err.message : err), room) };
   });
   if (!got.ok) {
     // The import rolls back completely; a record for an image that never
     // existed would not (found by the 26th audit).
     if (newRecord) store.deleteDerivedImage(derivedName!);
     else if (derivedName) store.setDerivedImageStatus(derivedName, 'FAILED', got.problem);
-    throw new Error(`the image ${recipe.tag} could not be built here: ${got.problem}`);
+    throw new Error(`${failed}${got.problem}`);
   }
   if (derivedName) {
     // What it was built on here, and the base's packages laid on that before
@@ -949,10 +1093,11 @@ async function importAgentInner(
   const log = deps.log ?? (() => {});
 
   let raw: unknown;
+  let unpacked: Buffer | undefined;
   try {
     // Inflated on zlib's threads, not the event loop's (HB-0925), a few at a
-    // time (HB-1162). Its JSON is still parsed here.
-    raw = await inflateWhole(data, MAX_STATE_BYTES, (json) => JSON.parse(json) as unknown);
+    // time (HB-1162), and its state decoded a piece at a time (HB-1168).
+    ({ raw, state: unpacked } = await unpackExport(data));
   } catch {
     throw new TransferError("That file isn't a Hatchabot export (or is too large).");
   }
@@ -978,7 +1123,7 @@ async function importAgentInner(
   // the ~190 MB gzipped ceiling before it can fill the host disk. (A tighter
   // extracted-size quota is tracked as a follow-up; decompressing here would
   // either spike control-plane RAM or reject legit large agents.)
-  const stateBuf = Buffer.from(manifest.state, 'base64');
+  const stateBuf = unpacked ?? Buffer.from(manifest.state, 'base64');
   if (stateBuf.length > MAX_RAW_STATE_BYTES) {
     throw new TransferError(
       `This archive's state is ~${(stateBuf.length / 1e6).toFixed(0)} MB — too large to import ` +
@@ -1020,7 +1165,7 @@ async function importAgentInner(
   // both directions the wrong way round, refusing 2026.7 → 2026.9 (the
   // normal upgrade) and letting 2026.9 → 2026.7 through (issue #20, 2026-10-09).
   // The image the OpenClaw check judged, which the build must pick too (HB-0986 review).
-  let checkedOn: string | undefined;
+  let checkedOn: { expect?: string | null; named?: string } | undefined;
   if (manifest.openclawVersion) {
     // The image it will run: its pin, or — when one is to be built — the
     // image here it is built on, as buildRecipeOn picks it (HB-0986 review);
@@ -1031,12 +1176,18 @@ async function importAgentInner(
     const tags = image.build ? await deps.provider.listImageTags().catch(() => undefined) : [];
     if (!tags) throw new TransferError("This machine's images could not be read just now. Try the import again.");
     const standIn = image.build ? standInAmong(tags, image.build, derivedByTag((n) => store.getDerivedImage(n))(image.build.tag)?.base) : undefined;
-    checkedOn = standIn?.imageId;
+    const byName = standIn?.openclawVersion || inputs?.ok ? undefined
+      : await deps.provider.currentImageInfo(image.pin && !image.build ? image.pin : image.build?.base ?? image.pin).catch(() => ({} as { openclawVersion?: string; imageId?: string }));
     const here = standIn?.openclawVersion
       ? { openclawVersion: standIn.openclawVersion }
       : inputs?.ok
         ? { openclawVersion: inputs.inputs.openclaw }
-        : await deps.provider.currentImageInfo(image.pin && !image.build ? image.pin : image.build?.base ?? image.pin).catch(() => ({} as { openclawVersion?: string }));
+        : byName!;
+    // No stand-in here, judged by the OpenClaw its inputs name: the build may
+    // take only the published image of it, not one that came since (HB-1320).
+    // Judged by its base's name: the image of that name the check read (HB-1319).
+    const named = image.build && !standIn && byName?.imageId && tags.some((t) => t.tag === image.build!.base) ? byName.imageId : undefined;
+    checkedOn = { expect: standIn?.imageId ?? (image.build && inputs?.ok ? null : undefined), ...(named ? { named } : {}) };
     if (moveCrossesDown(manifest.openclawVersion, here.openclawVersion)) {
       throw new TransferError(`This copy was saved by OpenClaw ${manifest.openclawVersion}; this machine would run it on ${here.openclawVersion}, which cannot read it. Update this machine's image first.`);
     }
@@ -1110,6 +1261,12 @@ async function importAgentInner(
     // row nor a busy flag with no operation capable of clearing it.
     op = store.transact(() => {
       store.insertAgentOnSource(agent);
+      // Its transcripts came with it: its lifetime totals include its time on
+      // the source it ran on there, or an earlier one, unless that is the one
+      // it lands on (a download restored where it was made). Marked as one
+      // that ran on an earlier source here is (HB-1551).
+      const ranElsewhere = [manifest.ai.ranOn, manifest.ai.ranBefore].find((id) => !!id && id !== profile.id);
+      if (ranElsewhere) store.markRanOnAnotherSource(agent.id, ranElsewhere);
       if (manifest.agent.curatedSkills !== undefined) store.setAgentCuratedSkills(agent.id, manifest.agent.curatedSkills);
       if (image.pin) store.setAgentImage(agent.id, image.pin);
       // Before provisioning reads them: the container is made with these limits.
@@ -1265,7 +1422,7 @@ async function importAgentInner(
     // with the real state; a second provision re-applies THIS installation's
     // config (model, auth mode) over the imported openclaw.json — the seed
     // never touches existing workspace files, so memory survives.
-    if (image.build) await buildPinned(deps, image.build, opts.ownerId, checkedOn);
+    if (image.build) await buildPinned(deps, image.build, opts.ownerId, checkedOn, host);
     const spec = await buildRuntimeSpec(deps, agent.id);
     try {
       ({ runtimeRef } = await provider.provision(spec));
@@ -1340,12 +1497,12 @@ async function importAgentInner(
       throw new ImportCleanupPending(message);
     }
     log('import.rolled_back', { agentId: agent.id, error: String(err) });
-    // 500: room for a build's refusal and how to fix it (HB-0986), under the
+    // Room for a build's refusal and how to fix it (HB-0986), under the
     // operation's 600-character outcome.
     const e = new TransferError(
       `Import failed and was rolled back — fix the cause and import again. (${String(
         err instanceof Error ? err.message : err,
-      ).slice(0, 500)})`,
+      ).slice(0, ROLLBACK_CAUSE_ROOM)})`,
     );
     op.rolledBack(e.userMessage);
     throw e;

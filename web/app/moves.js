@@ -93,6 +93,20 @@ function channelsLostOnExport(id) {
   return kinds.length ? `\n\n${kinds.join(' and ')} ${kinds.length > 1 ? 'do' : 'does'} not travel with it: the app belongs to your ${kinds.join('/')} account. Set it up again on the other side (Messaging → Set up).` : '';
 }
 
+/**
+ * A budget's switch to a cheaper model does not travel (HB-1299): the copy carries its owner's model, and no budget
+ * holds it there. Said in a move's and a download's confirmation, as a paragraph; '' when no switch has it.
+ */
+function budgetSwitchLostOnExport(id) {
+  const a = v2Find ? v2Find(id) : (agents || []).find(x => x.id === id);
+  const sw = a?.budgetSwitch;
+  if (!sw) return '';
+  const bare = (m) => String(m).replace(/^.*\//, '');
+  // The copy carries its owner's model, which the other machine runs only if its source there offers it (HB-1299 review).
+  const runs = sw.own ? `your own model (${bare(sw.own)}) if the AI source there offers it, else its default,` : 'the default model of its AI source there';
+  return `\n\n${sw.scope === 'machine' ? "This Hatchabot's budget" : 'Its budget'} had switched it to ${bare(sw.to)}; on the other machine it runs on ${runs} until you set a budget on that machine.`;
+}
+
 async function rehostAgent(id, name) {
   let peers;
   try { peers = await api('/v1/peers'); } catch (e) { return toast(e.message); }
@@ -102,7 +116,7 @@ async function rehostAgent(id, name) {
   if (pick === null) return;
   const peer = peers[Number(pick) - 1];
   if (!peer) return toast('No such server');
-  if (!confirm(`Move "${name}" to the cluster at ${peer.name}?${channelsLostOnExport(id)}\n\nIt stops here, transfers with its memory and members, and starts there — managed from that server's dashboard from now on. This copy stays STOPPED (not deleted) — never start both, they would fight over the same Telegram bot.`)) return;
+  if (!confirm(`Move "${name}" to the cluster at ${peer.name}?${channelsLostOnExport(id)}${budgetSwitchLostOnExport(id)}\n\nIt stops here, transfers with its memory and members, and starts there — managed from that server's dashboard from now on. This copy stays STOPPED (not deleted) — never start both, they would fight over the same Telegram bot.`)) return;
   // Waits only for the other server's yes (its preflight); the move then goes on on the server (202).
   toast(`Asking ${peer.name} whether it can take ${name}…`, 60000, 'progress');
   const body = { peerId: peer.id };

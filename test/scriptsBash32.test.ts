@@ -32,6 +32,21 @@ describe('shell scripts run on a Mac (bash 3.2)', () => {
     expect(bad).toEqual([]);
   });
 
+  // bash 3.2 finds the end of one by its parentheses and quotes, comments
+  // not passed over: a quote or a parenthesis in a comment inside one can
+  // end it early, or never (review of HB-1529).
+  it('no comment inside a $( … ), <( … ) or >( … ) has a quote or a parenthesis in it', () => {
+    const bad: string[] = [];
+    for (const f of files) for (const line of commentInSubstitution(readFileSync(f, 'utf8'))) bad.push(`${f}:${line}`);
+    expect(bad).toEqual([]);
+    for (const [sample, line] of [
+      ["x=$(\n  # it's here\n  echo a\n)\n", 2],
+      ['while read -r l; do :; done < <(\n  echo a  # (a note)\n)\n', 2],
+      ['y="$(if true; then\n  # "quoted"\n  echo b\nfi)"\n', 2],
+    ] as const) expect(commentInSubstitution(sample), sample).toEqual([line]);
+    for (const ok of ["# it's (fine) here\nx=$(\n  # plain words\n  echo a\n)\n", "( # a subshell's (own) note\n  echo a\n)\n"]) expect(commentInSubstitution(ok), ok).toEqual([]);
+  });
+
   it('the check finds a case run inside one, however it is written, and nothing else', () => {
     const cut = 'x="$(printf a | while read -r f; do\n  case "$f" in *-wal|*-shm) continue ;; esac\n  echo "$f"\ndone)"\necho "$x"\n';
     for (const [sample, line] of [
@@ -65,6 +80,13 @@ describe('shell scripts run on a Mac (bash 3.2)', () => {
   });
 });
 
+/** The line of each comment inside a $( … ), <( … ) or >( … ) with a quote, a backtick or a parenthesis in it. */
+function commentInSubstitution(src: string): number[] {
+  const notes: number[] = [];
+  caseInSubstitution(src, false, 0, notes);
+  return notes;
+}
+
 /**
  * bash before 4.0 finds where a $( … ) ends by counting parentheses (bash's
  * CHANGES, bash-4.0-alpha, item uuu), so a case pattern's ) can end one early.
@@ -82,7 +104,7 @@ describe('shell scripts run on a Mac (bash 3.2)', () => {
  * for the $( … ) in it. `body` reads the text as such a body; `base` is the
  * line before its first.
  */
-function caseInSubstitution(src: string, body = false, base = 0): number[] {
+function caseInSubstitution(src: string, body = false, base = 0, notes: number[] = []): number[] {
   const bad: number[] = [];
   const at = (j: number) => src.charAt(j);
   const lineOf = (j: number) => base + src.slice(0, j).split('\n').length;
@@ -103,7 +125,7 @@ function caseInSubstitution(src: string, body = false, base = 0): number[] {
         i = nl < 0 ? src.length : nl + 1;
         if (last) break;
       }
-      if (d.expand) bad.push(...caseInSubstitution(src.slice(start, end), true, lineOf(start) - 1));
+      if (d.expand) bad.push(...caseInSubstitution(src.slice(start, end), true, lineOf(start) - 1, notes));
     }
   }
   /** At <<: the word that ends the heredoc, and whether its body is expanded (no quote in the word). */
@@ -186,7 +208,11 @@ function caseInSubstitution(src: string, body = false, base = 0): number[] {
       if (c === '\n') { i++; cmd = true; target = false; if (pending.length) bodies(); continue; }
       if (src.startsWith('\\\n', i)) { i += 2; continue; }
       if (c === ' ' || c === '\t' || c === '\r') { i++; continue; }
-      if (c === '#') { const k = src.indexOf('\n', i); i = k < 0 ? src.length : k; continue; }
+      if (c === '#') {
+        const k = src.indexOf('\n', i), e = k < 0 ? src.length : k;
+        if (sub && /['"`()]/.test(src.slice(i, e))) notes.push(lineOf(i));
+        i = e; continue;
+      }
       if (c === ')') { i++; if (sub && depth === 0) return; depth--; cmd = false; continue; }
       if (c === '(') {
         if (cmd && at(i + 1) === '(') { i += 2; arith(2); cmd = false; continue; } // (( … ))

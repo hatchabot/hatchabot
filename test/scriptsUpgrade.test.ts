@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { hangingStep, scriptEnv } from './helpers/scriptEnv.js';
+import { basename, dirname, join } from 'node:path';
+import { hangingStep, scriptEnv, systemPathWithout } from './helpers/scriptEnv.js';
 
 // Every test here runs real shell scripts (git, bash, a fake gh) in a sandbox. On the
 // self-hosted runner CI shares the machine with other work, and vitest's 5 s was not
@@ -230,10 +230,66 @@ exit 1
     const r = run(w, { HATCHABOT_DEPS_WAIT_SECS: '3', HATCHABOT_INSTALL_CMD: 'true', HATCHABOT_RESTART_CMD: join(w.bin, 'restart-held'), PATH: `${fast}:${w.bin}:/usr/bin:/bin` }, ['stable']);
     expect(r.status, r.stdout + r.stderr).toBe(1);
     expect(r.stdout).toContain("for half an hour, so v1.0.0's were left in node_modules.prev, not put back.");
-    expect(r.stdout).toContain('Then run hatchabot upgrade: it puts v1.0.0 back first, from its record.');
+    expect(r.stdout).toContain('So the rollback did not finish either: v1.0.0 is not back as it was.\nThen run hatchabot upgrade: it puts v1.0.0 back first, from its record.'); // HB-1383
     expect(readdirSync(state).filter((n) => n.endsWith('.from'))).toHaveLength(1); // the record stays
     expect(readdirSync(join(w.install, 'node_modules.prev'))).toEqual(['marker']);
   }, 200_000);
+});
+
+describe('the dependencies\' lock is the folder\'s, however it is reached, and one left with no holder is not waited on for long (HB-1377)', () => {
+  const fastSleep = (w: World) => { const fast = join(w.root, 'fast'); mkdirSync(fast); writeFileSync(join(fast, 'sleep'), '#!/bin/bash\n[ "$1" = 1 ] && exit 0\nexec /bin/sleep "$@"\n', { mode: 0o755 }); return fast; };
+  const lockFor = (w: World, dir: string) => {
+    const sum = execFileSync('bash', ['-c', 'printf %s "$1" | cksum | cut -d" " -f1', '_', realpathSync(dir)], { encoding: 'utf8' }).trim();
+    return join(w.home, '.local', 'state', 'hatchabot', `deps-${sum}.lock.d`);
+  };
+  it('an npm holding it for the folder by its own path: an upgrade run through a link to the folder waits for it too', () => {
+    const w = world();
+    const fast = fastSleep(w);
+    const start = spawnSync('ps', ['-o', 'lstart=', '-p', String(process.pid)], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', LC_ALL: 'C', TZ: 'UTC0' } }).stdout.trim().replace(/\s+/g, ' ');
+    expect(start).not.toBe('');
+    const lock = lockFor(w, w.install);
+    mkdirSync(lock, { recursive: true }); writeFileSync(join(lock, 'owner'), `${process.pid} ${start}\n`);
+    const link = join(w.root, 'linked'); symlinkSync(w.install, link);
+    const r = spawnSync('bash', [join(link, 'scripts', 'upgrade.sh'), 'stable'], {
+      encoding: 'utf8', env: { ...w.env, PATH: `${fast}:${w.bin}:/usr/bin:/bin`, HATCHABOT_RESTART_CMD: join(w.bin, 'fake-restart'), HATCHABOT_UPGRADE_IMAGE: '0', HATCHABOT_INSTALL_CMD: 'true', HATCHABOT_DEPS_WAIT_SECS: '3' },
+    });
+    expect(r.stdout).toContain('Waiting for an install of the dependencies');
+    expect(r.stdout).toContain('so nothing was moved');
+    expect(r.status, r.stdout + r.stderr).toBe(3);
+    expect(existsSync(join(w.install, 'node_modules', 'marker'))).toBe(true);
+    expect(w.git(w.install, 'describe', '--tags', '--exact-match')).toBe('v1.0.0');
+  });
+  it('through a link, the lock a release before 2.193.0 keys on the path as given is waited on too (review of HB-1377)', () => {
+    const w = world();
+    const fast = fastSleep(w);
+    const link = join(w.root, 'linked'); symlinkSync(w.install, link);
+    const sum = execFileSync('bash', ['-c', 'printf %s "$1" | cksum | cut -d" " -f1', '_', link], { encoding: 'utf8' }).trim();
+    const given = join(w.home, '.local', 'state', 'hatchabot', `deps-${sum}.lock.d`);
+    expect(given).not.toBe(lockFor(w, w.install));
+    const start = spawnSync('ps', ['-o', 'lstart=', '-p', String(process.pid)], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', LC_ALL: 'C', TZ: 'UTC0' } }).stdout.trim().replace(/\s+/g, ' ');
+    expect(start).not.toBe('');
+    mkdirSync(given, { recursive: true }); writeFileSync(join(given, 'owner'), `${process.pid} ${start}\n`);
+    const r = spawnSync('bash', [join(link, 'scripts', 'upgrade.sh'), 'stable'], {
+      encoding: 'utf8', env: { ...w.env, PATH: `${fast}:${w.bin}:/usr/bin:/bin`, HATCHABOT_RESTART_CMD: join(w.bin, 'fake-restart'), HATCHABOT_UPGRADE_IMAGE: '0', HATCHABOT_INSTALL_CMD: 'true', HATCHABOT_DEPS_WAIT_SECS: '3' },
+    });
+    expect(r.stdout).toContain('Waiting for an install of the dependencies');
+    expect(r.stdout).toContain(`The install that holds it is by a release before 2.193.0, under the lock it keys on ${link} as given: ${given}.`);
+    expect(r.status, r.stdout + r.stderr).toBe(3);
+    expect(existsSync(join(w.install, 'node_modules', 'marker'))).toBe(true);
+    expect(w.git(w.install, 'describe', '--tags', '--exact-match')).toBe('v1.0.0');
+    expect(existsSync(lockFor(w, w.install))).toBe(false); // the one it held while it waited, let go
+  });
+  it('one with no holder written two minutes after it was made: taken over, not waited on for ten', () => {
+    const w = world();
+    const fast = fastSleep(w);
+    const lock = lockFor(w, w.install);
+    mkdirSync(lock, { recursive: true });
+    const old = new Date(Date.now() - 120_000); utimesSync(lock, old, old);
+    const r = run(w, { HATCHABOT_INSTALL_CMD: 'true', HATCHABOT_DEPS_WAIT_SECS: '3', PATH: `${fast}:${w.bin}:/usr/bin:/bin` }, ['stable']);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).not.toContain('Waiting for an install of the dependencies');
+    expect(w.git(w.install, 'describe', '--tags', '--exact-match')).toBe('v1.1.0');
+  });
 });
 
 describe('scripts/upgrade.sh cut off part-way through the install (HB-0043)', () => {
@@ -498,6 +554,31 @@ exec ${JSON.stringify(REAL_GIT)} "$@"
     expect(r.stdout).toMatch(/index\.lock is in the way, and nothing shows it is that upgrade's own/);
     expect(existsSync(k.indexLock)).toBe(true);
     expect(existsSync(k.record)).toBe(true);
+  });
+
+  it('a repair that stops at such a lock, before the release is touched, exits 7 to a timer that says it knows 7, and 3 to any other (HB-1431)', () => {
+    const w = world();
+    const record = lockOf(w).replace(/\.lock\.d$/, '.from');
+    mkdirSync(dirname(record), { recursive: true });
+    w.git(w.install, 'checkout', '-q', 'v1.1.0');
+    writeFileSync(record, 'from v1.0.0\nto v1.1.0\n');
+    const lock = join(w.install, '.git', 'index.lock');
+    writeFileSync(lock, '');
+    const older = run(w, { HATCHABOT_INSTALL_CMD: 'true' }, ['stable']);
+    expect(older.status, older.stdout + older.stderr).toBe(3);
+    expect(older.stdout).toMatch(/index\.lock is in the way, and nothing shows it is that upgrade's own/);
+    for (const extra of [{ HATCHABOT_UPGRADE_REPAIR_ONLY: '1' }, {}] as Record<string, string>[]) {
+      const r = run(w, { HATCHABOT_INSTALL_CMD: 'true', HATCHABOT_UPGRADE_BY_TIMER: '1', HATCHABOT_FOLLOW_KNOWS_7: '1', ...extra }, ['stable']);
+      expect(r.status, r.stdout + r.stderr).toBe(7);
+    }
+    expect(existsSync(lock)).toBe(true);
+    expect(readFileSync(record, 'utf8')).toBe('from v1.0.0\nto v1.1.0\n');
+    expect(restarted(w)).toBe(0);
+    // A failure past the repair is 3 still, to a caller that knows 7 too.
+    rmSync(lock);
+    const install = run(w, { HATCHABOT_INSTALL_CMD: 'false', HATCHABOT_UPGRADE_BY_TIMER: '1', HATCHABOT_FOLLOW_KNOWS_7: '1' }, ['stable']);
+    expect(install.status, install.stdout + install.stderr).toBe(3);
+    expect(w.git(w.install, 'describe', '--tags', '--exact-match')).toBe('v1.0.0');
   });
 
   it('a lock with no record is another git\'s: refused with nothing moved', () => {
@@ -1161,6 +1242,12 @@ describe('a version named by hand on a clone is a pin only once it can be (HB-04
       encoding: 'utf8', env: { ...w.env, HATCHABOT_RESTART_CMD: join(w.bin, 'fake-restart'), HATCHABOT_UPGRADE_IMAGE: '0', HATCHABOT_INSTALL_CMD: 'true' },
     });
     const at = (w: World) => w.git(w.install, 'describe', '--tags', '--exact-match');
+    /** The repair's own clock (HB-1431): a repair that failed waits; its wait made over, the next tick repairs again. */
+    const waitOver = (w: World) => {
+      const f = join(dirname(lockOf(w)), `follow-channel-tries-${basename(lockOf(w)).replace(/^upgrade-|\.lock\.d$/g, '')}.repair`);
+      expect(existsSync(f), f).toBe(true);
+      writeFileSync(f, readFileSync(f, 'utf8').replace(/ \d+\n$/, ' 0\n'));
+    };
     /** A lock nothing shows is the upgrade's own: older than the record, so every repair stops on it. */
     const stuckLock = (w: World) => {
       const f = join(w.install, '.git', 'index.lock');
@@ -1183,6 +1270,7 @@ describe('a version named by hand on a clone is a pin only once it can be (HB-04
       killedLater(w);
       const lock = stuckLock(w);
       for (let i = 0; i < 3; i++) {
+        if (i) waitOver(w);
         const r = tick(w);
         expect(r.status, r.stdout + r.stderr).toBe(1);
         expect(channel(w), `tick ${i}: ${r.stdout}`).toBe('v3.1.0');
@@ -1191,6 +1279,7 @@ describe('a version named by hand on a clone is a pin only once it can be (HB-04
       }
       // The lock cleared by a person: repaired, on the pinned release and still pinned, the timer quiet.
       rmSync(lock);
+      waitOver(w);
       const fixed = tick(w);
       expect(fixed.status, fixed.stdout + fixed.stderr).toBe(0);
       expect(at(w)).toBe('v3.1.0');
@@ -1209,6 +1298,7 @@ describe('a version named by hand on a clone is a pin only once it can be (HB-04
       expect(existsSync(state(w, '.from'))).toBe(true);
       expect(existsSync(state(w, '.pin'))).toBe(false);
       for (let i = 0; i < 2; i++) {
+        if (i) waitOver(w);
         const t = tick(w);
         expect(t.status, t.stdout + t.stderr).toBe(1);
         expect(channel(w), `tick ${i}: ${t.stdout}`).toBe('v3.1.0');
@@ -1278,6 +1368,46 @@ describe('the runtime image step uses the daemon .env names (HB-0431)', () => {
       expect(log(w), String(mac)).toEqual(mac ? ['image default', 'fetch default'] : ['image unix:///tmp/synthetic-tenant.sock', 'fetch unix:///tmp/synthetic-tenant.sock']);
     }
   });
+  it('this shell\'s own Docker settings (a context, TLS, a host, a config folder) are not the service\'s: dropped, and the .env\'s used (HB-1354)', () => {
+    const shell = { DOCKER_CONTEXT: 'made-up-remote', DOCKER_TLS_VERIFY: '1', DOCKER_CERT_PATH: '/made-up/shell-certs', DOCKER_HOST: 'tcp://192.0.2.9:2376', DOCKER_CONFIG: '/made-up/docker-config' };
+    const says = 'echo "$1 host=${DOCKER_HOST:-default} context=${DOCKER_CONTEXT:-none} tls=${DOCKER_TLS_VERIFY:-none} certs=${DOCKER_CERT_PATH:-none} config=${DOCKER_CONFIG:-none}"';
+    for (const [dotenv, want] of [
+      ['HATCHABOT_SECRET_KEY=made-up\n', 'host=default context=none tls=none certs=none config=none'],
+      ['DOCKER_HOST=tcp://192.0.2.20:2376\nDOCKER_TLS_VERIFY=1\nDOCKER_CERT_PATH=/made-up/service-certs\nDOCKER_CONFIG=/made-up/service-config\n', 'host=tcp://192.0.2.20:2376 context=none tls=1 certs=/made-up/service-certs config=/made-up/service-config'],
+    ] as const) {
+      const w = imageWorld();
+      writeFileSync(join(w.src, 'scripts', 'build-runtime-image.sh'), `#!/usr/bin/env bash\nset -- fetch\n${says} >> ${JSON.stringify(join(w.root, 'docker.log'))}\n`, { mode: 0o755 });
+      w.git(w.src, 'add', '-A'); w.git(w.src, 'commit', '-q', '-m', 'v4'); w.git(w.src, 'tag', '-f', 'v1.2.0');
+      w.git(w.src, 'push', '-q', '-f', w.origin, 'main', '--tags');
+      writeFileSync(join(w.bin, 'docker'), `#!/usr/bin/env bash\n${says} >> ${JSON.stringify(join(w.root, 'docker.log'))}\ncase "$1" in\n  image) echo 2026.1.1 ;;\nesac\n`, { mode: 0o755 });
+      writeFileSync(join(w.install, '.git', 'info', 'exclude'), '.env\n');
+      writeFileSync(join(w.install, '.env'), dotenv);
+      const r = up(w, shell);
+      expect(r.status, r.stdout + r.stderr).toBe(0);
+      expect(log(w), dotenv).toEqual([`image ${want}`, `fetch ${want}`]);
+    }
+  });
+  it('a .env that cannot be read as the service reads it (no node, on Linux, and a line bash cannot read as systemd does): said, not passed over, and this shell\'s daemon used (HB-1381)', () => {
+    const w = imageWorld();
+    writeFileSync(join(w.install, '.git', 'info', 'exclude'), '.env\n');
+    writeFileSync(join(w.install, '.env'), 'DOCKER_HOST=unix:///tmp/synthetic-tenant.sock\r\n');
+    const r = up(w, { PATH: `${w.bin}:${systemPathWithout(join(w.root, 'system'), ['node', 'nodejs'])}` });
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).toContain(`⚠ Could not read ${w.install}/.env as the service reads it (on Linux, with no node on this PATH, only plain NAME=value lines can be), so the runtime image is checked with this shell's DOCKER_HOST, DOCKER_CONTEXT, DOCKER_TLS_VERIFY, DOCKER_CERT_PATH, DOCKER_CONFIG, HATCHABOT_IMAGE and HATCHABOT_IMAGE_REGISTRY, which may not be the service's.`);
+    expect(log(w)).toEqual(['image default', 'fetch default']);
+    // With no node, a plain line is read all the same, and nothing said (review of HB-1529).
+    const plain = imageWorld();
+    writeFileSync(join(plain.install, '.git', 'info', 'exclude'), '.env\n');
+    writeFileSync(join(plain.install, '.env'), 'DOCKER_HOST=unix:///tmp/synthetic-tenant.sock\n');
+    const p = up(plain, { PATH: `${plain.bin}:${systemPathWithout(join(plain.root, 'system'), ['node', 'nodejs'])}` });
+    expect(p.status, p.stdout + p.stderr).toBe(0);
+    expect(p.stdout).not.toContain('Could not read');
+    // Read through: nothing said.
+    const read = imageWorld();
+    writeFileSync(join(read.install, '.git', 'info', 'exclude'), '.env\n');
+    writeFileSync(join(read.install, '.env'), 'DOCKER_HOST=unix:///tmp/synthetic-tenant.sock\n');
+    expect(up(read).stdout).not.toContain('Could not read');
+  });
 });
 
 describe('the runtime image step uses the image and mirror .env names (HB-0984)', () => {
@@ -1327,6 +1457,14 @@ exit 1
     }
   });
 
+  it('an install from before the rename: the image and mirror .env names under their old names are the service\'s, and the ones looked at and fetched (HB-1379)', () => {
+    const w = imageWorld();
+    writeFileSync(join(w.install, '.env'), 'HATCHABOT_SECRET_KEY=made-up\nAGENTCLAW_IMAGE=made-up-runtime:latest\nAGENTCLAW_IMAGE_REGISTRY=registry.example.test/runtime\n');
+    const r = up(w, { VERSIONS: 'hatchabot-runtime:latest=2026.9.9 made-up-runtime:latest=2026.7.1' });
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(log(w)).toEqual(['inspect made-up-runtime:latest', 'fetch into made-up-runtime:latest from registry.example.test/runtime']);
+  });
+
   it('a newer image promoted in the repository named: kept, though the default repository is older', () => {
     for (const env of ['dotenv', 'shell'] as const) {
       const w = imageWorld();
@@ -1334,6 +1472,22 @@ exit 1
       const r = up(w, { VERSIONS: 'hatchabot-runtime:latest=2026.1.1 made-up-runtime:latest=2026.12.1', ...(env === 'shell' ? { HATCHABOT_IMAGE: 'made-up-runtime:latest' } : {}) });
       expect(r.status, r.stdout + r.stderr).toBe(0);
       expect(log(w), env).toEqual(['inspect made-up-runtime:latest']);
+    }
+  });
+
+  it('this shell\'s HATCHABOT_IMAGE_REPO naming another repository than the fleet\'s: said, with how to tag the image in; the fleet\'s own, or a pin: nothing said (HB-1386)', () => {
+    const said = '⚠ HATCHABOT_IMAGE_REPO (set in this shell) names made-up-elsewhere, not the fleet\'s repository made-up-runtime (HATCHABOT_IMAGE): the runtime image is looked at and fetched there, where the app and its image list do not look. To use one fetched there, run the upgrade without HATCHABOT_IMAGE_REPO, or tag it in:  docker tag made-up-elsewhere:latest made-up-runtime:latest';
+    for (const [dotenv, repo, says] of [
+      ['HATCHABOT_IMAGE=made-up-runtime:latest\n', 'made-up-elsewhere', true],
+      ['HATCHABOT_IMAGE=made-up-runtime:latest\n', 'made-up-runtime', false],
+      ['HATCHABOT_IMAGE=made-up-runtime:2026.7.1\n', 'made-up-elsewhere', false],
+    ] as const) {
+      const w = imageWorld();
+      writeFileSync(join(w.install, '.env'), `HATCHABOT_SECRET_KEY=made-up\n${dotenv}`);
+      const r = up(w, { HATCHABOT_IMAGE_REPO: repo, VERSIONS: 'made-up-elsewhere:latest=2026.9.9 made-up-runtime:latest=2026.9.9' });
+      expect(r.status, r.stdout + r.stderr).toBe(0);
+      if (says) expect(r.stdout.split('\n'), repo).toContain(said);
+      else expect(r.stdout, `${dotenv} ${repo}`).not.toContain('HATCHABOT_IMAGE_REPO');
     }
   });
 

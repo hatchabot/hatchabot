@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { SCAN_MAX_FILES, SYSTEM_PREFIXES, scanWorkspacePaths as scanWith } from '../src/orchestrator/transfer/dataPaths.js';
+import { SCAN_MAX_FILES, SCAN_MAX_PATHS, SYSTEM_PREFIXES, scanWorkspacePaths as scanWith } from '../src/orchestrator/transfer/dataPaths.js';
 
 // Its own root in the temp folder, not under the checkout: the scan leaves
 // out a path with a hidden folder on the way (credential folders), and a
@@ -88,6 +88,70 @@ describe('scanWorkspacePaths', () => {
     mkdirSync(w, { recursive: true });
     writeFileSync(join(w, 'AGENTS.md'), `Read the papers in "${spaced}" and \`${join(spaced, 'agenda.md')}\`.`);
     expect(await scanWorkspacePaths(w)).toEqual([spaced]);
+  });
+
+  it('looks at no more than SCAN_MAX_PATHS of the paths its files name, the first found (HB-1168)', async () => {
+    const top = mkdtempSync(join(tmpdir(), 'acl-dp-many-'));
+    try {
+      const w = join(top, 'workspace-many');
+      mkdirSync(w, { recursive: true });
+      const first = join(top, 'ext', 'first');
+      const later = join(top, 'ext', 'later');
+      mkdirSync(first, { recursive: true });
+      mkdirSync(later, { recursive: true });
+      // A folder, then more made-up paths than it looks at, then another folder.
+      const many = Array.from({ length: SCAN_MAX_PATHS }, (_, i) => `/nowhere/made-up-${i}/notes`).join(' ');
+      writeFileSync(join(w, 'AGENTS.md'), `Reads ${first}. ${many} Also reads ${later}.`);
+      const scan = (ws: string) => scanWith(ws, SYSTEM_PREFIXES.filter((s) => !top.startsWith(`${s}/`)));
+      expect(await scan(w)).toEqual([first]);
+      // Under the cap, both are found.
+      writeFileSync(join(w, 'AGENTS.md'), `Reads ${first}. ${many.split(' ').slice(10).join(' ')} Also reads ${later}.`);
+      expect(await scan(w)).toEqual([first, later]);
+    } finally { rmSync(top, { recursive: true, force: true }); }
+  });
+
+  it('counts toward SCAN_MAX_PATHS only the paths it could suggest: links, dates and "and/or" before the data folder do not use it up (HB-1168)', async () => {
+    const top = mkdtempSync(join(tmpdir(), 'acl-dp-links-'));
+    try {
+      const w = join(top, 'workspace-links');
+      mkdirSync(join(w, 'memory'), { recursive: true });
+      const real = join(top, 'ext', 'garden-notes');
+      mkdirSync(real, { recursive: true });
+      const links = Array.from({ length: SCAN_MAX_PATHS }, (_, i) => `https://example.test/page/${i}/more and/or 2026/11/${i}`).join(' ');
+      const own = Array.from({ length: SCAN_MAX_PATHS }, (_, i) => `${w}/memory/day-${i}.md /usr/share/made-up-${i} ${top}/.hidden-${i}/x`).join(' ');
+      writeFileSync(join(w, 'AGENTS.md'), `${links} ${own} Plans are in ${real}.`);
+      const scan = (ws: string) => scanWith(ws, SYSTEM_PREFIXES.filter((s) => !top.startsWith(`${s}/`)));
+      // Was: the links' paths filled the cap, and the folder was never looked at.
+      expect(await scan(w)).toEqual([real]);
+      // A hidden file's folder is still suggested, and a link to a file here still names its folder.
+      writeFileSync(join(real, '.env-made-up'), 'X=1');
+      writeFileSync(join(real, 'plan.md'), 'plan');
+      writeFileSync(join(w, 'AGENTS.md'), `See ${real}/.env-made-up.`);
+      expect(await scan(w)).toEqual([real]);
+      writeFileSync(join(w, 'AGENTS.md'), `See file://${real}/plan.md.`);
+      expect(await scan(w)).toEqual([real]);
+    } finally { rmSync(top, { recursive: true, force: true }); }
+  });
+
+  it('still finds a path glued to what comes before it, as v2.192.0 did: only links and dates are passed by before the cap (HB-1168)', async () => {
+    const top = mkdtempSync(join(tmpdir(), 'acl-dp-glued-'));
+    try {
+      const w = join(top, 'workspace-glued');
+      mkdirSync(w, { recursive: true });
+      const real = join(top, 'srv', 'data');
+      mkdirSync(real, { recursive: true });
+      const scan = (ws: string) => scanWith(ws, SYSTEM_PREFIXES.filter((s) => !top.startsWith(`${s}/`)));
+      // What v2.192.0's scan suggested for each (run against it: the same).
+      for (const glued of [`-v${real}:/data`, `e.g.${real}`, `1.${real}`, `-${real}`, `/${real}`, `file://${real}`, `key:${real}`]) {
+        writeFileSync(join(w, 'AGENTS.md'), `Mounted with ${glued} here.`);
+        expect(await scan(w), glued).toEqual([real]);
+      }
+      // A link's path, a host name's and a date are not this machine's: passed by.
+      for (const not of [`https://example.test${real}`, `example.test${real}`]) {
+        writeFileSync(join(w, 'AGENTS.md'), `See ${not} here.`);
+        expect(await scan(w), not).toEqual([]);
+      }
+    } finally { rmSync(top, { recursive: true, force: true }); }
   });
 
   it('lets other work run while it reads, and finds what it found before (HB-0983)', async () => {

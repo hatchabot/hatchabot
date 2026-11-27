@@ -124,7 +124,16 @@ export async function hibernateAgent(deps: HibernateDeps, a: Agent, why: string,
   // rebuild or a turn may have started during the blocker's own docker calls.
   await deps.settle?.(a.id);
   const now = deps.store.getAgent(a.id);
-  if (!now || now.state !== 'RUNNING' || !now.runtimeRef) throw new Error('it is no longer running');
+  // Put to sleep meanwhile (the sweep, another tap): by hand, asleep is what
+  // was asked; the sweep did not put it to sleep, so it has nothing to report.
+  if (now?.state === 'STOPPED' && now.hibernatedAt) {
+    if (opts.idle) throw new NoLongerSleepy('it is asleep already');
+    return now;
+  }
+  // Stopped of its own accord since it was looked at (a crash, another Stop):
+  // it stays as it is, a reason by hand and nothing for the sweep to report.
+  // A plain Error was a 500 by hand (HB-1175).
+  if (!now || now.state !== 'RUNNING' || !now.runtimeRef) throw new NoLongerSleepy('it is no longer running');
   // A refusal the owner reads: by hand, a plain Error was a 500 (HB-0887).
   if (deps.isBusy(a.id)) throw new AgentBusyError('It is busy just now — answering, restoring its earlier conversations, or being changed. Try again when that finishes.');
   // Under the busy flag: reconcile skips busy agents, and during the

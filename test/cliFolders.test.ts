@@ -164,4 +164,24 @@ describe('fmtHealth / fmtUsage (CLI parity output)', () => {
     expect(out).toMatch(/est\. API cost across 1 API-keyed agent: \$0.04–\$0.23/);
     expect(fmtFleetUsage({ agents: [], skipped: 2 })).toMatch(/2 stopped — usage is live-only/);
   });
+
+  it('says the fleet rollup is billed by the source each agent runs now, and marks a total that includes an earlier one (HB-1272)', () => {
+    const out = fmtFleetUsage({
+      agents: [
+        { name: 'Den', totalTokens: 9000, sessions: 1, billing: 'api', cost: { low: 0.045, high: 0.225, partial: false }, byModel: [] },
+        { name: 'Kitchen', totalTokens: 1750, sessions: 3, billing: 'included', cost: null, earlierSource: true, byModel: [] },
+      ],
+      totalTokens: 10750, totalSessions: 4, counted: 2, skipped: 0,
+      cost: { low: 0.045, high: 0.225, partial: false, agents: 1 },
+    });
+    const lines = out.split('\n');
+    expect(lines[0]).not.toMatch(/\*/);
+    expect(lines[1]).toMatch(/incl\.\*/);
+    expect(out).toMatch(/est\. API cost across 1 API-keyed agent: \$0.04–\$0.23 — by the source each agent runs now;/);
+    expect(out).toMatch(/\* its total includes time on an earlier AI source, billed here as the one it runs now\./);
+    // No API-keyed agent: the words all the same; none marked, no footnote.
+    const plan = fmtFleetUsage({ agents: [{ name: 'Kitchen', totalTokens: 1750, sessions: 3, billing: 'included', cost: null, byModel: [] }], totalTokens: 1750, totalSessions: 3, counted: 1, skipped: 0, cost: null });
+    expect(plan).toMatch(/billed by the source each agent runs now/);
+    expect(plan).not.toMatch(/earlier AI source/);
+  });
 });

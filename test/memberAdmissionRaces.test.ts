@@ -1,14 +1,14 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import Fastify from 'fastify';
 import { registerRoutes } from '../src/api/routes.js';
 import type { IdentityVerifier } from '../src/api/signIn/identity.js';
-import { clearBusy, isBusy, markBusy } from '../src/orchestrator/lifecycle/busy.js';
+import { isBusy, markBusy } from '../src/orchestrator/lifecycle/busy.js';
 import { checkInvite, createInvite } from '../src/orchestrator/members/invite.js';
+import { inChannelConfigTurn } from '../src/orchestrator/members/members.js';
 import { as, makeWorld, seedRunningAgent, type World } from './support/world.js';
 
 const worlds: World[] = [];
 afterEach(async () => {
-  clearBusy('a1');
   for (const w of worlds.splice(0)) await w.f.close();
 });
 
@@ -181,5 +181,51 @@ describe('membership admission holds the lifecycle turn (HB-0719)', () => {
     expect(cleanup.map((a) => a[1]).join('\n')).toContain('U0GUEST');
     expect(cleanup.map((a) => a[1]).join('\n')).toContain('555');
     expect(isBusy('a1')).toBe(false);
+  });
+});
+
+describe("a known invitee's grant decided in the agent's turn at its chat apps (HB-1554)", () => {
+  /**
+   * A join with a known Telegram id, its grant waiting behind a slow change to
+   * the agent's chat apps; `meanwhile` happens while it waits. Each write on
+   * the agent's volume is recorded: a grant, or a take-back.
+   */
+  async function joinBehindASlowChange(meanwhile: (w: World) => void) {
+    const w = await fixture(true);
+    const { code } = createInvite(w.store, 'a1', w.owner);
+    const ref = w.store.getAgent('a1')!.runtimeRef!;
+    const onVolume: string[] = [];
+    const exec = w.provider.execShellOnVolume.bind(w.provider);
+    w.provider.execShellOnVolume = async (runtime, script, options) => {
+      if (runtime === ref) onVolume.push(script.includes('const add = (arr)') ? 'grant' : script.includes('delete from channel_pairing_allow_entries') ? 'take-back' : 'other');
+      return exec(runtime, script, options);
+    };
+    const slow = deferred();
+    const change = inChannelConfigTurn(w.store, 'a1', () => slow.promise);
+    const joining = w.f.inject({ method: 'POST', url: '/v1/join', payload: { code, name: 'Guest', idToken: 'synthetic-identity' } }).then((r) => r);
+    // Their seat is made before the grant asks for its turn.
+    await vi.waitFor(() => expect(w.store.getMembership('a1', 'user-guest')?.status).toBe('active'));
+    await new Promise((r) => setTimeout(r, 30));
+    meanwhile(w);
+    slow.resolve();
+    await change;
+    return { w, response: await joining, onVolume };
+  }
+
+  it('removed while the grant waits: nothing is written, nothing taken back, and the join says their membership changed', async () => {
+    const { w, response, onVolume } = await joinBehindASlowChange((w) => w.store.revokeMembership('a1', 'user-guest'));
+    expect(response.statusCode, response.body).toBe(400);
+    expect(response.json().error).toBe('Your membership or chat identity changed while joining. Ask the owner for a new invitation.');
+    // Was: written once their removal was done, then taken back a container later (and not at all when that failed).
+    expect(onVolume).toEqual([]);
+    expect(w.store.getMembership('a1', 'user-guest')?.status).toBe('revoked');
+  });
+
+  it('the id they are known by unlinked while the grant waits: it is not let in', async () => {
+    // Removed from the agent they were known on: their Telegram id is no longer theirs to bring.
+    const { response, onVolume } = await joinBehindASlowChange((w) => w.store.revokeMembership('a2', 'user-guest'));
+    expect(response.statusCode, response.body).toBe(400);
+    expect(response.json().error).toBe('Your membership or chat identity changed while joining. Ask the owner for a new invitation.');
+    expect(onVolume).toEqual([]);
   });
 });

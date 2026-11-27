@@ -138,14 +138,24 @@ function removeStaleTemps(mark: string): void {
   }
 }
 
-/** What the start logs and the doctor says of other installs' databases in this one's folder. */
+/**
+ * What the start logs and the doctor says of other installs' databases in
+ * this one's folder. Memory search is named for what it does to the agents
+ * (HB-1471): each install writes its own server key and its own agents' keys
+ * into the one `embed/` (EmbedderService.syncKeys, at each start and build),
+ * and the engine and door read whichever was written last, so the keys flip
+ * between the installs and one's agents or the other's are refused. The
+ * files are not keyed per database: the fix is one database moved out.
+ */
 export function sharedFolderWords(folder: string, others: readonly string[]): string {
   if (others.length === 1) {
     const [db] = others;
-    return `Another Hatchabot install's database is in this install's data folder ${folder}: ${db}, which its install marked at its start with ${db}${FOLDER_MARK_SUFFIX}. The two installs keep the same files beside their databases, the memory search service's keys among them, so each overwrites the other's`;
+    return `Another Hatchabot install's database is in this install's data folder ${folder}: ${db}, which its install marked at its start with ${db}${FOLDER_MARK_SUFFIX}. The two installs keep the same files beside their databases, so each overwrites the other's. `
+      + 'Memory search\'s keys are among them: they flip between the two installs as each starts or builds an agent, so memory search fails for one install\'s agents or the other\'s until one of the databases is moved out';
   }
   const named = others.length > 3 ? `${others.slice(0, 3).join(', ')} and ${others.length - 3} more` : others.join(', ');
-  return `Other Hatchabot installs' databases are in this install's data folder ${folder}: ${named}, each marked at its install's start with a <database>${FOLDER_MARK_SUFFIX} file beside it. These installs keep the same files beside their databases, the memory search service's keys among them, so each overwrites the others'`;
+  return `Other Hatchabot installs' databases are in this install's data folder ${folder}: ${named}, each marked at its install's start with a <database>${FOLDER_MARK_SUFFIX} file beside it. These installs keep the same files beside their databases, so each overwrites the others'. `
+    + 'Memory search\'s keys are among them: they flip from one install to another as each starts or builds an agent, so memory search fails for all but one install\'s agents until each database is in a folder of its own';
 }
 
 /**

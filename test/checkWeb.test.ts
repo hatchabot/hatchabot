@@ -3,6 +3,8 @@ import { cpSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync }
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
+// @ts-expect-error — a plain .mjs script, no types
+import { loadOrderProblems } from '../scripts/load-order.mjs';
 
 /**
  * scripts/check-web.mjs fails the gate on an action that names no function.
@@ -122,6 +124,56 @@ describe('check-web sees what splitting the page into scripts makes possible (HB
     const handler = check('const $ = (id) => document.getElementById(id);', "const $ = (id) => document.getElementById(id);\naddEventListener('resize', () => initV2());", { in: 'app/core.js' });
     expect(handler.status, handler.stderr).toBe(0);
   });
+  it('code that runs at load and reads a const of its own script before its line fails it: the read throws and the rest of the script does not run (HB-1494)', () => {
+    // channels.js registers its dialog's close handler at load, on the dialog its first lines
+    // find: the declaration moved below that line (to the file's end).
+    const decl = "const chanDlg = $('chanDlg');\n";
+    const src = readFileSync('web/app/channels.js', 'utf8');
+    expect(src).toContain(decl);
+    expect(src.indexOf(decl)).toBeLessThan(src.indexOf("chanDlg.addEventListener('close', () => {"));
+    const d = mkdtempSync(join(tmpdir(), 'hb-checkweb-'));
+    dirs.push(d);
+    cpSync('web', join(d, 'web'), { recursive: true });
+    writeFileSync(join(d, 'web/app/channels.js'), `${src.replace(decl, '')}\n${decl}`);
+    const r = spawnSync(process.execPath, [SCRIPT], { cwd: d, encoding: 'utf8' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/web\/app\/channels\.js:\d+: runs at load and reads chanDlg \(chanDlg\) before its const on line \d+ has set it/);
+    // Through a function called at load, too; one only stored for later (a handler) is fine,
+    // and so is a read below the line.
+    const $ = 'const $ = (id) => document.getElementById(id);';
+    const viaCall = check($, `${$}\nfunction early() { return lateValue; }\nearly();\nconst lateValue = 1;`, { in: 'app/core.js' });
+    expect(viaCall.status).toBe(1);
+    expect(viaCall.stderr).toMatch(/web\/app\/core\.js:\d+: runs at load and reads lateValue \(early → lateValue\) before its const on line \d+ has set it/);
+    const handler = check($, `${$}\naddEventListener('resize', () => lateValue);\nconst lateValue = 1;`, { in: 'app/core.js' });
+    expect(handler.status, handler.stderr).toBe(0);
+    const after = check($, `${$}\nfunction early() { return lateValue; }\nconst lateValue = 1;\nearly();`, { in: 'app/core.js' });
+    expect(after.status, after.stderr).toBe(0);
+  });
+  // HB-1494's review: a name a top-level block, loop, catch, switch or label declares is its own
+  // there, and was read as an early read of a later const of the same name; a class's extends
+  // and static parts run as it is made, and were not looked at.
+  it('takes a name declared in a top-level block, loop, catch or switch as its own there, and reads what a class runs as it is made', () => {
+    const one = (code: string): string[] => loadOrderProblems([{ name: 'a.js', code }]);
+    for (const code of [
+      'for (const x of [1]) console.log(x);\nconst x = 2;',
+      'for (let x = 0; x < 1; x++) console.log(x);\nconst x = 2;',
+      'for (const x in {}) console.log(x);\nconst x = 2;',
+      '{ const x = 1; console.log(x); }\nconst x = 2;',
+      'if (globalThis.y) { let x = 1; console.log(x); }\nconst x = 2;',
+      'try { JSON.parse("{"); } catch (err) { console.log(err); }\nconst err = 2;',
+      'switch (globalThis.y) { case 1: { break; } default: const x = 1; console.log(x); }\nconst x = 2;',
+      'x: for (const y of [1]) { if (y) continue x; break x; }\nconst x = 2;',
+      'class A { static self = A.name; static { const b = A; console.log(b); } m() { return later; } f = later; }\nconst later = 1;',
+    ]) expect(one(code), code).toEqual([]);
+    for (const [code, read] of [
+      ['{ console.log(later); }\nconst later = 1;', 'later (later)'],
+      ['for (const y of [1]) console.log(later);\nconst later = 1;', 'later (later)'],
+      ['class A extends Later {}\nconst Later = class {};', 'Later (Later)'],
+      ['class A { static f = later; }\nconst later = 1;', 'later (later)'],
+      ['class A { static { console.log(later); } }\nconst later = 1;', 'later (later)'],
+      ['const B = class { [later] = 1; };\nconst later = "k";', 'later (later)'],
+    ] as const) expect(one(code), code).toEqual([expect.stringMatching(new RegExp(`^a\\.js:1: runs at load and reads ${read.replace(/[()]/g, '\\$&')} before its const on line 2 has set it`))]);
+  });
   it('a let or const declared at the top of two scripts fails it: the second would not run at all', () => {
     // chanDlg is channels.js's; core.js runs first.
     const r = check('const $ = (id) => document.getElementById(id);', 'const $ = (id) => document.getElementById(id);\nlet chanDlg = null;', { in: 'app/core.js' });
@@ -222,16 +274,25 @@ describe("check-web holds the agent sheet's forms to their handles (HB-0644)", (
     expect(r.status).toBe(1);
     expect(r.stderr).toMatch(/connections\.js:\d+: savePeers holds a button \(\.hold\) that no finally of its own gives back \(f\.done\(\), in no branch of it\)/);
   });
+  it('a list save no finally of its own ends fails it: its legacy × stayed refused until a reload (HB-1485)', () => {
+    const r = check("    f.say(`${name} removed — Rebuild to apply it.`, 9000);\n    await refresh(false);\n  } catch (e) { f.fail(e); }\n  finally { f.done(); }",
+      "    f.say(`${name} removed — Rebuild to apply it.`, 9000);\n    await refresh(false);\n  } catch (e) { f.fail(e); }", { in: 'app/connections.js' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/connections\.js:\d+: removeEnvVar saves a list \(\.redraws\) that no finally of its own ends \(f\.done\(\), in no branch of it\).* \(HB-1485\)/);
+  });
   it("a press of an edit-dialog button the list leaves out fails it, as a hold of one does (HB-1484)", () => {
     const r = check("sheetPress('cronAddBtn', forId)", "sheetPress('botTokenBtn', forId)", { in: 'app/panels.js' });
     expect(r.status).toBe(1);
     expect(r.stderr).toMatch(/panels\.js:\d+: addCronJob presses botTokenBtn, which SHEET_BUTTONS does not list/);
   });
-  it("a function with a guard of its own for the share button turns no other button by hand (HB-1484)", () => {
-    const r = check("  $('tgShareBtn').disabled = false;\n  $('tgShareNote').textContent = SHARE_NOTE;", "  $('tgShareBtn').disabled = false;\n  $('renameBtn').disabled = false;\n  $('tgShareNote').textContent = SHARE_NOTE;", { in: 'app/panels.js' });
+  it("the web chat's Share button turned on by hand after its read fails it, as the others do (HB-1489)", () => {
+    // The old shape: armed by its own read's guard, it came on while that agent's share was still out.
+    const r = check('  const open = people.filter((p) => !p.shared);', "  $('tgShareBtn').disabled = false;\n  const open = people.filter((p) => !p.shared);", { in: 'app/panels.js' });
     expect(r.status).toBe(1);
-    expect(r.stderr).toMatch(/panels\.js:\d+: loadWebChatPeople turns renameBtn on or off after an await/);
-    expect(r.stderr).not.toMatch(/turns tgShareBtn/);
+    expect(r.stderr).toMatch(/panels\.js:\d+: loadWebChatPeople turns tgShareBtn on or off after an await/);
+    const share = check('  } finally { f.done(); }\n}\n\nasync function copyInvite', "    $('tgShareBtn').disabled = false;\n  }\n}\n\nasync function copyInvite", { in: 'app/panels.js' });
+    expect(share.status).toBe(1);
+    expect(share.stderr).toMatch(/panels\.js:\d+: shareWebChatWith turns tgShareBtn on or off after an await/);
   });
   it('a fill that notes its baseline by hand fails it: only sheetFill does', () => {
     const r = check("sheetFill(['editEmbedMode'], () => { $('editEmbedMode').value = a.embedMode || 'baked'; });", "{ $('editEmbedMode').value = a.embedMode || 'baked'; v2SheetBaseline('editEmbedMode'); }", { in: 'app/sheet.js' });

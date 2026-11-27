@@ -272,7 +272,7 @@ async function renderEditMembers() {
     return;
   }
   try {
-    void loadWebChatPeople(forId);
+    void loadWebChatPeople();
     const ms = await api(`/v1/agents/${forId}/members`);
     if (!r.mine()) return;
     members[forId] = ms;
@@ -292,15 +292,15 @@ async function renderEditMembers() {
         ? `<span class="sub" title="${esc(apps.map((k, i) => `${names[i]} id ${ids[k]}`).join(' · '))}">✓ linked on ${esc(names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names.at(-1)}` : names[0])}</span>`
         : webOnlyMember || m.role === 'owner' && !m.channelUserId && !v2ChannelKinds(agents.find(x => x.id === forId) || {}).length ? ''
         : `<span class="sub" style="color:var(--warn)">hasn't messaged yet</span>
-           <button ${onAction('click', 'reopenDoor', [`${forId}`, `${m.userId ?? ''}`, `${(m.displayName || 'They') ?? ''}`])}
-                   title="Hold the door open for 30 minutes on the app they joined with, so their next message is let through. If we don't know that app, you give their @handle and only they are let in">Let them in again</button>`;
+           <button ${onAction('click', 'reopenDoor', [`${forId}`, `${m.userId ?? ''}`, `${m.displayName ?? ''}`, `${m.invitedAs ?? ''}`, `${m.needsHandle ? '1' : ''}`])}
+                   title="${m.invitedAs ? `Hold the door open for 30 minutes on the app they joined with, for @${esc(m.invitedAs)} only, the handle their invite named` : m.needsHandle ? 'Hold the door open for 30 minutes on the app they joined with, for their @handle only: their invite named them by a link with no name in it' : 'Hold the door open for 30 minutes on the app they joined with, so their next message is let through. Give their @handle and only they are let in (needed if we don\'t know that app); leave it empty and whoever writes first is'}">Let them in again</button>`;
       // Web chat (2026-09-29): a badge, and the switch — offered only to someone who signs in here.
       const web = m.role === 'owner' ? ''
         : m.webChat ? `<span class="chip webchat" title="Chats with it on this page — with a member's rights, like a Telegram member">web chat</span>
             <button ${onAction('click', 'setWebChat', [`${forId}`, `${m.userId ?? ''}`, `${m.displayName || 'them'}`, false])} title="They can no longer chat with it on this page">Turn off web chat</button>`
         : m.account && appConfig.authMode !== 'password' ? `<button ${onAction('click', 'setWebChat', [`${forId}`, `${m.userId ?? ''}`, `${m.displayName || 'them'}`, true])} title="Let them chat with it on this page, signed in">Allow web chat…</button>` : '';
       const kickBtn = m.role === 'owner' ? '' :
-        `<button class="danger" ${onAction('click', 'kickAndList', [`${forId}`, `${m.userId ?? ''}`, `${(m.displayName || m.userId) ?? ''}`])}>Remove</button>`;
+        `<button class="danger" ${onAction('click', 'kick', [`${forId}`, `${m.userId ?? ''}`, `${(m.displayName || m.userId) ?? ''}`])}>Remove</button>`;
       return `<div class="pair"><span class="grow"><b>${label}</b>${m.role === 'owner' ? ' ★' : ''} <span class="sub">· ${esc(m.role)}</span> ${linked}</span>${web}${kickBtn}</div>`;
     }).join('') || '<div class="sub">Just you so far — Invite… below to add someone.</div>';
   } catch (e) { r.draw(() => { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }); }
@@ -329,30 +329,90 @@ async function setWebChat(agentId, userId, name, on) {
   } catch (e) { f.fail(e, 8000); }
 }
 
+/** A Telegram link pasted for a handle (https://t.me/name, t.me/name, telegram.me/name): the name is after it (the server's). */
+const HANDLE_LINK = /^(?:https?:\/\/)?(?:www\.)?(?:t|telegram)\.me\//i;
+/** The longest handle the server takes, without its @ or link (store.ts HANDLE_MAX; test/driftGuards.test.ts holds them together). */
+const HANDLE_MAX = 64;
+
+/** A handle as typed, without its @s or the t.me link it was pasted as, nor what follows the name in it (the server's handleText). */
+function handleTyped(v) {
+  let t = String(v ?? '').replace(/^[@\s]+/, '');
+  const link = HANDLE_LINK.exec(t);
+  if (link) t = t.slice(link[0].length).split(/[/?#]/, 1)[0];
+  return t.replace(/^[@\s]+/, '').trim();
+}
+
 /**
- * "Let them in again" reopens only the app they joined with; when that was
- * never recorded, it asks for their @handle, so the window admits only them
- * rather than whoever messages first (2026-09-30).
+ * Ask for an @handle until one is given that the server takes (HB-1439
+ * review): one it refuses was dropped, and the door opened to anyone. null:
+ * cancelled, or still none after three tries (then said: nothing was
+ * changed); '': left empty, unless `required`; else the handle, without its
+ * @s or link.
  */
-async function reopenDoor(agentId, userId, name) {
+function askHandle(question, { required = false } = {}) {
+  let asked = question, given = '';
+  for (let tries = 0; tries < 3; tries++) {
+    const typed = prompt(asked, given);
+    if (typed === null) return null;
+    if (!typed.trim() && !required) return '';
+    const handle = handleTyped(typed);
+    if (handle && handle.length <= HANDLE_MAX) return handle;
+    given = typed;
+    asked = typed.trim()
+      ? `“${typed.trim().slice(0, 80)}” is not an @handle: give theirs, no more than ${HANDLE_MAX} characters after the @.\n\n${question}`
+      : `Their @handle is needed: without it there is no one to let in.\n\n${question}`;
+  }
+  toast('No @handle given: nothing was changed.');
+  return null;
+}
+
+/**
+ * "Let them in again" reopens only the app they joined with. Each press asks
+ * for their @handle, which may be left empty (HB-1439): given, the window
+ * admits only them; empty, whoever messages first, as before. One their
+ * invite named is the one used, so then none is asked for (HB-1439 review).
+ * A handle the server would not take is asked for again, never sent to be
+ * dropped; and when one given was not used, the answer says so, and who the
+ * door is open to. When the app they joined with was never recorded, a handle
+ * is needed, and an empty one is asked for again (2026-09-30). What comes back
+ * is said however late, with the agent's name under another agent's sheet
+ * (HB-1486), and nothing once the page is another person's; a handle is asked
+ * for again only while its Members list is the one shown.
+ */
+async function reopenDoor(agentId, userId, name, invitedAs, needsHandle) {
   const url = `/v1/agents/${agentId}/members/${encodeURIComponent(userId)}/reopen`;
   const current = sharingRead($('tgMemberList'), agentId);
   if (!current()) return;
+  const them = name || 'them';
+  let handle = '';
+  if (!invitedAs) {
+    // Their invite named them by a link with no name in it: theirs is asked for, and empty is not offered (HB-1439 review).
+    handle = askHandle(needsHandle
+      ? `Let ${them} in again: the door opens for 30 minutes on the app they joined with.\n\nTheir invite named them by a link with no name in it, so Hatchabot can't tell who to let in. Their @handle (Telegram username, or their Slack / Discord name) — only they will be let in:`
+      : `Let ${them} in again: the door opens for 30 minutes on the app they joined with.\n\nTheir @handle (Telegram username, or their Slack / Discord name), and only they are let in. Leave empty to let in whoever writes first:`,
+    { required: !!needsHandle });
+    if (handle === null || !current()) return;
+  }
+  const f = forAgent(agentId), page = sharingPage();
   try {
     let r;
-    try { r = await api(url, { method: 'POST', body: {} }); }
+    try { r = await api(url, { method: 'POST', body: handle ? { handle } : {} }); }
     catch (e) {
-      if (e.code !== 'needs-handle') throw e;
-      if (!current()) return;
-      const handle = prompt(`Which app ${name} joined with was never recorded, so the door would open to whoever messages first.\n\nTheir @handle (Telegram username, or their Slack / Discord name) — only they will be let in:`, '');
-      if (!handle || !handle.trim()) return;
-      r = await api(url, { method: 'POST', body: { handle: handle.trim() } });
+      if (e.code !== 'needs-handle' || !current()) throw e;
+      // Asked in the server's words: why it needs one is the server's to say (HB-1439 review).
+      handle = askHandle(`${e.message}\n\nTheir @handle (Telegram username, or their Slack / Discord name) — only they will be let in:`, { required: true });
+      if (!handle) return;
+      r = await api(url, { method: 'POST', body: { handle } });
     }
-    if (!current()) return;
+    if (!page()) return;
     const where = r.on?.length === 1 ? ` on ${r.on[0][0].toUpperCase()}${r.on[0].slice(1)}` : '';
-    toast(`Door open for ${r.minutes} minutes${where}${r.for ? ` for @${r.for} only` : ''} — tell ${name} to message the bot now.`, 9000);
-    await renderEditMembers();
-  } catch (e) { if (current()) toast(e.message, 8000); }
+    const same = (a, b) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
+    // Who it is open to: the one named, or (a handle given and not used) whoever writes first.
+    const forWhom = r.for ? ` for @${r.for} only${same(r.for, invitedAs) && !handle ? ', the handle their invite named' : ''}` : handle ? ' to whoever writes first' : '';
+    const unused = handle && !same(r.for, handle) ? ` (@${handle} was not used)` : '';
+    f.say(`Door open for ${r.minutes} minutes${where}${forWhom}${unused} — tell ${them} to message the bot now.`, 9000);
+    if (current()) await f.draw(renderEditMembers);
+  } catch (e) { if (page()) f.say(e.message, 8000); }
 }
 
 async function renderKnownPeople() {
@@ -397,15 +457,17 @@ async function showBotToken() {
     toast(await copyText(input.value) ? 'Token copied' : 'Select and copy manually');
     return;
   }
+  const page = sharingPage(); // the token, and a refusal, never shown once the page is another person's (HB-1486 review)
   try {
     const t = await api(`/v1/agents/${r.id}/bot-token`);
+    if (!page()) return;
     const shown = r.fill([input], () => { // shown, not typed
       input.value = t.botToken;
       btn.textContent = 'Copy';
       return true;
     });
     if (shown && t.pooled) toast('Pool bot — recycles automatically when the agent is deleted');
-  } catch (e) { toast(e.message); }
+  } catch (e) { if (page()) r.say(e.message); } // with its agent's name once another agent's sheet is shown (HB-1486)
 }
 
 async function renameAgent() {
@@ -809,12 +871,12 @@ async function invite(id, name) {
   document.querySelectorAll('#inviteDlg .invAppBtn').forEach((b) => { b.hidden = webOnly; });
   if (webOnly) { $('invAgent').textContent = name; invShare = null; mine.shown = true; inviteDlg.showModal(); return; }
   try {
-    const who = prompt(
+    // One that is no handle is asked for again, never sent to be kept as none: the invite was anyone's (HB-1439 review).
+    const who = askHandle(
       `Who is this invite for?\n\nTheir Telegram @handle — then only they can use it, and anyone else who messages the bot is turned away.\n\nLeave blank if you don't know it: whoever redeems the web link and messages first within 30 minutes is admitted. Someone who comes by the Telegram link always waits for your tap.`,
-      '',
     );
     if (who === null) return; // cancelled
-    const inv = await api(`/v1/agents/${id}/invites`, { method: 'POST', body: { for: who.trim() || undefined } });
+    const inv = await api(`/v1/agents/${id}/invites`, { method: 'POST', body: { for: who || undefined } });
     if (!inviteCurrent(mine)) return;
     $('invAgent').textContent = name;
     $('invLink').textContent = inv.url ?? (location.origin + inv.path);
@@ -826,13 +888,15 @@ async function invite(id, name) {
     // A ready-to-send message, not just the bare URL. The invite's code rides
     // along: copying or sharing it opens the knock window (2026-09-30).
     invShare = { id, name, link, code: inv.code, invite: mine, message: link ? `Chat with ${name} on Telegram: ${link}` : '' };
-    $('invTgFor').textContent = who.trim() ? `Only @${who.trim().replace(/^@/, '')}'s message is shown; anyone else's is turned away.` : '';
+    // Who it is for, as the server kept it, not as typed: what it said in green was what was typed (HB-1439 review).
+    const kept = inv.for || '';
+    $('invTgFor').textContent = kept ? `Only @${kept}'s message is shown; anyone else's is turned away.` : '';
     const forWho = $('invFor');
     if (forWho) {
-      forWho.textContent = who.trim()
-        ? `Only @${who.trim().replace(/^@/, '')} can use this link.`
-        : 'Anyone with this link can use it — the first to message the bot within 30 minutes is admitted.';
-      forWho.style.color = who.trim() ? 'var(--ok)' : 'var(--warn)';
+      forWho.textContent = kept
+        ? `Only @${kept} can use this link.`
+        : `Anyone with this link can use it — the first to message the bot within 30 minutes is admitted.${who ? ` (@${who} was not used.)` : ''}`;
+      forWho.style.color = kept ? 'var(--ok)' : 'var(--warn)';
     }
     $('invShareBtn').style.display = (link && navigator.share) ? '' : 'none';
     mine.shown = true;
@@ -876,10 +940,11 @@ async function copyWebChatInvite() {
  * are separate accounts even under one email. Nobody to offer: no row.
  */
 const SHARE_NOTE = "They chat with it on the web, with a member's rights. It appears on their home screen straight away.";
-async function loadWebChatPeople(forId) {
+async function loadWebChatPeople() {
   const row = $('tgShareRow');
   if (!row) return;
-  const current = sharingRead(row, forId);
+  // For the agent the forms are filled for, drawn (and its Share button armed) only while this sharing read is the latest.
+  const r = sheetRead(row), forId = r.id, current = r.mine;
   sharePeopleFor = null;
   row.hidden = true;
   $('tgSharePerson').textContent = '';
@@ -887,16 +952,19 @@ async function loadWebChatPeople(forId) {
   if (appConfig.authMode === 'password' || !a || a.ops || !v2Mine(a)) return;
   let people = [];
   try { people = (await api(`/v1/agents/${forId}/web-chat/people`)).people || []; } catch { return; }
-  if (!current()) return;
   const open = people.filter((p) => !p.shared);
   if (!open.length) return;
   const kind = { google: 'Google', password: 'password' };
-  $('tgSharePerson').innerHTML = '<option value="">Share with someone on this Hatchabot…</option>' + open.map((p) =>
-    `<option value="${esc(p.userId)}">${esc(p.label)}${p.username ? ` (${esc(p.username)})` : ''} · ${kind[p.kind] || esc(p.kind)}</option>`).join('');
-  $('tgShareBtn').disabled = false;
-  $('tgShareNote').textContent = SHARE_NOTE;
-  sharePeopleFor = { id: forId, current };
-  row.hidden = false;
+  r.draw(() => {
+    $('tgSharePerson').innerHTML = '<option value="">Share with someone on this Hatchabot…</option>' + open.map((p) =>
+      `<option value="${esc(p.userId)}">${esc(p.label)}${p.username ? ` (${esc(p.username)})` : ''} · ${kind[p.kind] || esc(p.kind)}</option>`).join('');
+    $('tgShareNote').textContent = SHARE_NOTE;
+    sharePeopleFor = { id: forId, current };
+    row.hidden = false;
+    // On as the agent has it: off while a share of its is still out (HB-1489). Turned on here by hand, a read of its
+    // list again while one was out let a second share be sent.
+    sheetButton('tgShareBtn', forId);
+  });
 }
 async function shareWebChatWith() {
   const target = sharePeopleFor;
@@ -904,15 +972,19 @@ async function shareWebChatWith() {
   const forId = target.id, sel = $('tgSharePerson'), userId = sel.value;
   if (!userId) { $('tgShareNote').textContent = 'Choose who to share it with first.'; return; }
   const who = sel.selectedOptions[0]?.textContent.split(' · ')[0] || 'them';
-  $('tgShareBtn').disabled = true;
+  // The button held through the sheet's handle while the share is out, and given back as the agent has it (HB-1489).
+  // What comes back is said however late, with its agent's name under another agent's sheet (HB-1486); nothing once the
+  // page is another person's. Its list is read again, and a refusal put by the share, only while that list is the one read.
+  const f = sheetSave().hold('tgShareBtn'), page = sharingPage();
   try {
     await api(`/v1/agents/${forId}/web-chat/people`, { method: 'POST', body: { userId } });
-    if (!target.current()) return;
-    toast(`Shared with ${who}: it's on their home screen now`);
-    await renderEditMembers();
+    if (!page()) return;
+    f.say(`Shared with ${who}: it's on their home screen now`);
+    if (target.current()) await f.draw(renderEditMembers);
   } catch (e) {
-    if (target.current()) { $('tgShareNote').textContent = e.message; $('tgShareBtn').disabled = false; }
-  }
+    if (target.current()) $('tgShareNote').textContent = e.message;
+    else if (page()) f.say(e.message, 9000);
+  } finally { f.done(); }
 }
 
 async function copyInvite() {
@@ -925,9 +997,12 @@ async function copyInvite() {
  * (2026-09-30): an agent under "Invite only" drops a stranger's message in
  * silence, so the "wants to join" prompt the dialog promised never came. The
  * window only SHOWS their knock; the owner's tap lets them in. Returns the
- * words to add to the toast, or '' when the door could not be opened.
+ * words to add to the toast, or null when the door could not be opened.
+ * `sent`: what that means for the invite already copied or shared, said after
+ * the reason. The copy comes first, while the press still lets the page write
+ * the clipboard, so the link was out with the door shut, and nothing said so (HB-1363).
  */
-async function openInviteKnockWindow(inv = invShare) {
+async function openInviteKnockWindow(inv = invShare, sent = '') {
   const current = () => invShare === inv && inviteCurrent(inv?.invite) && inviteDlg.open;
   if (!current() || !inv?.code || !inv?.id) return null;
   try {
@@ -935,14 +1010,23 @@ async function openInviteKnockWindow(inv = invShare) {
     if (!current()) return null;
     return r.alreadyOpen ? ' Anyone can knock on this agent, so their request will show under Alerts.'
       : ` For the next ${r.minutes} minutes their message shows under Alerts — tap Let them in.`;
-  } catch (e) { if (current()) toast(e.message, 8000); return null; }
+  } catch (e) { if (current()) toast(sent ? `${withStop(e.message)} ${sent}` : e.message, sent ? 12000 : 8000); return null; }
 }
+/** `text` ending in one full stop: its own trailing stops and spaces trimmed by a loop (a regex for them is quadratic). */
+function withStop(text) {
+  const s = String(text ?? '');
+  let end = s.length;
+  while (end > 0 && (s[end - 1] === '.' || /\s/.test(s[end - 1]))) end--;
+  return `${s.slice(0, end)}.`;
+}
+/** An invite that is out, its door not open: what that means, and the way to open it. */
+const INVITE_DOOR_SHUT = 'their message will not show under Alerts until this works: press Copy Telegram invite again in a moment.';
 
 async function copyInviteTg() {
   if (!invShare?.message) { toast('This agent has no Telegram bot yet'); return; }
   const inv = invShare;
   const ok = await copyText(inv.message);
-  const door = await openInviteKnockWindow(inv);
+  const door = await openInviteKnockWindow(inv, ok ? `The invite is copied, but ${INVITE_DOOR_SHUT}` : '');
   if (door === null) return; // the reason is on screen
   toast(ok ? `Telegram invite copied — paste it to them.${door}` : `Select the link and copy it manually.${door}`, door ? 9000 : undefined);
 }
@@ -952,7 +1036,7 @@ async function shareInviteTg() {
   const inv = invShare;
   try { await navigator.share({ title: `Chat with ${inv.name}`, text: inv.message, url: inv.link }); }
   catch { return; /* user cancelled the share sheet, or it's unavailable — no door opened */ }
-  const door = await openInviteKnockWindow(inv);
+  const door = await openInviteKnockWindow(inv, `The invite is shared, but ${INVITE_DOOR_SHUT}`);
   if (door) toast(`Shared.${door}`, 9000);
 }
 
@@ -1120,10 +1204,16 @@ async function del(id, name) {
 
 async function kick(agentId, userId, label) {
   if (!confirm(`Remove ${label}? They lose access to this agent immediately.\n\nAnything they set up through it (scheduled tasks) keeps running; check Schedule.`)) return;
+  // For the agent whose Members list it was pressed in: its list is read again only while its forms are (HB-1487). The
+  // button's then read the members of whichever agent was shown by then. Said in a toast, as before, with the agent's name
+  // once another agent's sheet is shown (HB-1486); nothing once the page is another person's, or signed out (HB-1486 review).
+  const f = forAgent(agentId), page = sharingPage();
   try {
     await api(`/v1/agents/${agentId}/members/${encodeURIComponent(userId)}`, { method: 'DELETE' });
-    toast(`${label} removed`);
+    if (!page()) return;
+    f.say(`${label} removed`);
     pairTick = 0; // refetch members on next poll
     await refresh(false);
-  } catch (e) { toast(e.message); }
+    await f.draw(renderEditMembers);
+  } catch (e) { if (page()) f.say(e.message); }
 }

@@ -15,6 +15,165 @@ cd "$(dirname "$0")/.."
 
 say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 
+# .env read as the service reads it: on Linux by systemd's EnvironmentFile
+# rules, on a Mac as its launchd job sources it (env_named; the settings
+# below say more).
+# systemd_major FILE: the first number of `systemctl --version`, in
+# SYSTEMD_MAJOR, for the reader of systemd's rules (`systemd`, in node). From
+# v254 a line after a comment that ends in a backslash is a line of its own;
+# before, it went on the comment. Read always the old way, `# C:\data\` and
+# then a HATCHABOT_DB line named the database to systemd 254 and nothing here
+# (HB-1457). Asked once, and only of a FILE with a backslash at the end of a
+# line, the one place the two differ. With no systemctl to ask, empty: read as
+# v254 reads, as no systemd reads .env there (on Linux Hatchabot runs as a
+# systemd unit; a Mac's launchd job sources .env with bash, which reads that
+# line too), and that is the rule of every systemd since 2023 and of
+# Hatchabot's own readers. Never taken from the environment: one a caller
+# exported chose the rule, so it is unset here, before any reading. The same
+# in every script that reads .env so (test/backupKeyLine.test.ts, READERS).
+unset SYSTEMD_MAJOR
+systemd_major() {
+  [ -z "${SYSTEMD_MAJOR+x}" ] || return 0
+  LC_ALL=C grep -q -e '\\$' -e $'\\\\\r' "$1" 2>/dev/null || return 0
+  SYSTEMD_MAJOR="$( { systemctl --version 2>/dev/null || true; } | sed -n '1s/^[^0-9]*\([0-9][0-9]*\).*/\1/p')"
+}
+env_named() {
+  # ENV_READ: 1 once .env was read through (a node that failed reads nothing;
+  # with no node on Linux, only what bash reads as systemd does, below).
+  # A HATCHABOT_ name is read under its name from before the rename too
+  # (AGENTCLAW_), which the service takes when the new one is not set
+  # (applyLegacyEnv): a pre-rename AGENTCLAW_IMAGE was the service's image,
+  # and the upgrade's and setup's was the default (HB-1379).
+  local kv k
+  local -a names=()
+  for k in "$@"; do
+    names+=("$k")
+    case "$k" in
+      HATCHABOT_*) names+=("AGENTCLAW_${k#HATCHABOT_}") ;;
+    esac
+  done
+  ENV_READ=''
+  systemd_major .env
+  for k in "${names[@]}"; do printf -v "ENV_$k" '%s' ''; printf -v "ENVSET_$k" '%s' ''; done
+  # The reading, in the < <( ... ) below, says what it is here: bash 3.2
+  # finds where one ends by its quotes and parentheses, comments in it too
+  # (review of HB-1529).
+  # - On a Mac, as the launchd job sources it (launchd-plist.sh): by
+  #   /bin/bash, with launchd's few settings and nothing on its input; the
+  #   PATH is this shell's, not the job's own (the plist's). In a subshell of
+  #   this one it had the caller's whole environment, its shell's variables
+  #   and its input (HB-1381).
+  # - With no node to ask (a restart from cron or a bare ssh, with an nvm
+  #   node off its PATH): what bash reads as systemd does, NAME=value with
+  #   spaces or tabs around the = (only those: systemd keeps a form feed or a
+  #   vertical tab) and the value whole, or quoted whole, on its line. A file
+  #   with a carriage return or a backslash at a line's end, or with a value
+  #   on any line that opens a quote it does not close on that line (systemd
+  #   reads on into the lines after it, and they are no settings of their
+  #   own), is left unread, and so is a value asked for that is quoted any
+  #   other way or has a backslash in it. Unread whenever node was not
+  #   there, a restart asked plain http on port 8080, and failed a listener
+  #   the sed it replaced had found (review of HB-1529).
+  # - Otherwise by systemd's rules, in node.
+  while IFS= read -r -d '' kv; do
+    k="${kv%%=*}"
+    [ "$k" != . ] || { ENV_READ=1; continue; }
+    printf -v "ENV_$k" '%s' "${kv#*=}"; printf -v "ENVSET_$k" '%s' 1
+  done < <(
+    if [ "$(uname -s)" = Darwin ]; then
+      set +eu
+      lj=(HOME="$HOME" PATH="$PATH")
+      for k in USER LOGNAME SHELL TMPDIR; do [ -z "${!k:-}" ] || lj+=("$k=${!k}"); done
+      env -i "${lj[@]}" /bin/bash -c 'for k in "$@"; do unset "$k"; done; set -a; . ./.env >/dev/null 2>&1; set +a
+        for k in "$@"; do [ -z "${!k+x}" ] || printf "%s=%s\0" "$k" "${!k}"; done; printf ".=\0"' launchd-job "${names[@]}" </dev/null
+    elif ! command -v node >/dev/null 2>&1; then
+      set +e
+      sp=$' \t'
+      [ -r .env ] || exit 0
+      LC_ALL=C grep -q -e $'\r' -e '\\$' .env 2>/dev/null && exit 0
+      while IFS= read -r kv || [ -n "$kv" ]; do
+        kv="${kv#"${kv%%[!$sp]*}"}"
+        [ -n "$kv" ] && [ "${kv:0:1}" != "#" ] && [ "${kv:0:1}" != ";" ] && [[ "${kv:1}" == *=* ]] || continue
+        kv="${kv:1}"; kv="${kv#*=}"; kv="${kv#"${kv%%[!$sp]*}"}"; kv="${kv%"${kv##*[!$sp]}"}"
+        [[ "$kv" == [\'\"]* ]] || continue
+        [[ "$kv" == \'*\' && "${kv:1:${#kv}-2}" != *\'* ]] || [[ "$kv" == \"*\" && "${kv:1:${#kv}-2}" != *[\"\\]* ]] || exit 0
+      done < .env
+      for k in "${names[@]}"; do
+        kv="$(LC_ALL=C grep -E "^[$sp]*$k[$sp]*=" .env 2>/dev/null | tail -n 1)"
+        [ -n "$kv" ] || continue
+        kv="${kv#*=}"; kv="${kv#"${kv%%[!$sp]*}"}"; kv="${kv%"${kv##*[!$sp]}"}"
+        if [[ "$kv" == \'*\' && "${kv:1:${#kv}-2}" != *\'* ]]; then kv="${kv:1:${#kv}-2}"
+        elif [[ "$kv" == \"*\" && "${kv:1:${#kv}-2}" != *[\"\\]* ]]; then kv="${kv:1:${#kv}-2}"
+        elif [[ "$kv" == [\'\"]* || "$kv" == *\\* ]]; then exit 0
+        fi
+        printf '%s=%s\0' "$k" "$kv"
+      done
+      printf '.=\0'
+    else
+      node -e '
+    const systemd = (t, ver) => {
+      // ver: the first number of `systemctl --version` (systemd_major). Before v254 a comment ending in a
+      // backslash went on over the next line; from v254, and with no systemctl to ask, that line is read.
+      const joins = Number(ver) > 0 && Number(ver) < 254;
+      const out = {}; let st = "prekey", k = "", v = "", lw = -1;
+      // lw: where the run of spaces and tabs at the end of the value starts (last_value_whitespace in
+      // systemd), the only part trimmed: an escaped space or tab is kept, as systemd keeps it.
+      const done = () => { if (k) out[k] = lw >= 0 ? v.slice(0, lw) : v; k = ""; v = ""; lw = -1; st = "prekey"; };
+      for (const c of t) {
+        const nl = c === "\n" || c === "\r", ws = c === " " || c === "\t" || nl;
+        if (st === "prekey") { if (c === "#" || c === ";") st = "comment"; else if (!ws) { k = c; st = "key"; } }
+        else if (st === "comment") { if (c === "\\") st = "commentesc"; else if (nl) st = "prekey"; }
+        else if (st === "commentesc") st = nl && !joins ? "prekey" : "comment";
+        else if (st === "key") { if (nl) { k = ""; st = "prekey"; } else if (c === "=") { k = k.replace(/[ \t]+$/, ""); st = "prevalue"; } else k += c; }
+        else if (st === "prevalue") { if (nl) done(); else if (c === "\x27") st = "single"; else if (c === "\"") st = "double"; else if (c === "\\") st = "esc"; else if (!ws) { v += c; st = "value"; } }
+        else if (st === "value") { if (nl) done(); else if (c === "\\") { st = "esc"; lw = -1; } else { if (c !== " " && c !== "\t") lw = -1; else if (lw < 0) lw = v.length; v += c; } }
+        else if (st === "esc") { st = "value"; if (!nl) v += c; }
+        else if (st === "single") { if (c === "\x27") st = "prevalue"; else v += c; }
+        else if (st === "double") { if (c === "\"") st = "prevalue"; else if (c === "\\") st = "doubleesc"; else v += c; }
+        else if (st === "doubleesc") { st = "double"; if (c !== "\n") v += "\"\\`$".includes(c) ? c : "\\" + c; }
+      }
+      // The end of the file ends a value as a newline does, quoted or escaped as far as it went, as
+      // systemd keeps it: a quote never closed, or a backslash last, lost its key here.
+      if (["prevalue", "value", "esc", "single", "double", "doubleesc"].includes(st)) done();
+      return out;
+    };
+    const out = systemd(require("node:fs").readFileSync(".env", "utf8"), process.argv[1]);
+    for (const k of process.argv.slice(2)) if (Object.prototype.hasOwnProperty.call(out, k)) process.stdout.write(k + "=" + out[k] + "\0");
+    process.stdout.write(".=\0");' "${SYSTEMD_MAJOR:-}" "${names[@]}" 2>/dev/null || true
+    fi
+  )
+  for k in "$@"; do
+    case "$k" in
+      HATCHABOT_*) ;;
+      *) continue ;;
+    esac
+    kv="ENVSET_$k"; [ -z "${!kv}" ] || continue
+    kv="ENVSET_AGENTCLAW_${k#HATCHABOT_}"; [ -n "${!kv}" ] || continue
+    kv="ENV_AGENTCLAW_${k#HATCHABOT_}"
+    printf -v "ENV_$k" '%s' "${!kv}"; printf -v "ENVSET_$k" '%s' 1
+  done
+}
+# service_port VALUE: the port the service listens on with VALUE as its PORT,
+# read as the service reads it (Number(), as doctor's servicePort): 8080 when
+# it is unset, empty or no number. On Linux a " # note" after the value is
+# part of it, as systemd keeps it: the service then listens on 8080, as for
+# no PORT (before 2.193.0 it did not start), and a URL with that value in it
+# is none at all (HB-1529). With no node to ask, digits alone are a port,
+# with the ASCII white space Number takes off around them taken off too (a
+# form feed systemd keeps; review of HB-1529). The same in each script that
+# asks the listener (test/doctorServiceTargets.test.ts).
+service_port() {
+  local n ws=$' \t\n\v\f\r'
+  node -e 'process.stdout.write(String(Number(process.argv[1]) || 8080))' -- "$1" 2>/dev/null && return 0
+  n="${1#"${1%%[!$ws]*}"}"; n="${n%"${n##*[!$ws]}"}"
+  case "$n" in
+    ''|*[!0-9]*) echo 8080 ;;
+    *)
+      n="${n#"${n%%[!0]*}"}"   # the zeros it starts with dropped, as Number reads them
+      echo "${n:-8080}" ;;
+  esac
+}
+
 say "Checking prerequisites…"
 command -v docker >/dev/null || { echo "docker is required — install Docker Engine first."; exit 1; }
 # The Docker daemon the service will use is the one .env names (a tenant's
@@ -25,21 +184,27 @@ command -v docker >/dev/null || { echo "docker is required — install Docker En
 # (audit #040); checked on it, a re-run on such an install stopped here when
 # this shell had no daemon of its own (HB-1059). The last line wins, as
 # systemd's EnvironmentFile reads it.
-if [ -f .env ]; then ENV_LINES="$(cat .env)"; NAMED_IN=.env; else ENV_LINES="${HATCHABOT_SETUP_ENV:-}"; NAMED_IN=HATCHABOT_SETUP_ENV; fi
-# Given to grep as a here-string, never piped to it: grep -q stops at the first
-# match, and under pipefail the printf it left writing (a full .env is some
-# 18 KB) died of SIGPIPE, the test read as "not named", and the default
-# daemon was checked instead (review of HB-1059).
-if grep -q '^DOCKER_HOST=' <<<"$ENV_LINES"; then
-  DH="$(sed -n 's/^DOCKER_HOST=//p' <<<"$ENV_LINES" | tail -n1 | sed -e 's/[[:space:]]*#.*$//' -e 's/[[:space:]]*$//' -e "s/^['\"]//" -e "s/['\"]$//")"
+# Read as the service reads it (env_named, node on Linux): by sed, `DOCKER_HOST =
+# …` and a line with CRLF were not the service's daemon (HB-1529). The lines
+# HATCHABOT_SETUP_ENV gives the new .env are read from a file of their own,
+# as they will be once written there.
+command -v node >/dev/null || { echo "node is required — install Node.js 22+."; exit 1; }
+node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)' \
+  || { echo "Node 22+ required (found $(node --version))."; exit 1; }
+if [ -f .env ]; then NAMED_IN=.env; env_named DOCKER_HOST
+else
+  NAMED_IN=HATCHABOT_SETUP_ENV; SETUP_DIR="$PWD"
+  ENV_TMP="$(mktemp -d)" && printf '%s\n' "${HATCHABOT_SETUP_ENV:-}" > "$ENV_TMP/.env" || { echo "Could not write a temporary file to read HATCHABOT_SETUP_ENV from (a full disk?), so nothing was set up."; exit 1; }
+  CDPATH= cd -- "$ENV_TMP"; env_named DOCKER_HOST; CDPATH= cd -- "$SETUP_DIR"; rm -rf "$ENV_TMP"
+fi
+[ -n "$ENV_READ" ] || echo "⚠ Could not read $NAMED_IN as the service reads it, so this shell's Docker daemon is checked, which may not be the service's."
+if [ -n "$ENVSET_DOCKER_HOST" ]; then
+  DH="$ENV_DOCKER_HOST"
   if [ -n "$DH" ]; then export DOCKER_HOST="$DH"; else unset DOCKER_HOST; fi
   docker info >/dev/null 2>&1 || { echo "The Docker daemon $NAMED_IN names (DOCKER_HOST=$DH) is not reachable — start it, or correct DOCKER_HOST in $NAMED_IN, then re-run."; exit 1; }
 else
   docker info >/dev/null 2>&1 || { echo "docker is installed but not usable by this user (try: sudo usermod -aG docker \$USER, then re-login)."; exit 1; }
 fi
-command -v node >/dev/null || { echo "node is required — install Node.js 22+."; exit 1; }
-node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)' \
-  || { echo "Node 22+ required (found $(node --version))."; exit 1; }
 
 say "Installing dependencies…"
 ./scripts/ensure-deps.sh
@@ -74,7 +239,9 @@ if [ ! -f .env ]; then
     [ -n "$PW" ] || { echo "Password cannot be empty."; exit 1; }
     # systemd's EnvironmentFile and the shell read a quoted apostrophe
     # differently, so a password holding one never matched on Linux.
-    case "$PW" in *"'"*) echo "Please choose a password without an apostrophe (')."; exit 1 ;; esac
+    case "$PW" in
+      *"'"*) echo "Please choose a password without an apostrophe (')."; exit 1 ;;
+    esac
   fi
   {
     echo "HATCHABOT_SECRET_KEY=$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")"
@@ -109,77 +276,8 @@ fi
 # sourced by bash (launchd-plist.sh), in a subshell, where only NAME=value
 # sets it. Read by sed with a comment taken off, the image, the mirror and the
 # CLI's address could be what the service never got (review of HB-1109 and
-# HB-1210). Each name .env sets is ENV_<name>, with ENVSET_<name>=1.
-# systemd_major FILE: the first number of `systemctl --version`, in
-# SYSTEMD_MAJOR, for the reader of systemd's rules (`systemd`, in node). From
-# v254 a line after a comment that ends in a backslash is a line of its own;
-# before, it went on the comment. Read always the old way, `# C:\data\` and
-# then a HATCHABOT_DB line named the database to systemd 254 and nothing here
-# (HB-1457). Asked once, and only of a FILE with a backslash at the end of a
-# line, the one place the two differ. With no systemctl to ask, empty: read as
-# v254 reads, as no systemd reads .env there (on Linux Hatchabot runs as a
-# systemd unit; a Mac's launchd job sources .env with bash, which reads that
-# line too), and that is the rule of every systemd since 2023 and of
-# Hatchabot's own readers. Never taken from the environment: one a caller
-# exported chose the rule, so it is unset here, before any reading. The same
-# in the seven scripts that read .env so (test/backupKeyLine.test.ts).
-unset SYSTEMD_MAJOR
-systemd_major() {
-  [ -z "${SYSTEMD_MAJOR+x}" ] || return 0
-  LC_ALL=C grep -q -e '\\$' -e $'\\\\\r' "$1" 2>/dev/null || return 0
-  SYSTEMD_MAJOR="$( { systemctl --version 2>/dev/null || true; } | sed -n '1s/^[^0-9]*\([0-9][0-9]*\).*/\1/p')"
-}
-env_named() {
-  # ENV_READ: 1 once .env was read through (no node, or one that failed, reads nothing).
-  local kv k
-  ENV_READ=''
-  systemd_major .env
-  for k in "$@"; do printf -v "ENV_$k" '%s' ''; printf -v "ENVSET_$k" '%s' ''; done
-  while IFS= read -r -d '' kv; do
-    k="${kv%%=*}"
-    [ "$k" != . ] || { ENV_READ=1; continue; }
-    printf -v "ENV_$k" '%s' "${kv#*=}"; printf -v "ENVSET_$k" '%s' 1
-  done < <(
-    if [ "$(uname -s)" = Darwin ]; then
-      set +eu
-      for k in "$@"; do unset "$k"; done
-      set -a; . ./.env >/dev/null 2>&1; set +a
-      for k in "$@"; do [ -z "${!k+x}" ] || printf '%s=%s\0' "$k" "${!k}"; done
-      printf '.=\0'
-    else
-      node -e '
-    const systemd = (t, ver) => {
-      // ver: the first number of `systemctl --version` (systemd_major). Before v254 a comment ending in a
-      // backslash went on over the next line; from v254, and with no systemctl to ask, that line is read.
-      const joins = Number(ver) > 0 && Number(ver) < 254;
-      const out = {}; let st = "prekey", k = "", v = "", lw = -1;
-      // lw: where the run of spaces and tabs at the end of the value starts (last_value_whitespace in
-      // systemd), the only part trimmed: an escaped space or tab is kept, as systemd keeps it.
-      const done = () => { if (k) out[k] = lw >= 0 ? v.slice(0, lw) : v; k = ""; v = ""; lw = -1; st = "prekey"; };
-      for (const c of t) {
-        const nl = c === "\n" || c === "\r", ws = c === " " || c === "\t" || nl;
-        if (st === "prekey") { if (c === "#" || c === ";") st = "comment"; else if (!ws) { k = c; st = "key"; } }
-        else if (st === "comment") { if (c === "\\") st = "commentesc"; else if (nl) st = "prekey"; }
-        else if (st === "commentesc") st = nl && !joins ? "prekey" : "comment";
-        else if (st === "key") { if (nl) { k = ""; st = "prekey"; } else if (c === "=") { k = k.replace(/[ \t]+$/, ""); st = "prevalue"; } else k += c; }
-        else if (st === "prevalue") { if (nl) done(); else if (c === "\x27") st = "single"; else if (c === "\"") st = "double"; else if (c === "\\") st = "esc"; else if (!ws) { v += c; st = "value"; } }
-        else if (st === "value") { if (nl) done(); else if (c === "\\") { st = "esc"; lw = -1; } else { if (c !== " " && c !== "\t") lw = -1; else if (lw < 0) lw = v.length; v += c; } }
-        else if (st === "esc") { st = "value"; if (!nl) v += c; }
-        else if (st === "single") { if (c === "\x27") st = "prevalue"; else v += c; }
-        else if (st === "double") { if (c === "\"") st = "prevalue"; else if (c === "\\") st = "doubleesc"; else v += c; }
-        else if (st === "doubleesc") { st = "double"; if (c !== "\n") v += "\"\\`$".includes(c) ? c : "\\" + c; }
-      }
-      // The end of the file ends a value as a newline does, quoted or escaped as far as it went, as
-      // systemd keeps it: a quote never closed, or a backslash last, lost its key here.
-      if (["prevalue", "value", "esc", "single", "double", "doubleesc"].includes(st)) done();
-      return out;
-    };
-    const out = systemd(require("node:fs").readFileSync(".env", "utf8"), process.argv[1]);
-    for (const k of process.argv.slice(2)) if (Object.prototype.hasOwnProperty.call(out, k)) process.stdout.write(k + "=" + out[k] + "\0");
-    process.stdout.write(".=\0");' "${SYSTEMD_MAJOR:-}" "$@" 2>/dev/null || true
-    fi
-  )
-}
+# HB-1210). Each name .env sets is ENV_<name>, with ENVSET_<name>=1 (env_named,
+# at the top).
 env_named HATCHABOT_IMAGE HATCHABOT_IMAGE_REGISTRY PORT HATCHABOT_TLS_CERT HATCHABOT_BIND
 
 # On the daemon .env names (DOCKER_HOST, set under the prerequisites above),
@@ -198,14 +296,27 @@ done
 IMAGE="${HATCHABOT_IMAGE:-hatchabot-runtime:latest}"
 # A fetch moves :latest of the image's repository (build-runtime-image.sh,
 # REPO), so that is the one looked at. One named by another tag (or a digest)
-# is one the owner pinned, which no fetch makes or moves (upgrade.sh leaves it).
+# is one the owner pinned, which no fetch moves (upgrade.sh leaves it).
 IMAGE_REPO="$(printf '%s' "$IMAGE" | sed 's/:[^:/]*$//')"
 LATEST="${HATCHABOT_IMAGE_REPO:-$IMAGE_REPO}:latest"
 if [ "$IMAGE" != "$IMAGE_REPO" ] && [ "$IMAGE" != "$IMAGE_REPO:latest" ] || [ "$IMAGE" != "${IMAGE%@*}" ]; then
+  # A pin of an OpenClaw version, in the repository the build writes to, is
+  # that version's own image: fetched as a candidate (it pulls the published
+  # image, or builds it), which moves no :latest. Missing, agents could not
+  # start until the owner fetched it by hand (HB-1376). Any other pin (a
+  # digest, packages, another name) is not guessed at: pulling a name could
+  # reach a registry squat or a download of gigabytes.
+  PIN_VERSION="${IMAGE#"$IMAGE_REPO":}"
   if docker image inspect "$IMAGE" >/dev/null 2>&1; then
     say "The runtime image is pinned to $IMAGE (HATCHABOT_IMAGE) — keeping it."
+  elif [ "$IMAGE" = "${IMAGE%@*}" ] && [ "${HATCHABOT_IMAGE_REPO:-$IMAGE_REPO}" = "$IMAGE_REPO" ] && [[ "$PIN_VERSION" =~ ^[0-9]{4}\.[0-9]+\.[0-9]+(-[0-9]+)?$ ]]; then
+    say "The runtime image .env pins, $IMAGE (HATCHABOT_IMAGE), is not on this machine — fetching OpenClaw $PIN_VERSION's image (downloads it, or builds it if none is published)…"
+    OPENCLAW_VERSION="$PIN_VERSION" NO_LATEST=1 ./scripts/build-runtime-image.sh || true
+    if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+      echo "⚠ Could not fetch $IMAGE now: agents cannot start until it is here. Run OPENCLAW_VERSION=$PIN_VERSION NO_LATEST=1 ./scripts/build-runtime-image.sh later, or take HATCHABOT_IMAGE out of .env for this release's default."
+    fi
   else
-    say "⚠ The runtime image .env pins, $IMAGE (HATCHABOT_IMAGE), is not on this machine, and setup does not fetch a pinned image: agents cannot start until it is here (docker pull $IMAGE), or HATCHABOT_IMAGE goes from .env for this release's default."
+    say "⚠ The runtime image .env pins, $IMAGE (HATCHABOT_IMAGE), is not on this machine, and setup fetches a pin only when it is an OpenClaw version's own image: agents cannot start until it is here (docker pull $IMAGE), or HATCHABOT_IMAGE goes from .env for this release's default."
   fi
 elif docker image inspect "$LATEST" >/dev/null 2>&1; then
   # An existing install may have promoted a NEWER image to :latest — a default
@@ -279,8 +390,8 @@ mkdir -p ~/.config/hatchabot
 # Saved as http://127.0.0.1:<port> whatever those said, the CLI asked plain
 # http of an https listener, or loopback of one on a LAN address (HB-1109).
 # Read as the service reads them (env_named, above): the last line wins
-# (audit, 2026-10-29).
-P="$ENV_PORT"
+# (audit, 2026-10-29), and the port as the service takes it (service_port).
+P="$(service_port "$ENV_PORT")"
 SCHEME=http; [ -z "$ENV_HATCHABOT_TLS_CERT" ] || SCHEME=https
 BIND="$ENV_HATCHABOT_BIND"
 case "$BIND" in
@@ -292,7 +403,63 @@ case "$BIND" in
   *:*) CLI_HOST="[$BIND]" ;;   # an IPv6 address goes in brackets in a URL
   *) CLI_HOST="$BIND" ;;
 esac
+# An address with a zone (a link-local fe80::1%eth0) goes in the URL with its
+# % written %25, as RFC 6874 writes it: Node's URL parser takes a zone in
+# neither form, so the hatchabot command asks such an address by its host and
+# port (zonedTarget, src/config/installTls.ts; HB-1539). Before it could,
+# setup saved none for it, and took away one saved (HB-1378).
+CLI_ZONED=""
+case "$BIND" in
+  *%*) CLI_ZONED=1; CLI_HOST="${CLI_HOST/\%/%25}" ;;
+esac
 CLI_URL="$SCHEME://$CLI_HOST:${P:-8080}"
+# One saved already is kept, unless it is this install's listener named as
+# it is no more: an address setup writes (loopback or the bind address) on
+# this install's port, but another scheme or address. One that an older
+# setup saved (http where the install now serves https) stayed, and the
+# command could not reach it (HB-1430). Another port is another install's,
+# and any other address one set by hand: kept, a zoned one too. The bind
+# address with a bare % (as setup wrote it before) is written with %25: a
+# bare one before a zone that starts with 25 (fe80::1%251) is read as %25
+# and the rest as the zone, so the command asked another one. On this
+# install's port, one with a zone in its host while the bind address has
+# none is one an older setup wrote from the bind address as it was: put
+# right (review of HB-1378). The host alone, in brackets: a % in a path, a
+# query or a user name (an escape) is no zone, and a URL set by hand with
+# one stays.
+zoned_url() {
+  local h="${1#*://}"
+  h="${h%%[/?#]*}"; h="${h##*@}"
+  case "$h" in
+    \[*%*\]*) return 0 ;;
+  esac
+  return 1
+}
+own_listener() {
+  local u="$1" h
+  case "$u" in
+    http://*|https://*) u="${u#*://}" ;;
+    *) return 1 ;;
+  esac
+  [ "${u##*:}" = "${P:-8080}" ] || return 1
+  h="${u%:*}"
+  case "$h" in
+    127.0.0.1|localhost|"[::1]"|"$CLI_HOST"|"${CLI_HOST/\%25/%}") return 0 ;;
+  esac
+  [ -z "$CLI_ZONED" ] && zoned_url "$1"
+}
+# The same address and scheme as setup writes, but its zone's % bare.
+spelt_bare() { [ -n "$CLI_ZONED" ] && [ "$1" = "${CLI_URL/\%25/%}" ]; }
+SAVED_URL="$( { sed -n 's/^HATCHABOT_URL=//p' ~/.config/hatchabot/env 2>/dev/null || true; } | tail -n1)"
+if [ -n "$SAVED_URL" ] && [ "$SAVED_URL" != "$CLI_URL" ] && own_listener "$SAVED_URL"; then
+  CLI_SAID="The hatchabot command now goes to $CLI_URL, where this install listens (it had $SAVED_URL)."
+  ! spelt_bare "$SAVED_URL" || CLI_SAID="The hatchabot command's saved address now writes its zone's % as %25, as a URL does: $CLI_URL (it had $SAVED_URL; after a bare %, a zone that starts with 25 is misread)."
+  CLI_TMP="$(mktemp ~/.config/hatchabot/env.XXXXXX)" \
+    && sed "s|^HATCHABOT_URL=.*|HATCHABOT_URL=$CLI_URL|" ~/.config/hatchabot/env > "$CLI_TMP" \
+    && mv -f "$CLI_TMP" ~/.config/hatchabot/env \
+    && echo "$CLI_SAID" \
+    || { rm -f "$CLI_TMP"; echo "⚠ Could not change the hatchabot command's saved address ($SAVED_URL) to $CLI_URL: set HATCHABOT_URL=$CLI_URL in ~/.config/hatchabot/env."; }
+fi
 case "$CLI_URL" in
   http://127.0.0.1:8080|http://localhost:8080) ;;
   *) grep -q '^HATCHABOT_URL=' ~/.config/hatchabot/env 2>/dev/null || echo "HATCHABOT_URL=$CLI_URL" >> ~/.config/hatchabot/env ;;

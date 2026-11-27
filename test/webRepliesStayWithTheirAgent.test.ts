@@ -85,7 +85,7 @@ function page(names: string[], extra: Record<string, unknown> = {}, consts: stri
     esc: (v: unknown) => String(v ?? ''), jsq: (v: unknown) => String(v ?? ''), onAction, fmtBytes: String,
     v2SheetSaving: () => noop, v2SheetBaseline: noop, V2_SHEET_FORMS: [], sheetReads: new Map(), onRepoPublic: noop, onParamTypeChange: noop,
     v2CtlDrawn: (el: { defaultValue?: string }) => el.defaultValue ?? '', editAgentId: 'a1', v2AgentId: null, editParamsFills: 0,
-    editLoaded: null, peersLoadedFor: null, peersCurrent: null, // what the shared buttons' locks ask (SHEET_BUTTONS)
+    editLoaded: null, peersLoadedFor: null, peersCurrent: null, sharePeopleFor: null, // what the shared buttons' locks ask (SHEET_BUTTONS)
     v2AgentDlg: { open: false }, editDlg: { open: false },
     ...extra,
   });
@@ -94,7 +94,7 @@ function page(names: string[], extra: Record<string, unknown> = {}, consts: stri
   // and the forms' shared buttons, held by a press and given back to its own agent's forms (HB-1484), as shipped.
   for (const n of ['agentPrefix', 'forAgent', 'sheetSave', 'sheetRead', 'sheetFill', 'sheetPress', 'sheetButton', 'sourceAsSaved']) if (!(n in extra)) vm.runInContext(source(n), c);
   if (!('sharingRead' in extra)) vm.runInContext(source('sharingRead'), c);
-  for (const n of ['v2Find', 'v2Mine', 'sheetPresses', 'MODEL_WAITS_ON_SOURCE', 'SHEET_BUTTONS', 'SHEET_HINTS']) if (!(n in extra)) vm.runInContext(constant(n), c);
+  for (const n of ['v2Find', 'v2Mine', 'sheetPresses', 'sheetListSaves', 'MODEL_WAITS_ON_SOURCE', 'SHEET_BUTTONS', 'SHEET_HINTS']) if (!(n in extra)) vm.runInContext(constant(n), c);
   for (const n of names) vm.runInContext(source(n), c);
   for (const n of consts) vm.runInContext(constant(n), c);
   return { c: c as Record<string, any>, $, calls, toasts };
@@ -1161,16 +1161,23 @@ describe('the sheet: only an unsaved edit holds back the redraw after Start or S
 });
 
 describe('a file that would not load: the file chosen is noted with its empty editor (HB-0475)', () => {
+  const failing = (noted: string[][], shown: boolean) => page(['loadEditFile'], {
+    editLoaded: null, editLoadGen: 0, editReverting: new Set(), EDIT_REVERTING: 'Reverting…', editDlg: { open: shown },
+    v2SheetBaseline: (...ids: string[]) => noted.push(ids), api: async () => { throw new Error('MEMORY.md is over the size limit.'); },
+  });
   it('the failure baselines the file picker as well as the editor', async () => {
     const noted: string[][] = [];
-    const { c, $ } = page(['loadEditFile'], {
-      editLoaded: null, editLoadGen: 0, editReverting: new Set(), EDIT_REVERTING: 'Reverting…',
-      v2SheetBaseline: (...ids: string[]) => noted.push(ids), api: async () => { throw new Error('MEMORY.md is over the size limit.'); },
-    });
+    const { c, $ } = failing(noted, true);
     $('editFile').value = 'MEMORY.md';
     await c.loadEditFile();
     expect(noted.at(-1)).toEqual(['editFile', 'editContent']);
     expect($('editErr').textContent).toMatch(/nothing to save/);
+  });
+  it('out of sight, the failure is said in a toast with its name, not in the error box nobody sees (HB-1487)', async () => {
+    const { c, $, toasts } = failing([], false);
+    $('editFile').value = 'MEMORY.md';
+    await c.loadEditFile();
+    expect([toasts, $('editErr').textContent]).toEqual([['Homework Helper: MEMORY.md is over the size limit. — nothing to save until it loads.'], '']);
   });
 });
 

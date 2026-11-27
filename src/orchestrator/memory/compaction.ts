@@ -1,12 +1,12 @@
 import { randomBytes } from 'node:crypto';
-import type { Agent, AIProfile } from '../../domain/types.js';
+import type { Agent } from '../../domain/types.js';
 import type { ExecResult, RuntimeProvider } from '../../providers/provider.js';
 import type { Store, TokenActionRow } from '../../store/store.js';
 import type { TokenHealthRaw } from '../usage/usage.js';
 import { modelOption } from '../sources/modelOptions.js';
 import { parseLoopLines } from '../../domain/loopLines.js';
 import { OPENCLAW_HANDLER_TIMEOUT_MS } from '../channels/channelTimeout.js';
-import { modelRefOf, runningModelOf, THRESHOLDS } from '../usage/tokenHealth.js';
+import { modelRefOf, runningModelOf, THRESHOLDS, type RunningSource } from '../usage/tokenHealth.js';
 import { compactingNow } from './compactionState.js';
 import { keyedLock } from '../../util/queues.js';
 
@@ -356,7 +356,7 @@ type CapDeps = { store: Store; provider: RuntimeProvider; log?(e: string, d: Rec
  * source it was built with, not the one chosen: the cap came off the model
  * still running, and went onto one it did not run yet (HB-0891).
  */
-export function cappedModelOf(store: Store, agent: Agent): { profile: AIProfile; provider: string; id: string } | undefined {
+export function cappedModelOf(store: Store, agent: Agent): { profile: RunningSource; provider: string; id: string } | undefined {
   // The same reading the token health row's model and billing take, so the
   // cap menu, its Recommended item and the cap route agree (HB-1170).
   return runningModelOf(store, agent);

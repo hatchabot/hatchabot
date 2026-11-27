@@ -21,6 +21,9 @@ export type Proposal = ReturnType<Store['listProposals']>[number];
  * merged playbook to the children is the push-definition route's, which the
  * route asks after a merge. No state of its own: the distillation takes the
  * child's one turn (`turns`), the merge the files turn and the busy flag.
+ * A merge is 'merging' in the store while it runs; the start puts back to
+ * waiting any that a restart cut off (HB-0888), and so does `stop()` at a
+ * shutdown, for a release that starts next and knows no 'merging' (HB-1171).
  */
 export interface Proposals {
   /** Why this child cannot distill now (no master, or three proposals already waiting), or nothing. */
@@ -29,6 +32,8 @@ export interface Proposals {
   distill(child: Agent, topic: string): Promise<Answer<{ id: string; text: string }>>;
   /** Merge a pending proposal into a running master's playbook (the route checked it is not busy). */
   merge(master: Agent, proposal: Proposal): Promise<Answer<{ merged: true }>>;
+  /** At shutdown: a merge still under way, which the process will not finish, is waiting again (HB-1171). */
+  stop(): void;
 }
 
 export interface ProposalsDeps {
@@ -200,5 +205,22 @@ export function createProposals(deps: ProposalsDeps): Proposals {
     return said({ merged: true });
   };
 
-  return { cannotDistill, distill, merge };
+  /**
+   * The process ends with this: a merge still running is cut off, as a
+   * restart cuts it off. The next start of this release puts it back to
+   * waiting (above), but a release from before 2.191.0 knows no 'merging'
+   * and neither lists nor reopens it: a rollback onto one, whose own
+   * restart cut the merge off, hid the proposal until a newer release
+   * started again (HB-1171). Its text may have landed; the merge's mark in
+   * the playbook keeps a retry from appending it twice (from v2.178.0,
+   * HB-0571). A store that cannot be written leaves it to the next start.
+   */
+  const stop: Proposals['stop'] = () => {
+    try {
+      const reopened = store.reopenInterruptedMerges();
+      if (reopened) trace()('proposal.merges_reopened', { count: reopened, at: 'shutdown' });
+    } catch { /* the next start of a release that knows 'merging' puts them back */ }
+  };
+
+  return { cannotDistill, distill, merge, stop };
 }

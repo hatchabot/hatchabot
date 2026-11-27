@@ -14,10 +14,14 @@
  * chain, a local authority) is not trusted, nor is a certificate the pinned
  * one signed. Any other address is a plain fetch. Certificate checks are
  * never turned off.
+ *
+ * And an address with a zone (a link-local fe80::1%eth0, HB-1539), which no
+ * fetch can take: it is asked by host and port, as doctor asks it
+ * (zonedTarget, the one helper both use).
  */
 import { X509Certificate } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import type { IncomingMessage } from 'node:http';
+import { request as httpRequest, type ClientRequest, type IncomingMessage } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { Readable } from 'node:stream';
 import { checkServerIdentity, rootCertificates, type DetailedPeerCertificate, type PeerCertificate } from 'node:tls';
@@ -45,15 +49,38 @@ export function installTlsSettings(envFile: string): { cert?: string; bind?: str
 const bare = (h: string) => h.trim().replace(/^\[|\]$/g, '').toLowerCase();
 
 /**
+ * A URL whose host is an IPv6 address with a zone (http://[fe80::1%25eth0]:8080/, its % as
+ * RFC 6874 writes it, or bare), in the parts a request by host and port takes. Node's URL
+ * parser takes a zone in neither form, so fetch() and a request by URL refuse the address,
+ * while a connection to it by host and port works (HB-1378). Undefined for any other URL.
+ * Doctor's probe (src/doctor.ts gives it from there too) and the CLI's requests
+ * (installFetch, HB-1539) ask such an address by these parts.
+ */
+export function zonedTarget(url: string): { protocol: 'http:' | 'https:'; host: string; port: number; path: string } | undefined {
+  const m = /^(https?):\/\/\[([0-9a-f:.]+)%(?:25)?([\w.~-]+)\](?::(\d+))?(\/.*)?$/i.exec(url);
+  if (!m) return undefined;
+  const protocol = m[1]!.toLowerCase() === 'https' ? 'https:' : 'http:';
+  return { protocol, host: `${m[2]}%${m[3]}`, port: Number(m[4] ?? (protocol === 'https:' ? 443 : 80)), path: m[5] || '/' };
+}
+
+/**
  * What a request to `url` trusts, when `url` is this install's own https
  * address and its certificate file reads; undefined for anything else.
  */
 export function ownTls(url: string, settings: { cert?: string; bind?: string }, read: (file: string) => string = (f) => readFileSync(f, 'utf8')): OwnTls | undefined {
   if (!settings.cert) return undefined;
-  let u: URL;
-  try { u = new URL(url); } catch { return undefined; }
-  if (u.protocol !== 'https:') return undefined;
-  const host = bare(u.hostname);
+  // An address with a zone by its parts (no URL takes it): its own when it is the bind address, zone and all.
+  const zoned = zonedTarget(url);
+  let host: string;
+  if (zoned) {
+    if (zoned.protocol !== 'https:') return undefined;
+    host = zoned.host.toLowerCase();
+  } else {
+    let u: URL;
+    try { u = new URL(url); } catch { return undefined; }
+    if (u.protocol !== 'https:') return undefined;
+    host = bare(u.hostname);
+  }
   const bind = settings.bind ? bare(settings.bind) : '';
   const own = host === 'localhost' || host === '::1' || /^127\.\d+\.\d+\.\d+$/.test(host) || (bind !== '' && host === bind);
   if (!own) return undefined;
@@ -79,13 +106,21 @@ export function ownTls(url: string, settings: { cert?: string; bind?: string }, 
  * body never 300 without a byte (review of HB-1375). It follows no
  * redirect: the install's own address has none to give, and one fails,
  * saying where it pointed.
+ *
+ * An address with a zone (zonedTarget) is asked by its host and port, over
+ * node:http or node:https as it says, `tls` for https only, and with none a
+ * request checked as fetch checks one (HB-1539): fetch, and a request by URL,
+ * take no zone.
  */
-export function pinnedFetch(url: string, init: RequestInit, tls: OwnTls, bounds: Partial<PinnedBounds> = {}): Promise<Response> {
+export function pinnedFetch(url: string, init: RequestInit, tls: OwnTls | undefined, bounds: Partial<PinnedBounds> = {}): Promise<Response> {
   const limit = { ...FETCH_BOUNDS, ...bounds };
+  const zoned = zonedTarget(url);
+  const secure = zoned ? zoned.protocol === 'https:' : /^https:/i.test(url);
+  const where = secure ? 'the install\'s own https address' : 'the install\'s own address';
   return new Promise((resolve, reject) => {
     const body = init.body;
     if (body != null && typeof body !== 'string' && !(body instanceof Uint8Array)) {
-      reject(new TypeError('this request body cannot be sent to the install\'s own https address'));
+      reject(new TypeError(`this request body cannot be sent to ${where}`));
       return;
     }
     const signal = init.signal ?? undefined;
@@ -98,21 +133,26 @@ export function pinnedFetch(url: string, init: RequestInit, tls: OwnTls, bounds:
     let timer: NodeJS.Timeout | undefined;
     const onAbort = () => { if (answer) answer.destroy(signal!.reason); else req.destroy(signal!.reason); };
     const done = () => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); };
-    const req = httpsRequest(url, {
-      method, headers, agent: false,
-      ca: tls.ca,
-      // A certificate a local authority signed (mkcert's), whose authority is
-      // not in the file, is trusted as the file names it.
-      allowPartialTrustChain: true,
-      checkServerIdentity: (host, cert) => pinnedIdentity(host, cert, tls),
-    }, (res) => {
+    const asked = {
+      method, headers, agent: false as const,
+      ...(secure && tls ? {
+        ca: tls.ca,
+        // A certificate a local authority signed (mkcert's), whose authority is
+        // not in the file, is trusted as the file names it.
+        allowPartialTrustChain: true,
+        checkServerIdentity: (host: string, cert: PeerCertificate) => pinnedIdentity(host, cert, tls),
+      } : {}),
+      // By host and port: the only way a zoned address is taken.
+      ...(zoned ? { host: zoned.host, port: zoned.port, path: zoned.path } : {}),
+    };
+    const onAnswer = (res: IncomingMessage) => {
       answer = res;
       clearTimeout(timer);
       const status = res.statusCode ?? 0;
       if (REDIRECTS.has(status)) {
         res.resume();
         done();
-        reject(new Error(`${url} answered ${status}, a redirect to ${res.headers.location ?? 'nowhere'}: a request to the install's own https address follows none`));
+        reject(new Error(`${url} answered ${status}, a redirect to ${res.headers.location ?? 'nowhere'}: a request to ${where} follows none`));
         return;
       }
       // Never that long without a byte of the body, as fetch's bodyTimeout.
@@ -125,11 +165,20 @@ export function pinnedFetch(url: string, init: RequestInit, tls: OwnTls, bounds:
       try {
         resolve(new Response(empty ? null : (Readable.toWeb(res) as ReadableStream<Uint8Array>), { status, statusText: res.statusMessage ?? '', headers: h }));
       } catch (err) { res.destroy(); reject(err); }
-    });
+    };
+    let req: ClientRequest;
+    try {
+      req = zoned ? (secure ? httpsRequest(asked, onAnswer) : httpRequest(asked, onAnswer))
+        : secure ? httpsRequest(url, asked, onAnswer) : httpRequest(url, asked, onAnswer);
+    } catch (err) {
+      // Options it refuses, before there was a request: no timer yet.
+      reject(new TypeError('fetch failed', { cause: err }));
+      return;
+    }
     signal?.addEventListener('abort', onAbort, { once: true });
     // Connected (TLS and all) within its bound; then the answer's headers within theirs.
     timer = setTimeout(() => req.destroy(late('no connection was made', limit.connect, 'UND_ERR_CONNECT_TIMEOUT')), limit.connect);
-    req.on('socket', (socket) => socket.once('secureConnect', () => {
+    req.on('socket', (socket) => socket.once(secure ? 'secureConnect' : 'connect', () => {
       clearTimeout(timer);
       if (!answer) timer = setTimeout(() => req.destroy(late('no answer came', limit.headers, 'UND_ERR_HEADERS_TIMEOUT')), limit.headers);
     }));
@@ -162,8 +211,13 @@ function pinnedIdentity(host: string, cert: PeerCertificate, tls: OwnTls): Error
   return checkServerIdentity(host, cert);
 }
 
-/** A request from the CLI to the install it belongs to: pinned for its own https address, a plain fetch otherwise. */
+/**
+ * A request from the CLI to the install it belongs to: pinned for its own
+ * https address; an address with a zone by its host and port (HB-1539); a
+ * plain fetch otherwise.
+ */
 export function installFetch(url: string, init: RequestInit, envFile: string): Promise<Response> {
-  const tls = ownTls(url, installTlsSettings(envFile));
-  return tls ? pinnedFetch(url, init, tls) : fetch(url, init);
+  const zoned = zonedTarget(url);
+  const tls = /^https:/i.test(url) ? ownTls(url, installTlsSettings(envFile)) : undefined;
+  return tls || zoned ? pinnedFetch(url, init, tls) : fetch(url, init);
 }

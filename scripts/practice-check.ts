@@ -20,8 +20,8 @@
  * --ask-at: when the agent's last turn began (the gate's ask, just before),
  * which the usage reader must see before a quiet usage can mean anything.
  * --settle-ms: how long after the run ends the agent's own usage must stay as
- * it was, read again then (8000 by default): a release could copy the run
- * there a moment after it ends.
+ * it was, read again then (8000 by default, at most 60000): a release could
+ * copy the run there a moment after it ends.
  *
  * One model turn, on the agent's own AI source. Exit 0 when both hold, 1 when
  * either does not, 3 when it could not tell, 2 for a wrong call. The last line
@@ -36,15 +36,17 @@ import { PRACTICE_OPENCLAW, skillTrialScript, type PracticeSpent } from '../src/
 import { USAGE_READER_SCRIPT } from '../src/orchestrator/usage/usage.js';
 
 const [container, slug, release, ...flags] = process.argv.slice(2);
-/** Each flag at most once, with a whole number of milliseconds. */
+/** Each flag at most once, with a whole number of milliseconds; a settle of a minute at most, as nothing ends a longer wait (HB-1453). */
+const SETTLE_MAX_MS = 60_000;
 const flagged: Record<string, number> = {};
 for (let i = 0; i < flags.length; i += 2) {
   const [name, ms] = [flags[i]!, flags[i + 1] ?? ''];
-  if (!['--ask-at', '--settle-ms'].includes(name) || name in flagged || !/^\d{1,15}$/.test(ms)) { flagged['bad'] = 1; break; }
+  if (!['--ask-at', '--settle-ms'].includes(name) || name in flagged || !/^\d{1,15}$/.test(ms)
+    || (name === '--settle-ms' && Number(ms) > SETTLE_MAX_MS)) { flagged['bad'] = 1; break; }
   flagged[name] = Number(ms);
 }
 if (!container || !slug || !release || 'bad' in flagged) {
-  console.error('usage: node_modules/.bin/tsx scripts/practice-check.ts <container> <agent slug> <OpenClaw release> [--ask-at <ms>] [--settle-ms <ms>]');
+  console.error(`usage: node_modules/.bin/tsx scripts/practice-check.ts <container> <agent slug> <OpenClaw release> [--ask-at <ms>] [--settle-ms <ms, at most ${SETTLE_MAX_MS}>]`);
   process.exit(2);
 }
 const askAt = flagged['--ask-at'];
@@ -65,19 +67,31 @@ const tail = (s: string) => s.trim().split('\n').slice(-1)[0]!.slice(0, 200);
 type Parts = { calls: number; input: number; output: number; cacheRead: number; cacheWrite: number };
 const tokens = (p: Parts) => p.input + p.output + p.cacheRead + p.cacheWrite;
 const count = (x: unknown) => (typeof x === 'number' && Number.isFinite(x) && x > 0 ? x : 0);
+const callsOf = (n: number) => `${n} call${n === 1 ? '' : 's'}`;
+/**
+ * How the agent's own usage moved between two reads, `within` (" within 3 s") where it reads right:
+ * "by 2160 tokens in 1 call" as it rose, "it fell by 5000 tokens and 1 call" (only what fell) as it
+ * fell, not "by -2160 tokens in -1 calls" (HB-1453), or that its calls' ids changed and not their totals.
+ */
+const movedBy = (t: number, c: number, within = '') => {
+  if (t >= 0 && c >= 0) return t || c ? `by ${t} tokens in ${callsOf(c)}${within}` : `its calls' ids changed${within}, not their totals`;
+  if (t <= 0 && c <= 0) return `it fell by ${[t ? `${-t} tokens` : '', c ? callsOf(-c) : ''].filter(Boolean).join(' and ')}${within}`;
+  return `its tokens ${t > 0 ? 'rose' : 'fell'} by ${Math.abs(t)} and its calls ${c > 0 ? 'rose' : 'fell'} by ${Math.abs(c)}${within}`;
+};
 
 /**
  * The agent's own usage as the sampler reads it (usage.ts USAGE_READER_SCRIPT),
- * summed over its models, and the event ids of the calls it counted (--ids).
+ * summed over its models, and the event ids of the calls it counted (--ids);
+ * `over` when there were more of those than it lists.
  */
-function ownUsage(when: string): { sum: Parts; ids: Set<string>; last: number } {
+function ownUsage(when: string): { sum: Parts; ids: Set<string>; last: number; over: boolean } {
   const r = spawnSync('docker', ['exec', container!, 'node', '-e', USAGE_READER_SCRIPT, '--', '--ids'], { encoding: 'utf8', timeout: 60_000, maxBuffer: 16 * 1024 * 1024 });
-  let read: { models?: Record<string, Partial<Parts>>; ids?: unknown; last?: unknown } | undefined;
+  let read: { models?: Record<string, Partial<Parts>>; ids?: unknown; last?: unknown; idsOver?: unknown } | undefined;
   try { read = r.status === 0 ? JSON.parse(r.stdout) : undefined; } catch { /* below */ }
   if (!read || !read.models || typeof read.models !== 'object' || !Array.isArray(read.ids)) unknown(`could not read the agent's own usage ${when} the practice: ${tail(r.stderr || r.error?.message || `exit ${r.status}`) || 'no answer'}`);
   const sum: Parts = { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   for (const m of Object.values(read!.models!)) for (const k of Object.keys(sum) as (keyof Parts)[]) sum[k] += count(m?.[k]);
-  return { sum, ids: new Set((read!.ids as unknown[]).map(String)), last: count(read!.last) };
+  return { sum, ids: new Set((read!.ids as unknown[]).map(String)), last: count(read!.last), over: read!.idsOver === true };
 }
 
 /** The agent's heartbeat setting, as `openclaw config get` gives it: off is "0m" (configWriter.ts). */
@@ -129,32 +143,41 @@ if (value!.spentFrom !== 'state') {
 // ids, and nothing new there at all (HB-1418 review). The agent makes no call
 // of its own meanwhile (its heartbeat is off, configWriter.ts), so a call the
 // ids do not find, a copy of the run under other ids say, still shows as a rise.
+// A run id the agent's own calls already had before the run is no copy of it
+// (if OpenClaw's ids repeat): the reader counts an id once, and the totals tell
+// for it (HB-1453). Past the ids the reader lists, they tell nothing, as with
+// calls that carry none: the totals alone tell then.
 const runIds = Array.isArray(value!.spentIds) ? (value!.spentIds as unknown[]).map(String) : [];
-const byIds = runIds.length > 0 && runIds.length === ran.calls;
-const twice = runIds.filter((id) => after.ids.has(id)).length;
+const fresh = runIds.filter((id) => !before.ids.has(id)), had = runIds.length - fresh.length;
+const over = before.over || after.over;
+const byIds = !over && runIds.length > 0 && runIds.length === ran.calls;
+const noIds = over ? 'the agent has more calls than the usage reader lists by id (100000)' : 'the run\'s calls carry no ids';
+const twice = fresh.filter((id) => after.ids.has(id)).length;
 if (twice) fails(`the agent's own transcripts hold ${twice} of the run's ${ran.calls} calls too (by their ids), where the usage sampler counts them again: counted twice`);
 const rose = tokens(after.sum) - tokens(before.sum), added = after.sum.calls - before.sum.calls;
+if (rose < 0 || added < 0) unknown(`the agent's own usage changed while the practice ran (${movedBy(rose, added)}), so its totals cannot tell a copy of the run. Run the gate again`);
 if (rose || added) {
-  unknown(`the agent's own usage rose by ${rose} tokens in ${added} call${added === 1 ? '' : 's'} while the practice ran, `
-    + (byIds ? 'none of them the run\'s by their ids: another turn ran meanwhile, or this release keeps a copy of the run under other ids' : 'and the run\'s calls carry no ids to tell them apart')
+  unknown(`the agent's own usage rose by ${rose} tokens in ${callsOf(added)} while the practice ran, `
+    + (byIds ? 'none of them the run\'s by their ids: another turn ran meanwhile, or this release keeps a copy of the run under other ids'
+      : over ? `and ${noIds}, too many for its ids to tell them apart` : 'and the run\'s calls carry no ids to tell them apart')
     + '. Run the gate again');
 }
-if (!byIds && !heartbeatOff()) unknown('the run\'s calls carry no ids, and the agent\'s heartbeat is not off, so another turn could have hidden a copy of the run. Run the gate again');
+if (!byIds && !heartbeatOff()) unknown(`${noIds}, and the agent's heartbeat is not off, so another turn could have hidden a copy of the run. Run the gate again`);
 // Counted once a moment later too: the agent's own usage read again once the
 // run has settled, unchanged in its ids, calls and tokens (review, N1): a copy
 // the release writes there just after the run ends was missed by the read above.
 const seconds = `${+(settleMs / 1000).toFixed(1)} s`;
 Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, settleMs);
 const settled = ownUsage('after the run ended');
-const late = runIds.filter((id) => settled.ids.has(id)).length;
+const late = fresh.filter((id) => settled.ids.has(id)).length;
 if (late) fails(`the agent's own transcripts hold ${late} of the run's ${ran.calls} calls too (by their ids), copied there within ${seconds} of the run's end, where the usage sampler counts them again: counted twice`);
 const lateRose = tokens(settled.sum) - tokens(after.sum), lateAdded = settled.sum.calls - after.sum.calls;
 const lateIds = [...settled.ids].filter((id) => !after.ids.has(id)).length + [...after.ids].filter((id) => !settled.ids.has(id)).length;
 if (lateRose || lateAdded || lateIds) {
-  unknown(`the agent's own usage changed after the run ended (by ${lateRose} tokens in ${lateAdded} call${lateAdded === 1 ? '' : 's'} within ${seconds}): this release may keep a copy of the run there a moment later, or another turn ran. Run the gate again`);
+  unknown(`the agent's own usage changed after the run ended (${movedBy(lateRose, lateAdded, ` within ${seconds}`)}): this release may keep a copy of the run there a moment later, or another turn ran. Run the gate again`);
 }
 const held = `the run's ${ran.calls} call${ran.calls === 1 ? '' : 's'} (${tokens(ran)} tokens) are in its own state folder, where Practice reads them, and `
-  + (byIds ? `none of them is in the agent's own usage (by their ids), which did not rise, then or in the ${seconds} after the run ended: counted once`
-    : `the agent's own usage did not rise, then or in the ${seconds} after the run ended (by its totals: the run's calls carry no ids; the agent's heartbeat is off): counted once`)
+  + (byIds ? `none of them is in the agent's own usage (by their ids${had ? `; ${had} of them also the id of a call the agent had made before, which the reader counts once` : ''}), which did not rise, then or in the ${seconds} after the run ended: counted once`
+    : `the agent's own usage did not rise, then or in the ${seconds} after the run ended (by its totals: ${noIds}; the agent's heartbeat is off): counted once`)
   + (status === 'completed' ? '' : ' (the model did not show it read both the skill and the sample: the skills live test checks that)');
 holds(held);

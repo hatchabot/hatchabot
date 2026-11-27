@@ -1,4 +1,4 @@
-import { afterAll, afterEach, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -9,7 +9,6 @@ import type { ExecResult } from '../src/providers/provider.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { clearBusy } from '../src/orchestrator/lifecycle/busy.js';
 import { AppError, appChat, hostGit, installRelease, mergeConfig, parseManifest, resolveRelease, type AgentFacts } from '../src/orchestrator/apps/apps.js';
 
 /**
@@ -32,7 +31,6 @@ const as = { 'x-hatchabot-owner': OWNER };
 
 const tmp: string[] = [];
 afterAll(() => { for (const d of tmp) rmSync(d, { recursive: true, force: true }); });
-afterEach(() => { clearBusy('a1'); clearBusy('a2'); });
 
 const gitIn = (dir: string, ...a: string[]) => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Test', '-c', 'user.email=test@example.org', '-C', dir, ...a],
   { env: { HOME: dir, PATH: '/usr/bin:/bin', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' } });

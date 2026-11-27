@@ -148,6 +148,11 @@ const RECORDED = `
 114 e1ef61f659f8
 115 35ebc7605840
 116 7af09496718b
+117 d4c7bf5edded
+118 b2486bfac6b0
+119 f3804e8ae643
+120 1b44407eabdc
+121 b282a83cd46b
 `;
 
 type Db = Database.Database;
@@ -178,8 +183,16 @@ const TABLES_SINCE_2_190 = ['adopt_carried_tasks', 'agent_holds', 'ai_profile_to
  * it is held to that schema with these run on it, in order.
  *   - 113: agent_shares.parameters, a share's setup fields (HB-0960).
  *   - 114: an index on rate_hits.at, for its prune by time (HB-0836).
+ *   - 119: managed_crons.after_copy, a task recorded after a restored copy (HB-1317).
+ * A step on a table made since v2.190.0 is not one of them: that table is
+ * not in its schema, and is held to a new database's below, steps and all.
+ *   - 117: adopt_carried_tasks.fingerprint, what a carried task held (HB-1200).
+ *   - 118: ai_profile_tombstones.owner_id, the account a deleted source was (HB-1179).
+ *   - 120: connection_cleanups.given_up_at, a revoke the pass gave up, kept as its owner's notice (HB-1336).
+ *   - 121: practice_usage.refused, the calls a practice run's source refused (HB-1497).
  */
-const STEPS_SINCE_2_190 = SCHEMA_STEPS.filter((s) => s.n > 112);
+const onTableSince2190 = (s: SchemaStep) => TABLES_SINCE_2_190.some((t) => new RegExp(`^\\s*ALTER\\s+TABLE\\s+${t}\\s`, 'i').test(s.sql));
+const STEPS_SINCE_2_190 = SCHEMA_STEPS.filter((s) => s.n > 112 && !onTableSince2190(s));
 /** v2.190.0's schema on disk, with the steps since run on it: what every database comes to. */
 const sinceV2190 = (db: Db): Db => { for (const s of STEPS_SINCE_2_190) db.exec(s.sql); return db; };
 /** Every table, index and their exact text, but for the record the numbered scheme adds and the tables made since v2.190.0. */

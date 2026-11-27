@@ -4,7 +4,7 @@ import type { Agent } from '../../domain/types.js';
 import { REBUILD_POLICIES, rebuildPolicy, type RebuildPolicy } from '../../domain/rebuildPolicy.js';
 import { canTransition } from '../../domain/stateMachine.js';
 import { AgentBusyError } from '../../orchestrator/lifecycle/busy.js';
-import { machineTz, monthKey } from '../../orchestrator/usage/budgets.js';
+import { machineTz, monthKey, startedOverCutOffPause } from '../../orchestrator/usage/budgets.js';
 import { NoLongerSleepy } from '../../orchestrator/lifecycle/hibernate.js';
 import type { AgentLifecycle } from '../../orchestrator/lifecycle/agentLifecycle.js';
 import { AgentEditBody } from '../../orchestrator/lifecycle/agentEdits.js';
@@ -306,12 +306,12 @@ export function registerLifecycleRoutes(app: FastifyInstance, ctx: RouteContext)
     if (agent.state !== 'RUNNING') {
       return reply.code(409).send({ error: `Cannot stop while ${agent.state}` });
     }
-    // Under the agent's lifecycle lock (power.ts stopRunning); its answer is made while the lock is held.
+    // Under the agent's lifecycle lock (power.ts stopRunning); its answer is
+    // made while the lock is held, and the starts a restart left owed on it
+    // are settled there too (HB-0980): stopped on purpose, they are not to undo it.
     try {
       const stopped = await stopRunning(agent.id, (now: Agent) => publicAgent(now));
       if (!stopped.ok) return reply.code(409).send({ error: stopped.error });
-      // Stopped on purpose: a start a restart left owed is not to undo it (HB-0980).
-      settleStartsOwedOn(store, agent.id, 'owner-stop');
       return stopped.value;
     } catch (err) {
       if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
@@ -338,6 +338,9 @@ export function registerLifecycleRoutes(app: FastifyInstance, ctx: RouteContext)
     // yet, is ended by this start too: before, only this month's was, and the
     // passes went on owing it a start (HB-1011).
     const month = monthKey(Date.now(), machineTz()), at = new Date().toISOString();
+    // A budget stop a restart cut off before its pause was recorded (its hold
+    // only) is the pause this Start ends, as the owner's (HB-1406).
+    if (startedOverCutOffPause(store, agent.id, at) === month) trace(agent.id)('budget.started_by_hand', {});
     for (const pause of store.openBudgetPauses(agent.id)) {
       if (pause.kind !== 'pause' || pause.month > month) continue;
       store.resumeBudgetPause(agent.id, pause.month, at, 'owner');

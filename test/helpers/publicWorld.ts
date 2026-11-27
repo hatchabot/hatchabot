@@ -73,15 +73,23 @@ export async function world(env: Record<string, string> = {}, opts: { on?: boole
   const cookie = await privCookie(h, 'owner', owner.password);
   const call: World['call'] = (method, url, payload, c = cookie) => h.app.inject({ method: method as 'GET', url, headers: { cookie: c }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   if (opts.on) {
-    let r = await call('POST', '/v1/public-access/on', { confirm: true });
-    // The port was chosen before the listener opens it (ports.ts). If something took it in between, the switch took itself back: choose again.
-    for (let i = 0; i < 4 && r.statusCode !== 200 && portTaken(r.body) && !env.HATCHABOT_PUBLIC_PORT; i++) {
-      h.port = await freePort();
-      r = await call('POST', '/v1/public-access/on', { confirm: true });
-    }
+    const r = await turnOn({ h, call }, { portNamed: !!env.HATCHABOT_PUBLIC_PORT });
     if (r.statusCode !== 200) throw new Error(`could not turn public access on: ${r.body}`);
   }
   return { h, owner, call, shim, envFile, dir, sent };
+}
+/**
+ * The switch turned on. The port was chosen before the listener opens it, and
+ * nothing held it meanwhile (ports.ts): if something took it in between, the
+ * switch took itself back, so choose again. Not when the test named the port.
+ */
+export async function turnOn(w: Pick<World, 'h' | 'call'>, { portNamed = false }: { portNamed?: boolean } = {}): ReturnType<World['call']> {
+  let r = await w.call('POST', '/v1/public-access/on', { confirm: true });
+  for (let i = 0; i < 4 && r.statusCode !== 200 && portTaken(r.body) && !portNamed; i++) {
+    w.h.port = await freePort();
+    r = await w.call('POST', '/v1/public-access/on', { confirm: true });
+  }
+  return r;
 }
 export const envNow = (envFile: string) => activeValues(readFileSync(envFile, 'utf8'));
 export const changing = (shim: Shim) => shim.calls().filter((c) => c[0] === 'funnel' && c[1] !== 'status').map((c) => c.join(' '));

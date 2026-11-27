@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type Database from 'better-sqlite3';
 import type { AgentState } from '../src/domain/types.js';
-import { clearBusy, isBusy, markBusy } from '../src/orchestrator/lifecycle/busy.js';
+import { isBusy, markBusy } from '../src/orchestrator/lifecycle/busy.js';
 import { beginOperation } from '../src/orchestrator/lifecycle/operations.js';
 import { readSkillFile, mutateSkillFile, SkillFileError, type SkillFileView } from '../src/orchestrator/skills/skillFiles.js';
 import { runSkillTrial, SKILL_TRIAL_LIMITS, type SkillTrialResult } from '../src/orchestrator/skills/skillTrials.js';
@@ -21,7 +21,6 @@ const worlds: World[] = [], releases: Array<() => void> = [];
 beforeEach(() => vi.resetAllMocks());
 afterEach(async () => {
   for (const release of releases.splice(0)) release();
-  clearBusy('a1');
   while (worlds.length) await worlds.pop()!.f.close();
   vi.restoreAllMocks();
 });

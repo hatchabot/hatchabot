@@ -15,7 +15,7 @@ import type {
   RuntimeSpec,
   RuntimeStatus,
 } from './provider.js';
-import { EmbedderUntouchedError, IMAGE_FACTS_FORMAT, type ImageFacts, type ImagesInUse, type ImageTagInfo, isDiskFull, parseImageFacts, OneShotNotGoneError, ProviderError, VOLUME_GONE, VolumeGoneError, VolumeUntouchedError, parseByteSize, parseCgroupMemory, parseChannelsLabel, parseEmbedEngineLabel, parsePluginInstallLabel, parsePluginsLabel, type ContainerStats, type EmbedEngine } from './provider.js';
+import { EmbedderUntouchedError, IMAGE_FACTS_FORMAT, type ImageFacts, type ImagesInUse, type ImageTagInfo, isDiskFull, parseImageFacts, OneShotNotGoneError, ProviderError, VOLUME_GONE, VolumeGoneError, VolumeUntouchedError, parseByteSize, parseCgroupMemory, parseChannelsLabel, parseEmbedEngineLabel, parsePluginInstallLabel, parsePluginsLabel, runConfigId, type ContainerStats, type EmbedEngine } from './provider.js';
 import { CONTAINER_GEN } from '../domain/rebuildPolicy.js';
 import { LOOP_LINE } from '../domain/loopLines.js';
 import { CALL_RE, logKey, stampKey } from '../domain/modelCallLines.js';
@@ -303,6 +303,10 @@ async function idFileFor(): Promise<IdFile | undefined> {
   } catch { return undefined; }
 }
 
+/** How many times a start looks at the running memory search engine's key and limit, and how long apart, before it fails (HB-1402 review). */
+const EMBED_LOOK_TRIES = 3;
+const EMBED_LOOK_GAP_MS = 1000;
+
 /** The label on every volume one-shot; its value is the install's prefix. */
 export const ONESHOT_LABEL = 'hatchabot.oneshot';
 /**
@@ -336,17 +340,20 @@ async function syncFolder(dir: string): Promise<void> {
 }
 
 /**
- * The end of one `image inspect` line in listImageTags: `|<layers as JSON>|<labels
- * as JSON>`. JSON keeps a label's own new lines out of the listing; a line
- * whose end is not that (a label with a `|` of its own before it, a daemon that
- * printed something else) says nothing, so its image is matched by nothing.
+ * The end of one `image inspect` line in listImageTags: `|<layers as JSON>|<config
+ * as JSON>`, its labels in the config. JSON keeps a label's own new lines out
+ * of the listing; a line whose end is not that (a label with a `|` of its own
+ * before it, a daemon that printed something else) says nothing, so its image
+ * is matched by nothing. How it runs, from the config (HB-1330): runConfigId.
  */
-function builtFrom(line: string): { buildInputs?: string; derived?: string; recipe?: string; layers?: string[] } {
+function builtFrom(line: string): { buildInputs?: string; derived?: string; recipe?: string; layers?: string[]; config?: string } {
   const m = /\|(\[[^\]|]*\]|null)\|(\{.*\}|null)$/.exec(line);
   if (!m) return {};
   try {
     const layers: unknown = JSON.parse(m[1]!);
-    const labels: unknown = JSON.parse(m[2]!);
+    const config: unknown = JSON.parse(m[2]!);
+    const labels: unknown = config && typeof config === 'object' ? (config as Record<string, unknown>).Labels : undefined;
+    const runs = runConfigId(config);
     const label = (k: string) => {
       const v = labels && typeof labels === 'object' ? (labels as Record<string, unknown>)[k] : undefined;
       return typeof v === 'string' && v ? v : undefined;
@@ -356,6 +363,7 @@ function builtFrom(line: string): { buildInputs?: string; derived?: string; reci
       derived: label('org.hatchabot.derived'),
       recipe: label('org.hatchabot.recipe'),
       layers: Array.isArray(layers) && layers.length && layers.every((x) => typeof x === 'string' && /^sha256:[a-f0-9]{64}$/.test(x)) ? layers as string[] : undefined,
+      ...(runs ? { config: runs } : {}),
     };
   } catch {
     return {};
@@ -529,6 +537,11 @@ export class LocalDockerProvider implements RuntimeProvider {
       // Given up only when its removal did not show it gone.
       if (res.timedOut) { if (!(await this.#reapOneShot(one.name))) this.#gaveUpOn(writes); }
       else if (writes && cutOff(res)) await this.#endedBadly(one.name, writes);
+      // One that writes nothing (a read-only shell, a probe) whose client was
+      // cut off (a dropped link to its runner: 255) may run on there, holding
+      // the volume, as a download's did (HB-1114): removed by name, as it is,
+      // without waiting (HB-1399).
+      else if (cutOff(res)) void this.#reapOneShot(one.name);
       return res;
     } finally { IN_FLIGHT.delete(one.name); }
   }
@@ -1737,9 +1750,10 @@ export class LocalDockerProvider implements RuntimeProvider {
     // What's inside: the OpenClaw version label, one inspect for all distinct ids.
     const ids = [...new Set(tags.map((t) => t.imageId))];
     if (ids.length) {
-      // Its layers and all its labels last, as JSON (HB-0986): what it was
-      // built from, and whether it is the same image as another by its files.
-      const ins = await this.#docker(['image', 'inspect', '--format', '{{.Id}}|{{ index .Config.Labels "org.agentclaw.openclaw-version" }}|{{ index .Config.Labels "org.hatchabot.channels" }}|{{ index .Config.Labels "org.hatchabot.extra-packages" }}|{{ index .Config.Labels "org.hatchabot.embed-engine" }}|{{ index .Config.Labels "org.hatchabot.plugins" }}|{{json .RootFS.Layers}}|{{json .Config.Labels}}', ...ids]);
+      // Its layers and its whole config last, as JSON (HB-0986): what it was
+      // built from (its labels), whether it is the same image as another by
+      // its files, and how it runs (HB-1330).
+      const ins = await this.#docker(['image', 'inspect', '--format', '{{.Id}}|{{ index .Config.Labels "org.agentclaw.openclaw-version" }}|{{ index .Config.Labels "org.hatchabot.channels" }}|{{ index .Config.Labels "org.hatchabot.extra-packages" }}|{{ index .Config.Labels "org.hatchabot.embed-engine" }}|{{ index .Config.Labels "org.hatchabot.plugins" }}|{{json .RootFS.Layers}}|{{json .Config}}', ...ids]);
       // Labels that could not be read are not "no labels" either. One image
       // removed since the listing is only gone: the others still print.
       if (ins.code !== 0 && !/no such image/i.test(ins.stderr)) throw new ProviderError(`image inspect failed: ${ins.stderr.slice(0, 300)}`, "Couldn't ask Docker for its images.");
@@ -1748,19 +1762,26 @@ export class LocalDockerProvider implements RuntimeProvider {
       const extras = new Map<string, string[]>();
       const engines = new Map<string, EmbedEngine>();
       const plugs = new Map<string, string[]>();
-      const built = new Map<string, { buildInputs?: string; derived?: string; recipe?: string; layers?: string[] }>();
+      const built = new Map<string, { buildInputs?: string; derived?: string; recipe?: string; layers?: string[]; config?: string }>();
+      const printed = new Set<string>();
       for (const l of ins.stdout.split('\n')) {
         const [id, v, c, x, e, pl] = l.split('|');
         if (!id) continue;
         const key = id.replace(/^sha256:/, '').slice(0, 12);
+        printed.add(key);
         if (v) ver.set(key, v);
         chans.set(key, parseChannelsLabel(c));
         extras.set(key, String(x ?? '').split(/[\s,]+/).filter((p) => /^[a-z0-9][a-z0-9+.-]*$/.test(p)));
-        engines.set(key, parseEmbedEngineLabel(e));
+        // No label is not "baked": an image from before it says nothing (HB-1347).
+        if (e && e !== '<no value>') engines.set(key, parseEmbedEngineLabel(e));
         plugs.set(key, parsePluginsLabel(pl));
         built.set(key, builtFrom(l));
       }
       for (const t of tags) { t.openclawVersion = ver.get(t.imageId); t.channels = chans.get(t.imageId); t.extraPackages = extras.get(t.imageId); t.embedEngine = engines.get(t.imageId); t.plugins = plugs.get(t.imageId); Object.assign(t, built.get(t.imageId)); }
+      // An image removed since the listing is not listed: kept, with nothing
+      // read of it, it read as an image with no packages, plugins or engine
+      // (HB-1161).
+      if (ins.code !== 0) return tags.filter((t) => printed.has(t.imageId));
     }
     return tags;
   }
@@ -3105,8 +3126,26 @@ export class LocalDockerProvider implements RuntimeProvider {
     const memory = embedderMemory();
     let replaced = false;
     if ((await this.#containerState(embedder)) !== 'absent') {
-      const worn = await this.#docker(['inspect', embedder, '--format', '{{ index .Config.Labels "hatchabot.embed-key" }}|{{ index .Config.Labels "hatchabot.embed-memory" }}|{{.HostConfig.Memory}}']);
+      const look = () => this.#docker(['inspect', embedder, '--format', '{{ index .Config.Labels "hatchabot.embed-key" }}|{{ index .Config.Labels "hatchabot.embed-memory" }}|{{.HostConfig.Memory}}']);
+      const unread = (r: { code: number; stderr: string }) => r.code !== 0 && !NO_SUCH_CONTAINER.test(r.stderr);
+      let worn = await look();
+      // One failed answer is asked again, twice, a second apart: a start that
+      // fails stops the service (embedder.ts), and one inspect that failed
+      // took an engine serving on the right key and limit down (HB-1402
+      // review). Not one that had no answer in its time: a hung daemon held
+      // the embedder's turn three times over (HB-1402 re-review).
+      for (let again = 0; again < EMBED_LOOK_TRIES - 1 && unread(worn) && !worn.timedOut; again++) {
+        await new Promise((r) => setTimeout(r, EMBED_LOOK_GAP_MS));
+        worn = await look();
+      }
       const [wornKey = '', asked = '', held = ''] = worn.stdout.trim().split('|');
+      // Unread is not "the same": an engine whose key or limit could not be
+      // read was kept, on its old ones, and the start said it was up (HB-1402),
+      // as one whose removal Docker refused did. Gone since the look above,
+      // it is made again below.
+      if (unread(worn)) {
+        throw untouched(new ProviderError(`embedder inspect failed: ${worn.stderr.slice(-300)}`, "Couldn't read the memory search engine's settings to start it. Try again in a moment."));
+      }
       if (worn.code === 0 && ((keyHash && wornKey !== keyHash) || engineOffLimit(asked, held))) {
         // A removal Docker refused (a slow daemon's timeout) kept the old
         // engine, on its old key or limit, and the start went on and said it
@@ -3701,11 +3740,17 @@ export async function sshRoute(endpoint: string, ssh = 'ssh'): Promise<SshRoute 
  * probe (milliseconds; reachable() probes at most every REACH_OK_MS): an
  * alias edited to a new HostName, a machine made again elsewhere, is where
  * docker goes next, and a route kept for the life of the process knocked
- * on the old one, every call refused until a restart.
+ * on the old one, every call refused until a restart. One `ssh -G` that
+ * fails (killed at its limit under load, a `Match exec` that failed) knocks
+ * where the last answer said, not on the name as written: an alias's name
+ * and port 22 failed, and its runner was refused as "not answering" for 30
+ * seconds while it was up (HB-1157).
  */
 export function sshReachProbe(endpoint: string, ssh = 'ssh'): (host: string, port: number, timeoutMs: number) => Promise<boolean> {
+  let last: SshRoute | undefined;
   return async (host, port, timeoutMs) => {
-    const route = await sshRoute(endpoint, ssh);
+    const route = (await sshRoute(endpoint, ssh)) ?? last;
+    last = route;
     if (route === 'through') return true;
     return tcpReachable(route?.host ?? host, route?.port ?? port, timeoutMs);
   };
@@ -3717,7 +3762,9 @@ export function sshTarget(dockerHost: string): { dest: string; port?: string } |
   // (a leading "-", e.g. -oProxyCommand=…), no spaces. A host may have an
   // underscore, as an ssh alias may and as Add takes it (parseSshEndpoint):
   // refused here, its runner ran agents whose consoles never opened (HB-1115).
-  const m = /^ssh:\/\/([A-Za-z0-9_][A-Za-z0-9._-]*(?:@[A-Za-z0-9_][A-Za-z0-9._-]*)?)(?::(\d{1,5}))?\/?$/.exec(dockerHost.trim());
+  // A user or host may start with a "." for the same reason: ssh and Docker
+  // take it, and it is no option (HB-1258).
+  const m = /^ssh:\/\/([A-Za-z0-9_.][A-Za-z0-9._-]*(?:@[A-Za-z0-9_.][A-Za-z0-9._-]*)?)(?::(\d{1,5}))?\/?$/.exec(dockerHost.trim());
   return m ? { dest: m[1]!, port: m[2] } : undefined;
 }
 

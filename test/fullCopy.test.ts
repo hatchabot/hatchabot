@@ -13,14 +13,15 @@ import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import { MemSecrets } from './support/world.js';
 import type { ChannelProvisioner } from '../src/channels/channel.js';
+import { ranOnAnEarlierSource } from '../src/orchestrator/usage/usageReadings.js';
 
-async function installation(owner: string) {
+async function installation(owner: string, sourceId = 'p1') {
   const store = new Store(new Database(':memory:'));
   const secrets = new MemSecrets();
   const provider = new MockProvider();
   store.insertHost({ id: 'h1', ownerId: owner, kind: 'local', provider: 'mock', name: 'Family box', settings: {}, createdAt: 'now' });
-  store.insertAIProfile({ id: 'p1', ownerId: owner, name: 'Claude', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p1', createdAt: 'now' });
-  await secrets.put('ai/p1', 'fixture-value');
+  store.insertAIProfile({ id: sourceId, ownerId: owner, name: 'Claude', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: `ai/${sourceId}`, createdAt: 'now' });
+  await secrets.put(`ai/${sourceId}`, 'fixture-value');
   return { store, secrets, provider, deps: { store, secrets, provider, channel: { kind: 'telegram' } as unknown as ChannelProvisioner, sleep: async () => {} } };
 }
 
@@ -85,5 +86,34 @@ describe('a full copy keeps what manages the agent, not only its volume', () => 
     expect(a.cronTriggers).toBe(true);
     expect(a.groupAccess).toBeUndefined();
     expect(a.filesMaxMb).toBeUndefined();
+  });
+
+  it('its lifetime totals are marked for its time on the other machine\'s source, or an earlier one there, and kept so after its build here (HB-1551)', async () => {
+    const src = await source();
+    src.store.setAgentApplied('a1', 'p1', 'claude-opus-4-8');
+    const copy = (await exportAgent(src.deps, 'a1')).data;
+    // Moved to another Hatchabot: its transcripts came, and they were on that machine's source.
+    const there = await installation('owner-dst', 'p-dst');
+    const moved = await importAgent(there.deps, copy, { ownerId: 'owner-dst' });
+    // Was: unmarked, its record starting with the source it runs here.
+    expect(moved.appliedProfileId).toBe('p-dst');
+    expect(ranOnAnEarlierSource(there.store.getAgent(moved.id)!)).toBe(true);
+    // Restored where it was made, onto the source it ran on: nothing to mark.
+    const home = await installation('owner-src');
+    const back = await importAgent(home.deps, copy, { ownerId: 'owner-src' });
+    expect(ranOnAnEarlierSource(home.store.getAgent(back.id)!)).toBe(false);
+    // One that ran on an earlier source there before, restored onto the one it runs: marked for the earlier one.
+    src.store.insertAIProfile({ id: 'p0', ownerId: 'owner-src', name: 'Plan', vendor: 'anthropic', kind: 'subscription', model: 'claude-sonnet-5', createdAt: 'now' });
+    src.store.setAgentApplied('a1', 'p0', 'claude-sonnet-5');
+    src.store.setAgentApplied('a1', 'p1', 'claude-opus-4-8');
+    const earlier = await importAgent((await installation('owner-src')).deps, (await exportAgent(src.deps, 'a1')).data, { ownerId: 'owner-src' });
+    expect(earlier.appliedProfilePrevId).toBe('p0');
+    // An older file, with no mark: as before.
+    const m = JSON.parse(gunzipSync(copy).toString());
+    expect(m.ai).toMatchObject({ ranOn: 'p1' });
+    delete m.ai.ranOn;
+    const old = await installation('owner-dst', 'p-dst');
+    const unmarked = await importAgent(old.deps, gzipSync(JSON.stringify(m)), { ownerId: 'owner-dst' });
+    expect(ranOnAnEarlierSource(old.store.getAgent(unmarked.id)!)).toBe(false);
   });
 });

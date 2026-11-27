@@ -45,8 +45,10 @@ describe('deploy and upgrade', () => {
     const l = src('scripts/upgrade-helpers.sh');
     const names = ['machine_short', 'free_mb', 'disk_words', 'proc_start', 'proc_start_utc', 'started_as', 'lock_left_over', 'checkout_recorded', 'take_lock', 'lock_short', 'lock_in_way',
       'disk_short', 'run_step', 'put_rec', 'said_kind', 'said_path', 'step_tee', 'step_tail', 'new_step_log', 'own_place', 'step_short', 'change_failed',
-      'link_end', 'put_line', 'put_dir', 'put_failed', 'deps_holder_gone', 'deps_lock', 'deps_unlock', 'older_release', 'mark_rolled_back', 'rolled_back_note', 'left_ran', 'unmark_rolled_back', 'kept_tries', 'kept_record',
-      'systemd_major', 'env_named'];
+      'link_end', 'put_line', 'put_dir', 'put_failed', 'deps_holder_gone', 'deps_take', 'deps_lock', 'deps_unlock', 'older_release', 'mark_rolled_back', 'rolled_back_note', 'left_ran', 'unmark_rolled_back', 'kept_tries', 'kept_record',
+      'systemd_major', 'env_named', 'service_port',
+      // And the ones a run cut off part-way is put back with (HB-1483).
+      'git_running_here', 'clear_own_index_lock', 'save_other_edits', 'repair_tree', 'restore_deps'];
     const defined = (t: string, name: string) => new RegExp(`^\\s*${name}\\(\\) \\{`, 'm').test(t);
     for (const name of names) {
       expect(defined(l, name), `${name} in upgrade-helpers.sh`).toBe(true);
@@ -65,11 +67,21 @@ describe('deploy and upgrade', () => {
     // The dependencies' lock, ensure-deps.sh's, by the same name and holder line (review of HB-1212).
     const deps = (s: string) => s.match(/^DEPS_LOCK=.*$/m)?.[0];
     expect(deps(d)).toBe(deps(u));
-    expect(deps(u)).toBe('DEPS_LOCK="$LOCKS/deps-$(printf %s "$DIR" | cksum | cut -d\' \' -f1).lock.d"');
-    expect(src('scripts/ensure-deps.sh')).toContain('DEPS_LOCK="$LOCKS/deps-$(printf %s "$PWD" | cksum | cut -d\' \' -f1).lock.d"');
-    // How long each waits for the lock: one line, the same in all three, half an hour unless a test says (HB-1382).
-    const wait = (t: string) => t.match(/^DEPS_WAIT=.*$/m)?.[0];
-    expect(wait(u)).toBe('DEPS_WAIT="${HATCHABOT_DEPS_WAIT_SECS:-1800}"; case "$DEPS_WAIT" in \'\'|*[!0-9]*) DEPS_WAIT=1800 ;; esac');
+    // Keyed on the physical path, links resolved, in each (HB-1377).
+    expect(deps(u)).toBe('DEPS_LOCK="$LOCKS/deps-$(printf %s "$(pwd -P)" | cksum | cut -d\' \' -f1).lock.d"');
+    expect(deps(src('scripts/ensure-deps.sh'))).toBe(deps(u));
+    // And, through a link, the lock releases before 2.193.0 key on the path as given, in each (review of HB-1377).
+    const old = (s: string) => s.match(/^DEPS_LOCK_OLD=.*\n.*$/m)?.[0];
+    expect(old(u)).toBe('DEPS_LOCK_OLD="$LOCKS/deps-$(printf %s "$DIR" | cksum | cut -d\' \' -f1).lock.d"\n[ "$DEPS_LOCK_OLD" != "$DEPS_LOCK" ] || DEPS_LOCK_OLD=""');
+    expect(old(d)).toBe(old(u));
+    expect(old(src('scripts/ensure-deps.sh'))).toBe(old(u)!.replace('"$DIR"', '"$PWD"'));
+    // A lock with no holder is a leftover once a minute old, in ensure-deps.sh and the helpers alike (HB-1377).
+    const unowned = (t: string) => t.match(/^ {2}if \[ -z "\$owner" \]; then .*"\$1".*$/m)?.[0];
+    expect(unowned(l)).toBe('  if [ -z "$owner" ]; then [ -n "$(find "$1" -maxdepth 0 -mmin +1 2>/dev/null)" ]; return; fi');
+    expect(unowned(src('scripts/ensure-deps.sh'))).toBe(unowned(l));
+    // How long each waits for the lock: the same in all three, half an hour unless a test says (HB-1382).
+    const wait = (t: string) => t.match(/^DEPS_WAIT=.*\n(?:.*\n){2}esac$/m)?.[0];
+    expect(wait(u)).toBe('DEPS_WAIT="${HATCHABOT_DEPS_WAIT_SECS:-1800}"\ncase "$DEPS_WAIT" in\n  \'\'|*[!0-9]*) DEPS_WAIT=1800 ;;\nesac');
     expect(wait(src('scripts/deploy-release.sh'))).toBe(wait(u));
     expect(wait(src('scripts/ensure-deps.sh'))).toBe(wait(u));
   });

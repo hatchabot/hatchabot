@@ -242,8 +242,12 @@ function budgetItems(c: Ctx, machineOwner: boolean): Recommendation[] {
     const b = c.store.getBudget(scope);
     if (!b || (scope === MACHINE ? false : b.ownerId !== c.ownerId)) continue;
     const spent = scope === MACHINE ? [...spend.values()].reduce((x, y) => x + y, 0) : spend.get(scope) ?? 0;
-    const v: BudgetView = budgetView(c.store, b, spent, c.now, c.tz, agent?.id);
-    if (!v.level) continue;
+    const seen: BudgetView = budgetView(c.store, b, spent, c.now, c.tz, agent?.id);
+    if (!seen.level) continue;
+    // A pause or a switch that has ended, still owed its start or its own
+    // model (HB-1011, HB-1496), is not this budget's doing now: its Alerts
+    // line says so, and raising the budget does nothing for it.
+    const v: BudgetView = { ...seen, ...(seen.paused?.ended ? { paused: undefined } : {}), ...(seen.downgraded?.ended ? { downgraded: undefined } : {}) };
     const whose = agent ? agent.name : 'This Hatchabot (every agent)';
     const pace = v.onPace ?? (agent ? rates[agent.id]?.monthly : undefined);
     const raiseTo = suggestBudget(Math.max(pace ?? 0, v.spent));
@@ -360,10 +364,15 @@ function cheaperItems(c: Ctx): Recommendation[] {
     if (!a || a.ops || row.evidence !== 'ok' || row.billing === 'local' || !best || best.savingUSD < CHEAPER_MIN_USD) continue;
     // A model change still being judged: wait for its verdict before the next one.
     if (c.store.listModelChanges({ agentId: a.id, outcomes: ['pending'], limit: 1 }).length) continue;
+    // A switch of source waiting for its rebuild: its figures and models are
+    // the source it is leaving, and a model of that one is not the chosen
+    // one's to set. Advice waits until it runs on the source chosen (HB-1343).
+    if (a.appliedProfileId && a.appliedProfileId !== a.aiProfileId) continue;
     // A budget moved it to a cheaper model this month: that is the budget's, not advice.
     if (c.store.getBudgetPause(a.id, monthKey(c.now, c.tz))?.kind === 'cheaper') continue;
     const check = assessModelChange(c.store, a, c.profileOf(a), best.model, c.now);
-    const errs = Object.entries(row.errors).filter(([k, v]) => v && k !== 'rateLimited').length;
+    // A rate limit is the source's, and so is a practice call it refused (HB-1497): neither is the model's error.
+    const errs = Object.entries(row.errors).filter(([k, v]) => v && k !== 'rateLimited' && k !== 'practiceRefused').length;
     out.push({
       id: `cheaper:${a.id}`, kind: 'cheaper-model', agents: [ref(a)],
       title: `${a.name} could use a cheaper model`,

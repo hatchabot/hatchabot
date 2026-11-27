@@ -44,7 +44,7 @@ beforeEach(() => {
   vi.mocked(mutateSkillFile).mockResolvedValue(view());
   vi.mocked(runSkillTrial).mockResolvedValue({ status: 'completed', output: 'Fixture answer', limits: SKILL_TRIAL_LIMITS, evidence: { skillRead: true, fixtureRead: true, toolCalls: 1, codeMode: true }, usage: { input: 1, output: 1, total: 2 }, message: 'ok' });
 });
-afterEach(() => { for (const w of made.splice(0)) w.skills.stop(); clearBusy('a1'); vi.useRealTimers(); });
+afterEach(() => { for (const w of made.splice(0)) w.skills.stop(); vi.useRealTimers(); });
 
 function world(): World {
   const store = new Store(new Database(':memory:'));
@@ -219,13 +219,13 @@ describe('a skill file and practice', () => {
     const month = monthKey(Date.now(), machineTz());
     w.store.addBudgetPause('a1', month, 'a1', new Date().toISOString());
     const r = await w.skills.practice(a, SKILL, REVISION, w.caller);
-    expect(r).toMatchObject({ ok: false, status: 409, error: expect.stringMatching(/^This agent is paused by its budget for .*Practice spends from the same budget/) });
+    expect(r).toMatchObject({ ok: false, status: 409, error: expect.stringMatching(/^This agent has reached its budget for .*Practice spends from the same budget/) });
     expect(runSkillTrial).not.toHaveBeenCalled();
     expect(readSkillFile).not.toHaveBeenCalled();
     // Paused while it waited for its turn: refused there, before the model is called.
     w.store.resumeBudgetPause('a1', month, new Date().toISOString(), 'owner');
     vi.mocked(readSkillFile).mockImplementationOnce(async () => { w.store.addBudgetPause('a1', month, 'machine', new Date().toISOString()); return view(); });
-    expect(await w.skills.practice(w.store.getAgent('a1')!, SKILL, REVISION, w.caller)).toMatchObject({ ok: false, status: 409, error: expect.stringMatching(/paused by its budget/) });
+    expect(await w.skills.practice(w.store.getAgent('a1')!, SKILL, REVISION, w.caller)).toMatchObject({ ok: false, status: 409, error: expect.stringMatching(/^This Hatchabot has reached its budget/) });
     expect(runSkillTrial).not.toHaveBeenCalled();
     // Resumed: it practises, and no cooldown was started by the refusals.
     w.store.resumeBudgetPause('a1', month, new Date().toISOString(), 'owner');
@@ -240,7 +240,7 @@ describe('a skill file and practice', () => {
     w.store.addPracticeUsage([{ agentId: 'a1', run: 'r1', model: 'claude-opus-4-8', at: now, day: dayKey(Date.now(), machineTz()), skill: SKILL, status: 'completed',
       calls: 1, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, usd: 2, unpricedTokens: 0 }]);
     expect(w.store.getBudgetPause('a1', monthKey(Date.now(), machineTz()))).toBeUndefined();
-    expect(await w.skills.practice(a, SKILL, REVISION, w.caller)).toMatchObject({ ok: false, status: 409, error: expect.stringMatching(/^This agent is paused by its budget for .*Practice spends from the same budget/) });
+    expect(await w.skills.practice(a, SKILL, REVISION, w.caller)).toMatchObject({ ok: false, status: 409, error: expect.stringMatching(/^This agent has reached its budget for .*Practice spends from the same budget/) });
     expect(runSkillTrial).not.toHaveBeenCalled();
   });
 

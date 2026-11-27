@@ -527,6 +527,36 @@ describe('unlinking my chat identities', () => {
     expect(scrubbedOn).toEqual([w.store.getAgent(a)!.runtimeRef]);
     expect(w.store.memberIdentities(a, OWNER).discord).toBeUndefined();
   });
+  it('Discord: a door rest asked for while an agent is scrubbed waits for the binding to go, and does not write the id back (HB-1554)', async () => {
+    const w = await world();
+    const a = await seedRunningAgent(w, { id: 'a1', slug: 'one', accountId: 'onebot' });
+    w.store.insertChannel({ id: 'dc-a1', agentId: a, kind: 'discord', accountId: 'app-a1', secretRef: 'chan/dc', deepLink: 'https://discord.example/x', createdAt: 'now' });
+    expect(w.store.bindMemberIdentity(a, OWNER, 'discord', '111111111111111111')).toBe(true);
+    const { setDmPolicy } = await import('../src/orchestrator/members/members.js');
+    let entered!: () => void, release!: () => void;
+    const reached = new Promise<void>((r) => { entered = r; });
+    const gate = new Promise<void>((r) => { release = r; });
+    const landed: string[] = [];
+    w.provider.execShellOnVolume = (async (_ref: string, script: string) => {
+      if (script.includes('const drop = ')) { entered(); await gate; landed.push('scrub'); return { code: 0, stdout: '', stderr: '' }; }
+      landed.push(script.includes('111111111111111111') ? 'door naming them' : 'door');
+      return { code: 0, stdout: 'set\n', stderr: '' };
+    }) as never;
+    const unlink = Promise.resolve(w.f.inject({ method: 'DELETE', url: '/v1/account/discord', headers: as() }));
+    await reached;
+    // The sweep rests the agent's Discord door meanwhile, from the store as it reads it then.
+    const rest = setDmPolicy({ store: w.store, provider: w.provider }, {
+      agentId: a, runtimeRef: w.store.getAgent(a)!.runtimeRef!, kind: 'discord', accountId: 'hatchabot',
+      policy: 'allowlist', allowFrom: w.store.listAllowedChannelUserIds(a, 'discord'),
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    release();
+    expect((await unlink).json()).toEqual({ unlinked: true, agents: 1 });
+    await rest;
+    // Was: written while the scrub ran, naming the id, which it put back on the agent's allowFrom.
+    expect(landed).toEqual(['scrub']);
+    expect(w.store.memberIdentities(a, OWNER).discord).toBeUndefined();
+  });
   it('Discord: an agent busy with a move keeps its link and says so; unlinking again afterwards finishes it (HB-1090)', async () => {
     const w = await world();
     const a = await seedRunningAgent(w, { id: 'a1', slug: 'one', accountId: 'onebot' });

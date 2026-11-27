@@ -9,7 +9,7 @@ import { MockProvider } from '../src/providers/mockProvider.js';
 import { createBackups, type Backups } from '../src/orchestrator/backups/backups.js';
 import { agentArchiveName } from '../src/orchestrator/backups/backupFiles.js';
 import { archiveAgent } from '../src/orchestrator/lifecycle/archive.js';
-import { clearBusy, isBusy, markBusy } from '../src/orchestrator/lifecycle/busy.js';
+import { isBusy, markBusy } from '../src/orchestrator/lifecycle/busy.js';
 import { beginOperation, filesReplacingCount, setStepHookForTests, SimulatedCrash } from '../src/orchestrator/lifecycle/operations.js';
 import { recoverOperation, resumeOperations, type ResumeContext } from '../src/orchestrator/lifecycle/operationsResume.js';
 import { createRebuildQueue } from '../src/orchestrator/lifecycle/rebuildQueue.js';
@@ -24,15 +24,17 @@ import { MemSecrets, makeWorld, seedRunningAgent, viaGlobalFetch } from './suppo
  * When the count of changes that replace an agent's files moves
  * (operations.ts: noteFilesReplacing, filesReplacingCount). A snapshot by
  * hand and an access check read it before and after they look at the agent,
- * and keep nothing when it moved (HB-0566, HB-0967). These pin today's
- * moments, which HB-1465 step 5 must keep: a change counts as its row
- * begins, once, inside its take and after the take's own checks (so a take
- * those checks refuse counts nothing), and after any wait before the row (a
- * move asks both machines first, an adopt packs the folder first); a setup
- * or a rebuild counts before its take, so one another holder refuses counts
- * all the same; a resume counts under its take once the operation is as it
- * was read, a recover in the tick of its take, and a rebuild's or setup's
- * steps run again where they run (under the owner's choice, its reuse).
+ * and keep nothing when it moved (HB-0566, HB-0967). These pin its
+ * moments: a change counts as its row begins, once, inside its take and
+ * after the take's own checks (so a take those checks refuse counts
+ * nothing), and after any wait before the row (a move asks both machines
+ * first, an adopt packs the folder first); a setup or a rebuild counts in
+ * the tick of its own take, under it, so one another holder refuses counts
+ * nothing (HB-1491: they counted as their row began or started, before the
+ * take, and a refused one dropped a snapshot or an access check for
+ * nothing); a resume counts under its take once the operation is as it was
+ * read, a recover in the tick of its take, and a rebuild's or setup's steps
+ * run again where they run (under the owner's choice, its reuse).
  * Ids and names are made up.
  */
 
@@ -42,18 +44,14 @@ const ticks = async (n = 5) => { for (let i = 0; i < n; i++) await new Promise((
 
 const dirs: string[] = [];
 const tmp = (p: string) => { const d = mkdtempSync(join(tmpdir(), p)); dirs.push(d); return d; };
-const held = new Set<string>();
 afterEach(() => {
   setStepHookForTests(undefined);
   vi.restoreAllMocks();
-  for (const id of held) clearBusy(id);
-  held.clear();
 });
 afterAll(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
 
-/** One running agent on the world's machine, its reservation forgotten after the test. */
+/** One running agent on the world's machine. */
 async function agentIn(w: Awaited<ReturnType<typeof makeWorld>>, id: string): Promise<string> {
-  held.add(id);
   return seedRunningAgent(w, { id, slug: id, accountId: `${id.replace(/-/g, '')}bot` });
 }
 
@@ -161,7 +159,6 @@ describe('each change that replaces files counts once, as its row begins', () =>
     setStepHookForTests((op, k) => {
       if (k !== 'row-made') return;
       seen = { agentId: op.agentId, count: count(op.agentId!), busy: isBusy(op.agentId!) };
-      held.add(op.agentId!);
       throw new SimulatedCrash();
     });
     await expect(importAgent(dst.deps, data, { ownerId: 'importer' })).rejects.toBeInstanceOf(SimulatedCrash);
@@ -217,7 +214,6 @@ describe('a restore counts as its row begins, inside its take; one its own check
     });
     running.push(backups);
     const agent = (id: string, state: Agent['state'] = 'RUNNING'): Agent => {
-      held.add(id);
       store.insertAgent({
         id, ownerId: 'user-owner', name: `Agent ${id}`, slug: id, state, aiProfileId: 'p1', hostId: 'h1',
         persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now', runtimeRef: `docker://hatchabot-${id}`,
@@ -280,11 +276,10 @@ describe('a restore counts as its row begins, inside its take; one its own check
   });
 });
 
-describe('a setup or a rebuild counts before its take, so one another holder refuses counts all the same', () => {
-  it('a setup cut off by a restart, its container up: counted where its steps would run again, though another holder has the agent', async () => {
+describe('a setup or a rebuild counts under its take, so one another holder refuses counts nothing (HB-1491)', () => {
+  it('a setup cut off by a restart, its container up, another holder on the agent: its take refused, it counts nothing', async () => {
     const w = await makeWorld();
     const id = 'fr-setup';
-    held.add(id);
     w.store.insertAgent({ id, ownerId: w.owner, name: 'Setup Agent', slug: id, state: 'PROVISIONING', aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' });
     const { runtimeRef } = await w.provider.provision({ agentId: id, slug: id, workspace: { files: {}, configPatch: { agentId: id, authMode: 'api-key' } }, env: {} });
     w.store.setAgentRuntimeRef(id, runtimeRef);
@@ -294,13 +289,14 @@ describe('a setup or a rebuild counts before its take, so one another holder ref
     const release = markBusy(id); // another holder: a stand-in
     const c0 = count(id);
     await resumeOperations(resumeCtx(w));
-    expect(count(id)).toBe(c0 + 1);
+    // Was c0 + 1: counted before its take, which another holder refused; nothing replaced its files.
+    expect(count(id)).toBe(c0);
     // Its take was refused: left for the next pass.
     expect(w.store.getOperation(op.id)!.status).toBe('interrupted');
     release();
   });
 
-  it('a rebuild queued before a restart: counted at its turn as it starts, though another holder refuses its take', async () => {
+  it('a rebuild queued before a restart, another holder on the agent at its turn: its take refused, it counts nothing', async () => {
     const w = await makeWorld();
     const id = await agentIn(w, 'fr-requeued');
     const op = beginOperation(w.store, 'rebuild', id, { checkpoint: false, was: {} }, { queued: true });
@@ -311,7 +307,8 @@ describe('a setup or a rebuild counts before its take, so one another holder ref
     const passing = w.routes!.resumeOperations().catch(() => undefined);
     await vi.waitFor(() => expect(w.store.getOperation(op.id)!.status).toBe('failed'), { timeout: 10_000 });
     expect(w.store.getOperation(op.id)!.outcome).toBe('Another operation is already running on this agent.');
-    expect(count(id)).toBe(c0 + 1);
+    // Was c0 + 1: counted as it started, before its take, which another holder refused.
+    expect(count(id)).toBe(c0);
     release();
     await passing;
   });
@@ -394,8 +391,8 @@ describe('settled again: a resume, a recover, a reuse', () => {
   });
 });
 
-describe('the setup and rebuild queue: counted as each starts, before its take', () => {
-  it('a setup: counted in the tick it is asked for, as its row begins and before its take; one another holder refuses counts all the same', async () => {
+describe('the setup and rebuild queue: counted as each is taken, under its take (HB-1491)', () => {
+  it('a setup: counted in the tick it is asked for, as its take is made; one another holder refuses counts nothing', async () => {
     const w = await makeWorld();
     const id = await agentIn(w, 'fr-setup-new');
     // Set up already: its take finds nothing to do.
@@ -410,14 +407,15 @@ describe('the setup and rebuild queue: counted as each starts, before its take',
 
     const release = markBusy(id); // another holder: a stand-in
     q.kickProvision(id);
-    expect(count(id)).toBe(c0 + 2);
+    // Was c0 + 2: counted as its row began, before its take, which another holder refused.
+    expect(count(id)).toBe(c0 + 1);
     await vi.waitFor(() => expect(q.isInFlight(id)).toBe(false));
-    expect(count(id)).toBe(c0 + 2);
+    expect(count(id)).toBe(c0 + 1);
     expect(w.store.listOperations([id]).find((o) => o.status === 'failed')?.outcome).toBe('Another operation is already running on this agent.');
     release();
   });
 
-  it('a rebuild: not counted while it waits its turn; counted at its turn as it starts, though another holder refuses its take; one its turn finds stopped counts nothing', async () => {
+  it('a rebuild: not counted while it waits its turn; counted at its turn under its take; one another holder refuses, or its turn finds stopped, counts nothing', async () => {
     const w = await makeWorld();
     const id = await agentIn(w, 'fr-rebuild-new');
     const q = queueOf(w);
@@ -427,9 +425,17 @@ describe('the setup and rebuild queue: counted as each starts, before its take',
     expect(w.store.listOperations([id])[0]).toMatchObject({ kind: 'rebuild', status: 'queued' });
     expect(count(id)).toBe(c0);
     await vi.waitFor(() => expect(q.isInFlight(id)).toBe(false));
-    expect(count(id)).toBe(c0 + 1);
+    // Was c0 + 1: counted as it started, before its take, which another holder refused.
+    expect(count(id)).toBe(c0);
     expect(w.store.listOperations([id])[0]).toMatchObject({ status: 'failed', outcome: 'Another operation is already running on this agent.' });
     release();
+
+    // Nothing else holds it: counted at its turn, as its take is made.
+    expect(q.kickRebuild(id)).toBe(true);
+    expect(count(id)).toBe(c0);
+    await vi.waitFor(() => expect(q.isInFlight(id)).toBe(false));
+    expect(count(id)).toBe(c0 + 1);
+    expect(w.store.listOperations([id])[0]).toMatchObject({ kind: 'rebuild', status: 'succeeded' });
 
     // Stopped by its owner while it waited: skipped at its turn.
     expect(q.kickRebuild(id)).toBe(true);
@@ -441,7 +447,7 @@ describe('the setup and rebuild queue: counted as each starts, before its take',
 });
 
 describe('settled again, the rest: a rebuild resumed, a reuse under a setup, and kinds that replace nothing', () => {
-  it('a rebuild cut off with its new container up: counted where its steps run again, once the machine answered, though another holder refuses its take; one whose container is not up counts nothing', async () => {
+  it('a rebuild cut off with its new container up: counted where its steps run again, once the machine answered, under its take; one another holder refuses, or whose container is not up, counts nothing', async () => {
     const w = await makeWorld();
     const id = await agentIn(w, 'fr-rebuild-up');
     w.store.setAgentState(id, 'REBUILDING');
@@ -453,10 +459,14 @@ describe('settled again, the rest: a rebuild resumed, a reuse under a setup, and
     // Its machine is asked first: not counted in the tick of the pass.
     expect(count(id)).toBe(c0);
     await passing;
-    expect(count(id)).toBe(c0 + 1);
-    // Its take was refused: left for the next pass.
+    // Was c0 + 1: counted once the machine answered, before its take, which another holder refused.
+    expect(count(id)).toBe(c0);
+    // Its take was refused: left for the next pass, which counts it under its take.
     expect(w.store.getOperation(op.id)!.status).toBe('interrupted');
     release();
+    await resumeOperations(resumeCtx(w));
+    expect(count(id)).toBe(c0 + 1);
+    expect(w.store.getOperation(op.id)!.status).toBe('succeeded');
 
     const other = await agentIn(w, 'fr-rebuild-down');
     w.store.setAgentState(other, 'REBUILDING');
@@ -472,7 +482,6 @@ describe('settled again, the rest: a rebuild resumed, a reuse under a setup, and
   it("Try again on a held setup, its container up: counted when its steps run again under the choice's own take, once the machine answered", async () => {
     const w = await makeWorld();
     const id = 'fr-reuse-setup';
-    held.add(id);
     w.store.insertAgent({ id, ownerId: w.owner, name: 'Setup Agent', slug: id, state: 'PROVISIONING', aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: false, webOnly: true, createdAt: 'now', updatedAt: 'now' } as never);
     const { runtimeRef } = await w.provider.provision({ agentId: id, slug: id, workspace: { files: {}, configPatch: { agentId: id, authMode: 'api-key' } }, env: {} });
     w.store.setAgentRuntimeRef(id, runtimeRef);
@@ -537,7 +546,6 @@ const PEER = { id: 'peer1', name: 'Test Peer', url: 'http://peer.example.org:808
 
 /** An agent and another Hatchabot that answers its preflight (as test/operations.test.ts's migrateWorld). */
 async function migrateWorld(id = 'fr-migrate') {
-  held.add(id);
   const store = new Store(new Database(':memory:'));
   const secrets = new MemSecrets();
   const provider = new MockProvider();
@@ -584,7 +592,6 @@ async function importWorlds() {
   await src.provider.start(runtimeRef);
   src.store.setAgentState('fr-export', 'RUNNING');
   src.provider.stateStore.set(runtimeRef, Buffer.from('remembered'));
-  held.add('fr-export');
   const { data } = await exportAgent(src.deps, 'fr-export');
   const dst = await mk('importer');
   return { data, dst };

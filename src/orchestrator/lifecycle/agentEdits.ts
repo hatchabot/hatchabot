@@ -13,6 +13,7 @@ import type { ChatBots } from '../channels/chatBots.js';
 import { announceToMembers } from '../members/members.js';
 import type { CronTriggers } from '../schedules/triggers.js';
 import { isBusy } from './busy.js';
+import { ownModelOverClass } from '../usage/budgets.js';
 import { operationRefusal } from './operations.js';
 import { OPS_NO_LOCAL } from '../ops/hatchabotAgent.js';
 import { sharePathProblem } from './provision.js';
@@ -528,6 +529,8 @@ export function createAgentEdits(deps: AgentEditsDeps): AgentEdits {
             if (set !== 'ok') { refused = set; return; }
           }
           if (model !== undefined) {
+            // Set by hand after a class ended its budget's switch: it wins for the rest of the month (HB-1477 review).
+            if ((current.model ?? null) !== (model ?? null)) ownModelOverClass(store, agent.id);
             store.setAgentModel(agent.id, model);
           } else if (switchingProfile && agent.model && target && (dropRuntimePin || modelOverrideProblem(target, agent.model))) {
             // The switch strands the old pin (new source lacks it, is local, or its

@@ -225,9 +225,10 @@ async function bringInSelected() {
     if (a.bot && unconfirmed.includes(a.bot.accountId)) { rowSay(i, "✗ couldn't confirm OpenClaw stopped using this bot (Telegram didn't answer) — try again", 'var(--warn)'); continue; }
     try {
       const { res, agentId } = await doAdopt({ path: a.workspace, name: a.name, reuse: !!a.bot, web: !a.bot, token: '', bot: a.bot, onStatus: m => rowSay(i, m) });
-      const c = res.crons?.carried || 0;
+      const c = adoptTasksCarried(res.crons);
       crons += c;
-      rowSay(i, `✓ brought in${c ? ` · ${c} task${c > 1 ? 's' : ''} carried (disabled)` : ''}${adoptTasksMissed(res.crons)}`, 'var(--ok)'); ok++;
+      const later = adoptTasksLater(res.crons), changed = adoptTasksChanged(res.crons);
+      rowSay(i, `✓ brought in${c ? ` · ${c} task${c > 1 ? 's' : ''} carried (disabled)` : ''}${later ? ` · ${later}` : ''}${changed ? ` · ${changed}` : ''}${adoptTasksMissed(res.crons)}`, 'var(--ok)'); ok++;
       adopted.push({ agentId, name: a.name, workspace: a.workspace });
     } catch (e) { rowSay(i, `✗ ${e.message}`, 'var(--warn)'); }
   }
@@ -298,6 +299,11 @@ function accountOffHtml(key, then) {
     + (then ? `<div class="invite-link" style="margin-top:6px">${esc(then)}</div>` : '');
 }
 
+/** A hand-built agent's bot, by its account's key in OpenClaw's config: no @handle ("default", say) (HB-1300). `start`: a sentence's first words. */
+function adoptBotName(bot, start = false) {
+  return `${start ? 'Its' : 'its'} bot (Telegram account “${bot.accountId}”)`;
+}
+
 function renderAdoptBot(bot) {
   const el = $('adoptBotArea');
   // Without Telegram: the web console is how it is talked to, and adopting
@@ -324,9 +330,9 @@ function renderAdoptBot(bot) {
       // silently lose messages. Block reuse and show the hand-over steps.
       el.innerHTML =
         `<div style="border:1px solid var(--warn);border-radius:8px;padding:10px">
-          <div>⚠ <b>@${esc(bot.accountId)}</b> is still live for “${esc(bot.sourceAgentId)}” in your hand-built instance.</div>
+          <div>⚠ Its bot, Telegram account <b>“${esc(bot.accountId)}”</b>, is still live for “${esc(bot.sourceAgentId)}” in your hand-built instance.</div>
           <div class="sub" style="margin-top:4px">Hand the bot over first (two pollers on one token lose messages), then Inspect again:</div>
-          ${accountOffHtml(bot.accountId, gatewayRestartCmd())}
+          ${accountOffHtml(bot.accountId, gatewayRestartCmd(bot))}
         </div>
         <div id="adoptBotChoice"><div class="sub" style="margin-top:8px">Or give this agent a different bot below.</div>
         ${adoptTokenField()}</div>${web(false)}`;
@@ -335,7 +341,7 @@ function renderAdoptBot(bot) {
       el.innerHTML =
         `<div id="adoptBotChoice"><label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer">
           <input type="checkbox" id="adoptReuse" checked style="width:auto;margin-top:3px" ${onAction('change', 'hideWhenChecked', ["adoptTokenRow", { $: 'checked' }])}>
-          <span>Take over its bot <b>@${esc(bot.accountId)}</b> <span class="sub">(recommended — no new bot slot; ${n ? `${n} approved member${n === 1 ? '' : 's'} carried, no re-pairing` : 'same conversations kept'})</span></span>
+          <span>Take over its bot, Telegram account <b>“${esc(bot.accountId)}”</b> <span class="sub">(recommended — no new bot slot; ${n ? `${n} approved member${n === 1 ? '' : 's'} carried, no re-pairing` : 'same conversations kept'})</span></span>
         </label>
         <div id="adoptTokenRow" style="display:none;margin-top:8px">${adoptTokenField(true)}</div></div>${web(false)}`;
     }
@@ -358,10 +364,13 @@ function adoptTokenField(inner) {
 }
 
 // The command that restarts OpenClaw's gateway on this machine, as Hatchabot's
-// own hand-over runs it (HB-0981): its systemd unit on Linux; elsewhere (a
-// Mac, whose launchd runs it), or the machine not known, OpenClaw's own
-// command, which knows its service manager (HB-1163).
-function gatewayRestartCmd() {
+// own hand-over runs it (HB-0981): the inspect's, built by the server as it
+// runs it, with its unit's name from its own settings (HB-1282). From a
+// server that sends none: its systemd unit on Linux; elsewhere (a Mac, whose
+// launchd runs it), or the machine not known, OpenClaw's own command, which
+// knows its service manager (HB-1163).
+function gatewayRestartCmd(bot) {
+  if (typeof bot?.restartCommand === 'string' && bot.restartCommand) return bot.restartCommand;
   return myAccount?.hostOs === 'linux' ? 'systemctl --user restart openclaw-gateway' : 'openclaw gateway restart';
 }
 
@@ -389,17 +398,28 @@ function noAnswer(e) {
   if (typeof e?.status === 'number') return e.status >= 502 && e.status <= 504;
   return e instanceof TypeError;
 }
+// How long the server may take over one hand-over post before the step shows
+// answered (HB-1427): a workspace's bot is looked at first (5 s, adopt.ts
+// POLL_STATE_DEADLINE_MS), its token checked with Telegram (10 s,
+// telegramManual.ts VERIFY_DEADLINE_MS), and a margin for the post's way
+// there. The CLI's HANDOVER_POST_BOUND_MS is the same.
+const HANDOVER_POST_BOUND_MS = 20000;
 async function handOverBot(id, body, say) {
   let resent = false;
+  // When the last post was sent: its bound is counted from then.
+  let sentAt = 0;
   // A post that may have been taken: the agent is read, as the CLI does. Only
   // a step still open makes `e` the answer; one answered, it was handed over.
   // Not read either, whether it was taken is not known: marked, so an adopt
   // keeps the agent rather than removing it with a bot it may hold (HB-1277).
   // Gone (404), it was removed meanwhile: nothing to keep, and none to remove.
   // `again`: `e` is a 409 to a post sent again after no answer, which an
-  // earlier post that landed brings: said so (HB-1277 review).
+  // earlier post that landed brings: said so (HB-1277 review). Still open
+  // within the server's bound on a post, it is read again once that is out:
+  // one still being checked with Telegram could take the bot after the read,
+  // and the agent was removed with the token it held (HB-1427).
   const takenOrNot = async (e, again = false) => {
-    const a = await api(`/v1/agents/${id}`).catch((r) => {
+    const read = () => api(`/v1/agents/${id}`).catch((r) => {
       if (r.status === 404) throw Object.assign(new Error(`The agent is gone (${r.message}): it was removed while its bot was being handed over.`), { agentGone: r.message });
       const refused = `sent again after no answer, it was refused: ${e.message}`;
       // For an adopt's words (doAdopt), and for the paste-a-token box's, which name no agent.
@@ -407,10 +427,19 @@ async function handOverBot(id, body, say) {
       const box = again ? `An earlier bot hand-over may have gone through (${refused})` : `The bot hand-over may not have gone through (${e.message})`;
       throw Object.assign(new Error(`${box}, and the agent could not be read after that (${r.message}), so whether it took the bot is not known. If it still asks for a bot token in a moment, give it the token again.`), { handOverUnknown: { what, read: r.message } });
     });
-    if (a.pendingAction && a.state !== 'RUNNING' && a.state !== 'FAILED') throw e;
+    const open = (a) => a.pendingAction && a.state !== 'RUNNING' && a.state !== 'FAILED';
+    let a = await read();
+    const left = sentAt + HANDOVER_POST_BOUND_MS - Date.now();
+    if (open(a) && left > 0) {
+      say(`Waiting ${Math.ceil(left / 1000)} s for the server to finish with the bot hand-over…`);
+      await new Promise(r => setTimeout(r, left));
+      a = await read();
+    }
+    if (open(a)) throw e;
     return {};
   };
   for (const wait of [2000, 4000, 8000, null]) {
+    sentAt = Date.now();
     try { return await api(`/v1/agents/${id}/channel-token`, { method: 'POST', body }); }
     catch (e) {
       // Sent again after no answer, and refused for the agent's state ("A bot
@@ -465,12 +494,12 @@ async function doAdopt({ path, name, reuse, web, token, bot, onStatus }) {
     }});
     let a = await pollAgent(created.id);
     if ((reuse || token) && !web && a.pendingAction?.type !== 'bot_token' && a.state !== 'FAILED') {
-      throw new Error(`“${name}” did not wait for a bot${a.botUsername ? ` (it has @${a.botUsername})` : ''}, so ${reuse ? `@${bot.accountId} was not taken over` : 'the token you pasted was not used'}.`);
+      throw new Error(`“${name}” did not wait for a bot${a.botUsername ? ` (it has @${a.botUsername})` : ''}, so ${reuse ? `${adoptBotName(bot)} was not taken over` : 'the token you pasted was not used'}.`);
     }
     const handedOver = a.pendingAction?.type === 'bot_token' && (reuse || !!token);
     if (a.pendingAction?.type === 'bot_token') {
       if (reuse) {
-        say(`Taking over @${bot.accountId}…`);
+        say(`Taking over ${adoptBotName(bot)}…`);
         await handOverBot(a.id, { fromWorkspace: path }, say);
         gaveBot = true;
         a = await afterHandOver(a.id);
@@ -482,8 +511,8 @@ async function doAdopt({ path, name, reuse, web, token, bot, onStatus }) {
       } else if (bot) {
         // Has a bot but reuse wasn't offered — it's still live in OpenClaw.
         throw new Error(
-          `@${bot.accountId} is still being polled by OpenClaw, so it can't be taken over yet. ` +
-          `Disable it there AND restart the gateway (${accountOffWords(bot.accountId)} ; ${gatewayRestartCmd()}), ` +
+          `${adoptBotName(bot, true)} is still being polled by OpenClaw, so it can't be taken over yet. ` +
+          `Disable it there AND restart the gateway (${accountOffWords(bot.accountId)} ; ${gatewayRestartCmd(bot)}), ` +
           `then try again. Or paste a different BotFather token.`,
         );
       } else {
@@ -497,14 +526,19 @@ async function doAdopt({ path, name, reuse, web, token, bot, onStatus }) {
     if (a.state === 'FAILED' && gaveBot) {
       // Removed now, nothing is parked (a failed setup let its bot's row go), and an adopt
       // again takes the bot; a Retry runs it with nothing copied in, and removed after that,
-      // the bot is parked in the pool, which a hand-over refuses (HB-1276 review).
-      throw Object.assign(new Error(`“${name}” has its bot, but could not start (${a.stateReason ?? 'no reason given'}), so it was kept with its bot, and nothing was copied. To finish the adopt, remove it and adopt again. A Retry brings the bot back up on an agent with nothing copied from the old one; removed after that, ${PARKED}${notOnAgain(false)}`), { kept: true });
+      // the bot is parked in the pool, which a hand-over refuses (HB-1276 review). One whose
+      // setup's undoing could not remove its container still holds its bot's row: removed
+      // now, it parks the bot too, and the adopt again was refused it (HB-1426).
+      const finish = a.botUsername
+        ? `To finish the adopt, remove it and adopt again: it still holds @${a.botUsername}, so once it is removed, ${PARKED} A Retry instead brings the bot back up on an agent with nothing copied from the old one.`
+        : `To finish the adopt, remove it and adopt again. A Retry brings the bot back up on an agent with nothing copied from the old one; removed after that, ${PARKED}`;
+      throw Object.assign(new Error(`“${name}” has its bot, but could not start (${a.stateReason ?? 'no reason given'}), so it was kept with its bot, and nothing was copied. ${finish}${notOnAgain(false)}`), { kept: true });
     }
     if (a.state === 'FAILED') throw new Error(`Could not start: ${a.stateReason ?? 'unknown'}`);
     // After a bot is handed over the workspace goes only into a running agent:
     // one asking for a bot again turned the token down (HB-0542).
     if (handedOver && a.state !== 'RUNNING') {
-      throw new Error(`${reuse ? `@${bot.accountId} was not taken over: ` : ''}“${name}” is ${a.state}${a.pendingAction ? ' and waiting for a bot token' : ''}, so nothing was copied.`);
+      throw new Error(`${reuse ? `${adoptBotName(bot, true)} was not taken over: ` : ''}“${name}” is ${a.state}${a.pendingAction ? ' and waiting for a bot token' : ''}, so nothing was copied.`);
     }
     say('Copying the workspace…');
     // Its bot handed over, a copy that failed, however (no answer, the agent
@@ -519,7 +553,7 @@ async function doAdopt({ path, name, reuse, web, token, bot, onStatus }) {
     // CLI does, whichever way it was to get its bot (made to wait for one
     // that never came, it would never run). Left only after a hand-over.
     if (created && e.settingUp && !gaveBot) {
-      const before = web ? '' : reuse ? `, before @${bot.accountId} was handed over` : token ? ', before its bot token was handed over' : '';
+      const before = web ? '' : reuse ? `, before ${adoptBotName(bot)} was handed over` : token ? ', before its bot token was handed over' : '';
       try { await api(`/v1/agents/${created.id}`, { method: 'DELETE' }); }
       catch (d) {
         throw new Error(`“${name}” was still setting up after 15 minutes${before}, and nothing was copied. It could not be removed: ${d.message} Remove it from its card, then adopt again.`);
@@ -570,6 +604,35 @@ async function doAdopt({ path, name, reuse, web, token, bot, onStatus }) {
     }
     throw e;
   }
+}
+
+/**
+ * Adopt's scheduled tasks put off until the agent runs (into a stopped agent,
+ * or one another operation held just then): its answer's `deferred`, which
+ * nothing said (HB-1475). The CLI says the same after "adopted N files".
+ */
+function adoptTasksLater(c) {
+  const n = c?.deferred || 0;
+  return n ? `${n} scheduled task${n > 1 ? 's' : ''} will be carried, disabled, once it is running` : '';
+}
+
+/**
+ * Adopt's scheduled tasks said as carried: the answer's `carried` counts the
+ * ones changed in the old workspace too (their copies are there), which are
+ * said apart, as not brought (HB-1200 review).
+ */
+function adoptTasksCarried(c) {
+  return Math.max(0, (c?.carried || 0) - (c?.changed || 0));
+}
+
+/**
+ * Adopt's scheduled tasks carried before, whose copies are still there, and
+ * edited in the old workspace since: not brought again, and said (HB-1200).
+ * The CLI says the same after "adopted N files".
+ */
+function adoptTasksChanged(c) {
+  const n = c?.changed || 0;
+  return n ? `${n} task${n > 1 ? 's' : ''} changed in the old workspace since ${n > 1 ? 'they were' : 'it was'} carried — not brought` : '';
 }
 
 /** Adopt's scheduled tasks that did not come across, said: unread ones read as none (review of 2026-10-22). */
@@ -627,7 +690,9 @@ async function runAdopt() {
       onStatus: set,
     });
     adoptDlg.close();
-    const cronNote = (res.crons?.carried ? ` Carried ${res.crons.carried} scheduled task${res.crons.carried > 1 ? 's' : ''} (disabled — review and enable in its Tasks).` : '') + adoptTasksMissed(res.crons);
+    const later = adoptTasksLater(res.crons), changed = adoptTasksChanged(res.crons), carried = adoptTasksCarried(res.crons);
+    const cronNote = (carried ? ` Carried ${carried} scheduled task${carried > 1 ? 's' : ''} (disabled — review and enable in its Tasks).` : '')
+      + (later ? ` ${later}.` : '') + (changed ? ` ${changed}.` : '') + adoptTasksMissed(res.crons);
     toast(`Adopted ${res.files} files (${(res.bytes / 1e6).toFixed(1)} MB) into “${name}”.${cronNote}${web ? ' No Telegram: talk to it in the web console (click its icon).' : ''} The original is untouched — retire it when you're happy.`, 45000);
     await refresh(true);
     await offerFolders([{ agentId, name, workspace }]);

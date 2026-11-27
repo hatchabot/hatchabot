@@ -6,9 +6,9 @@
 // because running a Dockerfile on this box is a privilege the local-host owner
 // already has (they can run docker directly).
 
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { close as fsClose, constants as fsc, fstat, ftruncate, open as fsOpen, write as fsWrite } from 'node:fs';
+import { close as fsClose, constants as fsc, existsSync, fstat, ftruncate, open as fsOpen, write as fsWrite } from 'node:fs';
 import { lstat, mkdir, mkdtemp, open, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -62,23 +62,44 @@ export function buildLogPath(name: string, dataDir = 'data'): string {
  * does (ENOENT: no log yet).
  */
 export async function readLogTail(path: string, chars: number): Promise<string> {
-  const h = await open(path, 'r');
+  // Without waiting: a pipe at the log's name with nobody writing to it held
+  // a thread that does file work until somebody did, and four such reads
+  // stalled every file read and write in the service (HB-1289). A pipe or a
+  // device has no size, so nothing is read from it.
+  const h = await open(path, fsc.O_RDONLY | fsc.O_NONBLOCK);
   try {
-    const { size } = await h.stat();
-    const want = Math.min(size, chars * 3 + 3);
-    const buf = Buffer.alloc(want);
-    let got = 0;
-    while (got < want) {
-      const { bytesRead } = await h.read(buf, got, want - got, size - want + got);
-      if (!bytesRead) break;
-      got += bytesRead;
+    for (let again = true; ; again = false) {
+      const { size } = await h.stat();
+      const want = Math.min(size, chars * 3 + 3);
+      const buf = Buffer.alloc(want);
+      let got = 0;
+      while (got < want) {
+        const { bytesRead } = await h.read(buf, got, want - got, size - want + got);
+        if (!bytesRead) break;
+        got += bytesRead;
+      }
+      // Short: the log was cut back between its size and the read (a cut
+      // ends by setting the file's new, shorter end, HB-1293), and the read
+      // went past that end: read its end as it is now, once.
+      if (got < want && again) continue;
+      let from = 0;
+      if (want < size) while (from < Math.min(got, 3) && (buf[from]! & 0xc0) === 0x80) from++;
+      return buf.subarray(from, got).toString('utf8').slice(-chars);
     }
-    let from = 0;
-    if (want < size) while (from < Math.min(got, 3) && (buf[from]! & 0xc0) === 0x80) from++;
-    return buf.subarray(from, got).toString('utf8').slice(-chars);
   } finally {
     await h.close();
   }
+}
+
+/**
+ * A line put at the end of a build log that has been written and closed: what Hatchabot did with
+ * the build once its script had ended (HB-1508). Without waiting, as the log is opened: a pipe at
+ * its name that nobody reads takes nothing, and a log that is gone is not made again. Never throws.
+ */
+export async function appendBuildLogLine(path: string, line: string): Promise<void> {
+  let h;
+  try { h = await open(path, fsc.O_WRONLY | fsc.O_APPEND | fsc.O_NONBLOCK); } catch { return; }
+  try { await h.write(`${line}\n`); } catch { /* full, or nobody reading: the line is left out */ } finally { await h.close().catch(() => {}); }
 }
 
 /**
@@ -97,9 +118,13 @@ export const BUILD_LOG = { cap: 4 * 2 ** 20, head: 64 * 2 ** 10, keep: 2 ** 20, 
  * moved aside first (`.1`, that one's to `.2`, …), and only a regular file
  * is moved; one that grows past its cap is cut back to its first and last
  * lines in place, so whoever reads its end goes on reading it. A log that
- * is not a regular file (a pipe, a device) is written as it comes. Build
- * logs grew without end, and every build's output was kept until the next
- * build of that image replaced it.
+ * is not a regular file (a pipe, a device) is written as it comes, and never
+ * waited on: opened and written without blocking, so a pipe nobody reads
+ * fails the open (ENXIO), and the build with it, at once, and one whose
+ * reader has stopped reading takes no more of the output once it is full
+ * (HB-1289). Build logs grew without end,
+ * and every build's output was kept until the next build of that image
+ * replaced it.
  */
 export function openBuildLog(path: string, limits: typeof BUILD_LOG = BUILD_LOG): Writable {
   return new BuildLog(path, limits);
@@ -136,6 +161,13 @@ class BuildLog extends Writable {
   #lastBytes = 0;
   /** Where the first lines kept end, once the log has been cut. */
   #headEnd?: number;
+  /**
+   * A pipe (or a device) that took no more without waiting (EAGAIN): the
+   * output after it is not written, as nobody is reading it. Opened to wait,
+   * a write to a pipe nobody read held a thread that does file work for good,
+   * and after four every file read and write in the service stalled (HB-1289).
+   */
+  #stalled = false;
   /** A write or cut on the file not yet finished, and the close waiting for it. */
   #inFlight = false;
   #afterWrite?: () => void;
@@ -148,7 +180,13 @@ class BuildLog extends Writable {
 
   override _construct(done: (err?: Error | null) => void): void {
     moveAside(this.#path, this.#limits.kept).then(() => {
-      fsOpen(this.#path, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_TRUNC | fsc.O_APPEND, 0o666, (err, fd) => {
+      // O_NONBLOCK: opening a pipe nobody reads waited for a reader, before
+      // the build's time limit was even set (HB-1289). A regular file is not
+      // changed by it. No O_APPEND: a regular file is written where its end
+      // is (`#size`), so a cut writes the log's new end before it lets the
+      // old one go (HB-1293); with O_APPEND, a write lands at the end
+      // wherever it is asked to.
+      fsOpen(this.#path, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_TRUNC | fsc.O_NONBLOCK, 0o666, (err, fd) => {
         if (err) return done(err);
         this.#fd = fd;
         fstat(fd, (e, st) => {
@@ -161,6 +199,7 @@ class BuildLog extends Writable {
   }
 
   override _write(chunk: Buffer, _enc: BufferEncoding, done: (err?: Error | null) => void): void {
+    if (this.#stalled) return done();
     const { cap, head, keep } = this.#limits;
     this.#seen += chunk.length;
     if (this.#firstBytes < head) {
@@ -180,12 +219,17 @@ class BuildLog extends Writable {
     if (this.#lastAt > 1024 && this.#lastAt * 2 > this.#last.length) { this.#last = this.#last.slice(this.#lastAt); this.#lastAt = 0; }
     this.#inFlight = true;
     const stopped = () => this.destroyed;
-    const finish = (err?: Error | null) => { this.#settled(); done(err); };
+    const finish = (err?: NodeJS.ErrnoException | null) => {
+      // Full, and nobody reading it: let go of the rest, not an error (HB-1289).
+      if (err?.code === 'EAGAIN') { this.#stalled = true; err = null; }
+      this.#settled();
+      done(err);
+    };
     if (!this.#cut || this.#size + chunk.length <= cap) {
       return writeAll(this.#fd, chunk, (err) => {
         if (!err) this.#size += chunk.length;
         finish(err);
-      }, stopped);
+      }, stopped, this.#cut ? this.#size : null);
     }
     // Cut back: the first lines, a line saying what is left out, the last lines.
     const first = Buffer.concat(this.#first);
@@ -202,14 +246,20 @@ class BuildLog extends Writable {
     else { let from = 0; while (from < Math.min(tail.length, 3) && (tail[from]! & 0xc0) === 0x80) from++; tail = tail.subarray(from); }
     const note = Buffer.from(`\n[... ${this.#seen - headEnd - tail.length} bytes of output left out here: a build log keeps its first and last lines ...]\n\n`);
     const from = Math.min(this.#size, headEnd);
-    ftruncate(this.#fd, from, (err) => {
-      if (err || stopped()) return finish(err);
-      const out = Buffer.concat([first.subarray(from, headEnd), note, tail]);
-      writeAll(this.#fd, out, (e) => {
+    const out = Buffer.concat([first.subarray(from, headEnd), note, tail]);
+    // Written over the old output first, and only then the file cut to its
+    // new end: a reader between the two finds the end the log had (its newest
+    // output but this chunk), which lies past what is written over. Cut
+    // first, a poll in between read a log of its first lines alone, or a
+    // part of its new end (HB-1293). A write let go part-way leaves the old
+    // end where it was, uncut.
+    writeAll(this.#fd, out, (err, whole) => {
+      if (err || !whole) return finish(err);
+      ftruncate(this.#fd, from + out.length, (e) => {
         if (!e) this.#size = from + out.length;
         finish(e);
-      }, stopped);
-    });
+      });
+    }, stopped, from);
   }
 
   /** A write is done: a close that waited for it goes ahead. */
@@ -264,12 +314,16 @@ async function moveAside(path: string, kept: number): Promise<void> {
   }
 }
 
-/** Write all of `buf` at the file's end, however many writes it takes, until `stopped` (the log let go). */
-function writeAll(fd: number, buf: Buffer, done: (err?: Error | null) => void, stopped: () => boolean = () => false): void {
-  fsWrite(fd, buf, 0, buf.length, null, (err, n) => {
+/**
+ * Write all of `buf` at `position` (null: where the file is, as for a pipe),
+ * however many writes it takes, until `stopped` (the log let go); `whole`:
+ * all of it was written.
+ */
+function writeAll(fd: number, buf: Buffer, done: (err: NodeJS.ErrnoException | null, whole?: boolean) => void, stopped: () => boolean = () => false, position: number | null = null): void {
+  fsWrite(fd, buf, 0, buf.length, position, (err, n) => {
     if (err) return done(err);
-    if (n < buf.length) return stopped() ? done() : writeAll(fd, buf.subarray(n), done, stopped);
-    done();
+    if (n < buf.length) return stopped() ? done(null, false) : writeAll(fd, buf.subarray(n), done, stopped, position === null ? null : position + n);
+    done(null, true);
   });
 }
 
@@ -288,7 +342,8 @@ export function baseProblem(base: string, repo = 'hatchabot-runtime'): string | 
   if (!base) return 'A base image is required.';
   // `agentclaw-runtime:*` is the pre-rename repo; the migration retags it, but stored bases keep the old name.
   const repoUsed = [repo, 'hatchabot-runtime', 'agentclaw-runtime'].find((r) => base.startsWith(`${r}:`));
-  if (!repoUsed) return `Base must be a ${repo}:* tag.`;
+  // "an" before a vowel: "a example-runtime:* tag" (HB-1191).
+  if (!repoUsed) return `Base must be ${/^[aeiou]/i.test(repo) ? 'an' : 'a'} ${repo}:* tag.`;
   const tag = base.slice(repoUsed.length + 1);
   if (tag.startsWith(DERIVED_TAG_PREFIX)) return 'A derived image cannot be based on another derived image.';
   if (!/^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$/.test(tag)) return 'Invalid base tag.';
@@ -310,8 +365,50 @@ export function baseProblem(base: string, repo = 'hatchabot-runtime'): string | 
  * out. What follows them is the command, and its words are not RUN's.
  */
 export function runFlags(line: string): string[] {
-  const m = /^(?:ONBUILD[ \t\v\f\r]+)?RUN(?:[ \t\v\f\r]+|$)/i.exec(line);
-  if (!m) return [];
+  return ownFlags(line, /^(?:ONBUILD[ \t\v\f\r]+)?RUN(?:[ \t\v\f\r]+|$)/i)?.flags ?? [];
+}
+
+/** A COPY's own flags (or an ONBUILD COPY's), read as runFlags reads RUN's: BuildKit reads every instruction's flags so. */
+function copyFlags(line: string): string[] {
+  return ownFlags(line, /^(?:ONBUILD[ \t\v\f\r]+)?COPY(?:[ \t\v\f\r]+|$)/i)?.flags ?? [];
+}
+
+/**
+ * The sources an ADD (or an ONBUILD ADD) names, after its own flags: its
+ * words as BuildKit reads them (parseMaybeJSONToList), a JSON array's
+ * strings or the words between spaces and tabs, and both when the words
+ * begin with `[`; every word but the last, the destination (or the one word
+ * there is).
+ */
+function addSources(line: string): string[] {
+  const read = ownFlags(line, /^(?:ONBUILD[ \t\v\f\r]+)?ADD(?:[ \t\v\f\r]+|$)/i);
+  if (!read) return [];
+  const args = read.args.trim();
+  const lists = [args.split(/[ \t]+/).filter(Boolean)];
+  if (args.startsWith('[')) {
+    try {
+      const json: unknown = JSON.parse(args);
+      if (Array.isArray(json) && json.every((w) => typeof w === 'string')) lists.push(json as string[]);
+    } catch { /* not JSON: docker reads the words */ }
+  }
+  return lists.flatMap((words) => (words.length > 1 ? words.slice(0, -1) : words));
+}
+
+/**
+ * A source BuildKit might fetch over the network, judged widely, as any
+ * version reads it (dfgitutil.ParseGitRef, isHTTPSource): one with a `:`
+ * (a URL or git address of any scheme, an scp-style `user@host:path`), a
+ * `$` (an ARG or ENV can hold a URL) or a `\` (an escape can spell either),
+ * and the old `github.com/…` form.
+ */
+function fetchedSource(src: string): boolean {
+  return /[:$\\]/.test(src) || /^github\.com\//i.test(src.replace(/["']/g, ''));
+}
+
+/** An instruction's own flags, as BuildKit reads them (extractBuilderFlags), and the words after them (`args`); undefined when the line is not that instruction. */
+function ownFlags(line: string, instruction: RegExp): { flags: string[]; args: string } | undefined {
+  const m = instruction.exec(line);
+  if (!m) return undefined;
   const rest = line.slice(m[0].length);
   // Go's unicode.IsSpace, which ends a flag's word: JavaScript's \s, and NEL.
   const space = (ch: string) => /[\s\u0085]/.test(ch);
@@ -319,7 +416,7 @@ export function runFlags(line: string): string[] {
   let i = 0;
   for (;;) {
     while (i < rest.length && space(rest[i]!)) i++;
-    if (!rest.startsWith('--', i)) return words;
+    if (!rest.startsWith('--', i)) return { flags: words, args: rest.slice(i) };
     let word = '';
     let quote = '';
     for (; i < rest.length; i++) {
@@ -329,7 +426,7 @@ export function runFlags(line: string): string[] {
       if (ch === '\\') { if (i + 1 < rest.length) word += rest[++i]; continue; }
       word += ch;
     }
-    if (word === '--') return words;
+    if (word === '--') return { flags: words, args: rest.slice(i) };
     words.push(word);
   }
 }
@@ -337,8 +434,10 @@ export function runFlags(line: string): string[] {
 /**
  * The snippet is meant to be a thin layer on the base. Reject directives that
  * would escape that: a second FROM (last stage wins), bind/secret mounts of
- * other local images, host networking during the build, a step run without
- * the build's sandbox or with a device of the machine, or a USER of its own.
+ * other local images, a COPY of another image's files, an ADD of a URL
+ * (fetched from the machine's own network), host networking during the
+ * build, a step run without the build's sandbox or with a device of the
+ * machine, or a USER of its own.
  */
 export function dockerfileProblem(snippet: string): string | null {
   // Judge what docker will PARSE, not the physical lines: BuildKit drops
@@ -395,9 +494,11 @@ export function dockerfileProblem(snippet: string): string | null {
   // stage on any image whose ONBUILD lines run with RUN flags nothing here
   // reads, before any check of the image built). The rules judged so: FROM;
   // --mount and --network anywhere on the line; RUN's own flags --mount,
-  // --network, --security and --device (an ONBUILD RUN's too); and
-  // Hatchabot's own labels. The plain-text and parser-directive rules above
-  // are judged on every line already. A line refused so that this reading
+  // --network, --security and --device (an ONBUILD RUN's too); COPY's own
+  // --from (an ONBUILD COPY's too); an ADD of a URL (an ONBUILD ADD's too);
+  // and Hatchabot's own labels. The
+  // plain-text and parser-directive rules above are judged on every line
+  // already. A line refused so that this reading
   // takes for a heredoc's text or part of an instruction is told that every
   // line is judged so, and how to write it. The cost: such a line that
   // begins as an instruction would (`from os import path` in a script a RUN
@@ -420,6 +521,15 @@ export function dockerfileProblem(snippet: string): string | null {
       if (starts.has(i) && /--mount(?![\w-])/i.test(line)) return why('RUN --mount is not allowed in a derived image.');
       if (starts.has(i) && /--network(?![\w-])/i.test(line)) return why('RUN --network is not allowed in a derived image.');
       // And as RUN's own flags, their quotes and escapes out: `--net"work"=host` is that flag (HB-1291 review).
+      // One that got past these would not run either, on Docker's default
+      // builder (the docker driver): BuildKit runs a step on the host's
+      // network only with the network.host entitlement, which a build gets
+      // only by asking (buildx's --allow, or the classic API's
+      // --network=host), and no build of these lines asks; the legacy
+      // builder refuses any RUN flag (HB-1328). That holds only there: a
+      // machine whose builder is a buildx docker-container one made with
+      // --driver-opt network=host runs every RUN on the host's network,
+      // whatever the lines say.
       const flags = runFlags(line);
       if (flags.some((f) => /^--mount(=|$)/i.test(f))) return why('RUN --mount is not allowed in a derived image.');
       if (flags.some((f) => /^--network(=|$)/i.test(f))) return why('RUN --network is not allowed in a derived image.');
@@ -434,6 +544,25 @@ export function dockerfileProblem(snippet: string): string | null {
       // `--device cpu` or `--security` is not (HB-1291 review).
       if (flags.some((f) => /^--security(=|$)/i.test(f))) return why('RUN --security is not allowed in a derived image.');
       if (flags.some((f) => /^--device(=|$)/i.test(f))) return why('RUN --device is not allowed in a derived image.');
+      // COPY --from copies another image's files into this one: any image on
+      // the machine (one whose files hold keys; another derived image, which
+      // then cannot be rebuilt where that one is missing, HB-1470), or one
+      // docker pulls with the machine's registry logins. The reach of RUN
+      // --mount=from=…, refused above, and no check of the image built can
+      // see it: its base, user and labels are unchanged. The lines start no
+      // stage to copy from (FROM is refused), so every --from is another
+      // image (HB-1473). COPY's own flags, read as BuildKit reads them (an
+      // ONBUILD COPY's too); ADD has no --from.
+      if (copyFlags(line).some((f) => /^--from(=|$)/i.test(f))) return why(COPY_FROM);
+      // ADD fetches a URL or a git address itself, in Docker's daemon: from
+      // this machine's own network, where services only this machine can
+      // reach answer (those on its loopback, which a build's RUN cannot
+      // reach), redirects followed, so a public URL can lead there too (the
+      // owner's decision, HB-1500). Judged widely, for any
+      // BuildKit's reading (fetchedSource), its flags read first so none
+      // hides a source. What ADD is left: a heredoc's text, or a path in the
+      // build's folder, which holds only the Dockerfile.
+      if (addSources(line).some(fetchedSource)) return why(ADD_URL);
       if (reads && /^USER\b/i.test(line)) return 'USER is managed for you (root during your lines, node at the end).';
       // Hatchabot's own labels say what the image was built from, and a base's
       // are read to match it on another machine (HB-0986): lines that plainly
@@ -486,6 +615,12 @@ export function dockerfileProblem(snippet: string): string | null {
   }
   return null;
 }
+
+/** Why an ADD of a URL is refused (HB-1500). */
+const ADD_URL = "ADD of a URL is not allowed in a derived image: Docker fetches it from this machine's own network, where it can reach services only this machine can (a git address, or a source named by a variable such as $X, counts as one). Download it with RUN curl instead, which runs in the build's own network.";
+
+/** Why a COPY --from is refused (HB-1473). */
+const COPY_FROM = "COPY --from is not allowed in a derived image: it copies another image's files into this one (any image on this machine, or one Docker can pull with this machine's logins). Install what you need with RUN instead, such as apt-get install or a download.";
 
 /** A line that goes on to the next, as BuildKit's continuation reads it: a last \ (spaces and tabs after it aside) that does not follow another \. */
 const CONTINUED = /(?:^|[^\\])\\[ \t]*$/;
@@ -637,12 +772,54 @@ export function renderDockerfile(base: string, snippet: string, basePackages: re
   return `FROM ${base}\nUSER root\n${basePackages.length ? `${aptInstallLine(basePackages)}\n` : ''}${snippet}\nUSER node\n`;
 }
 
+/**
+ * What a derived build refuses before docker runs: its lines
+ * (dockerfileProblem) and its base packages. The routes judge a record by it
+ * before marking it building: a Rebuild of lines saved before a rule (a
+ * COPY --from, HB-1473) marked a working image FAILED, with a new base if
+ * one was given and no log of why (review of HB-1473).
+ */
+export function derivedBuildProblem(dockerfile: string, basePackages: readonly string[] = []): string | null {
+  const problem = dockerfileProblem(dockerfile);
+  if (problem) return problem;
+  if (basePackages.length > 32 || basePackages.some((p) => p.length > 64 || !APT_PACKAGE_NAME.test(p))) return 'Its base packages are not all package names.';
+  return null;
+}
+
 export interface BuildResult {
   ok: boolean;
   /** Why it failed: docker's own last output when `fromDocker`, else Hatchabot's words (a refusal, a time limit). */
   error?: string;
   /** The error is the tail of what docker printed. */
   fromDocker?: true;
+}
+
+/**
+ * Every process below `root` now, by the process table (`ps`): its children,
+ * theirs, and so on. Empty when the table cannot be read. A process that has
+ * left the tree (a daemon whose parent has gone) is not in it. The base
+ * build's stop and a derived build's read it (HB-1186, HB-1506).
+ */
+export function descendants(root: number): number[] {
+  const ps = ['/bin/ps', '/usr/bin/ps'].find((p) => existsSync(p));
+  if (!ps) return [];
+  let table: string;
+  try { table = execFileSync(ps, ['-A', '-o', 'pid=,ppid='], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }); } catch { return []; }
+  const children = new Map<number, number[]>();
+  for (const line of table.split('\n')) {
+    const [pid, ppid] = line.trim().split(/\s+/).map(Number);
+    if (!pid || !Number.isInteger(ppid)) continue;
+    children.set(ppid!, [...(children.get(ppid!) ?? []), pid]);
+  }
+  const found: number[] = [];
+  for (let todo = [root]; todo.length;) {
+    for (const pid of children.get(todo.pop()!) ?? []) {
+      if (pid === process.pid || found.includes(pid)) continue;
+      found.push(pid);
+      todo.push(pid);
+    }
+  }
+  return found;
 }
 
 /**
@@ -679,15 +856,16 @@ export async function buildDerivedImage(opts: {
   signal?: AbortSignal;
   /** How long a time limit or a stop that comes while a checked image is being named waits for that to end. */
   nameGraceMs?: number;
+  /** The outcome as soon as it is known, before the log has closed (its grace): what the record must not lose to a stop meanwhile. */
+  onOutcome?: (res: BuildResult) => void;
 }): Promise<BuildResult> {
   const STOPPED = 'The build was stopped: the service stopped.';
   if (opts.signal?.aborted) return { ok: false, error: STOPPED };
   // Checked again here, not only when the lines were saved: a record saved
   // before a rule existed (B002's trailing `\`) is rebuilt from the database.
-  const problem = dockerfileProblem(opts.dockerfile);
-  if (problem) return { ok: false, error: problem };
   const basePackages = opts.basePackages ?? [];
-  if (basePackages.length > 32 || basePackages.some((p) => p.length > 64 || !APT_PACKAGE_NAME.test(p))) return { ok: false, error: 'Its base packages are not all package names.' };
+  const problem = derivedBuildProblem(opts.dockerfile, basePackages);
+  if (problem) return { ok: false, error: problem };
   const docker = opts.docker ?? 'docker';
   const dataDir = opts.dataDir ?? 'data';
   const tag = opts.tag ?? deriveTag(opts.name);
@@ -747,15 +925,27 @@ export async function buildDerivedImage(opts: {
       cleanup();
       if (last && !out.destroyed) out.write(last);
       out.end();
+      opts.onOutcome?.(res);
       // The outcome comes at the grace's end whether or not the log has
       // closed by then: a close waits for a write still in flight.
       const grace = setTimeout(() => { out.destroy(); resolve(res); }, opts.logGraceMs ?? 10_000);
       grace.unref();
       closed.then(() => { clearTimeout(grace); resolve(res); });
     };
-    /** Stop the build and all it started: docker leads a process group of its own, as the base build's script does (HB-0883). */
+    /**
+     * Stop the build and all it started: docker leads a process group of its
+     * own, as the base build's script does (HB-0883). And every process below
+     * it, as the table has them just before, first, while those above them
+     * still stand: a step that starts a session of its own (setsid) is in no
+     * group of docker's, and outlived the group's kill (HB-1506, as HB-1186
+     * was for the base build).
+     */
     const stopAll = () => {
-      try { if (proc?.pid) process.kill(-proc.pid, 'SIGKILL'); else proc?.kill('SIGKILL'); } catch { proc?.kill('SIGKILL'); }
+      const p = proc;
+      // Only while it has not been reaped: its number is its own until then.
+      const below = p?.pid && p.exitCode === null && p.signalCode === null ? descendants(p.pid) : [];
+      for (const pid of below) { try { process.kill(pid, 'SIGKILL'); } catch { /* gone already */ } }
+      try { if (p?.pid) process.kill(-p.pid, 'SIGKILL'); else p?.kill('SIGKILL'); } catch { p?.kill('SIGKILL'); }
     };
     /**
      * Stopped (a time limit, the service): all it started is ended, unless a

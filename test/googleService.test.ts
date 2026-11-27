@@ -149,7 +149,8 @@ describe('attach and detach', () => {
     await vi.waitFor(() => expect(w.calls.some((c) => c.script.includes('gog auth remove'))).toBe(true));
     const attaching = w.google.vault.attach(a, OWNER, 'c1', false);
     removing.open();
-    expect(await deleting).toEqual({ removed: true, pendingOn: 0 });
+    // (Google is not reached in this world: its revoke is left to the pass.)
+    expect(await deleting).toEqual({ removed: true, pendingOn: 0, stillEnding: true });
     expect(await attaching).toBeNull();
     expect(w.store.listAgentConnections('a1')).toEqual([]);
     expect(w.store.getConnection('c1')).toBeUndefined();
@@ -403,6 +404,7 @@ describe('a connection deleted, revoked at Google unless another account shares 
     w.connection('c1');
     const deleteNow = w.secrets.delete.bind(w.secrets);
     w.secrets.delete = async () => { throw new Error('the secret store is locked'); };
+    // Revoked at Google: not "still being ended" there (HB-1336 review).
     expect(await w.google.vault.remove('c1', OWNER)).toEqual({ removed: true, pendingOn: 0 });
     expect(w.store.getConnection('c1')).toBeUndefined();
     expect(w.secrets.map.has('connection/c1')).toBe(true);
@@ -464,6 +466,26 @@ describe('a connection deleted, revoked at Google unless another account shares 
     expect(w.store.connectionCleanups()).toHaveLength(1);
   });
 
+  it("revoked at Google with only Hatchabot's copy kept by the secret store: never said not confirmed at Google, and listed as a copy left (HB-1336 review)", async () => {
+    for (const [what, setUp] of [
+      ['revoked', (w: ReturnType<typeof world>) => w.connection('c1')],
+      ['kept for another connection of its grant', (w: ReturnType<typeof world>) => { w.connection('c1'); w.connection('c-other', { owner: OTHER }); }],
+    ] as const) {
+      const r = revokes();
+      const w = world({ oauthFetch: r.oauthFetch });
+      setUp(w);
+      w.secrets.delete = async () => { throw new Error('the secret store is locked'); };
+      expect(await w.google.vault.remove('c1', OWNER), what).toEqual({ removed: true, pendingOn: 0 });
+      expect(w.traced.find((t) => t.event === 'connection.unlinked')?.detail, what).toMatchObject({ tokenLeft: true });
+      expect((await w.google.vault.list(OWNER)).ending, what).toEqual([expect.objectContaining({ copyLeft: true, lastAnswer: 'the secret store did not delete it: the secret store is locked' })]);
+    }
+    // Not confirmed at Google: no copy-left mark, and the answer says so.
+    const w = world({ oauthFetch: revokeAnswers(status(503)).oauthFetch });
+    w.connection('c1');
+    expect(await w.google.vault.remove('c1', OWNER)).toEqual({ removed: true, pendingOn: 0, stillEnding: true });
+    expect((await w.google.vault.list(OWNER)).ending[0]).not.toHaveProperty('copyLeft');
+  });
+
   it('at the start, a token an older release left with nothing naming it is deleted; one a connection or a cleanup names stays (HB-0901)', async () => {
     const db = new Database(':memory:');
     const store = new Store(db);
@@ -494,7 +516,7 @@ describe('a connection deleted, revoked at Google unless another account shares 
     const g = revokeAnswers(status(503), noAnswer, status(200));
     const w = world({ oauthFetch: g.oauthFetch });
     w.connection('c1');
-    expect(await w.google.vault.remove('c1', OWNER)).toEqual({ removed: true, pendingOn: 0 });
+    expect(await w.google.vault.remove('c1', OWNER)).toEqual({ removed: true, pendingOn: 0, stillEnding: true });
     expect(w.store.getConnection('c1')).toBeUndefined();
     // Kept: revoking it is what is still owed.
     expect(w.secrets.map.has('connection/c1')).toBe(true);
@@ -527,6 +549,55 @@ describe('a connection deleted, revoked at Google unless another account shares 
     await w2.google.vault.remove('c1', OWNER);
     expect(w2.secrets.map.has('connection/c1')).toBe(true);
     expect(w2.store.connectionCleanups()[0]!.error).toBe('Google did not revoke it: Google answered 400 (invalid_request)');
+  });
+
+  it("only Google's own 200 ends a token: a captive portal's page, a redirect or another 2xx does not, and the pass asks again (HB-1345)", async () => {
+    const at = (url: string, res: Response) => { Object.defineProperty(res, 'url', { value: url }); return res; };
+    const notGoogle: Array<[string, () => Response]> = [
+      ['a portal\'s page', () => new Response('<html><body>Sign in to the guest network</body></html>', { status: 200, headers: { 'content-type': 'text/html' } })],
+      ['a page sent on from elsewhere', () => at('http://portal.example.org/login', new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } }))],
+      ['a redirect', () => new Response('', { status: 302, headers: { location: 'http://portal.example.org/' } })],
+      ['another 2xx', () => new Response('', { status: 204 })],
+      ['a JSON list', () => new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } })],
+    ];
+    for (const [what, answer] of notGoogle) {
+      const inits: Array<RequestInit | undefined> = [];
+      const g = revokeAnswers(answer);
+      const w = world({ oauthFetch: (async (u: string, init?: RequestInit) => { inits.push(init); return g.oauthFetch(u, init as never); }) as unknown as typeof fetch });
+      w.connection('c1');
+      await w.google.vault.remove('c1', OWNER);
+      // Kept, for the pass to ask Google again.
+      expect(w.secrets.map.has('connection/c1'), what).toBe(true);
+      expect(w.store.connectionCleanups(), what).toEqual([expect.objectContaining({ secretRef: 'connection/c1', tries: 1 })]);
+      expect(w.traced.find((t) => t.event === 'connection.unlinked')?.detail, what).toMatchObject({ revoked: false, tokenLeft: true });
+      // Never a redirect followed.
+      expect(inits[0]?.redirect, what).toBe('manual');
+    }
+    expect((await (async () => {
+      const w = world({ oauthFetch: revokeAnswers(notGoogle[0]![1]).oauthFetch });
+      w.connection('c1');
+      await w.google.vault.remove('c1', OWNER);
+      return w.store.connectionCleanups()[0]!.error;
+    })())).toBe("Google did not revoke it: an answer that was not Google's (200, text/html): a captive portal or a proxy in the way?");
+    // Google's own: an empty body, or a JSON object, from the revoke address.
+    for (const answer of [() => new Response('', { status: 200 }), () => at('https://oauth2.googleapis.com/revoke', new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } }))]) {
+      const w = world({ oauthFetch: revokeAnswers(answer).oauthFetch });
+      w.connection('c1');
+      await w.google.vault.remove('c1', OWNER);
+      expect(w.secrets.map.has('connection/c1')).toBe(false);
+      expect(w.store.connectionCleanups()).toEqual([]);
+      expect(w.traced.find((t) => t.event === 'connection.unlinked')?.detail).toMatchObject({ revoked: true });
+    }
+  });
+
+  it("a 200 whose answer is cut off part way is no revoke: the token is kept, and the pass asks again (HB-1345 review)", async () => {
+    const cutOff = () => new Response(new ReadableStream({ start(c) { c.error(new Error('socket hang up')); } }), { status: 200 });
+    const w = world({ oauthFetch: revokeAnswers(cutOff).oauthFetch });
+    w.connection('c1');
+    expect(await w.google.vault.remove('c1', OWNER)).toEqual({ removed: true, pendingOn: 0, stillEnding: true });
+    expect(w.secrets.map.has('connection/c1')).toBe(true);
+    expect(w.store.connectionCleanups()).toEqual([expect.objectContaining({ secretRef: 'connection/c1', tries: 1, error: 'Google did not revoke it: the answer was cut off' })]);
+    expect(w.traced.find((t) => t.event === 'connection.unlinked')?.detail).toMatchObject({ revoked: false, tokenLeft: true });
   });
 
   it("the pass says how a token it ended went, and counts the tries as they are when its turn comes (HB-1203)", async () => {
@@ -580,7 +651,7 @@ describe('a connection deleted, revoked at Google unless another account shares 
     expect(await w.google.vault.retryCleanups()).toBe(1);
     expect(w.secrets.map.has('connection/c1')).toBe(false);
     expect(w.store.connectionCleanups()).toEqual([]);
-    expect(w.told).toEqual([{ ownerId: OWNER, text: `Hatchabot asked Google 144 times over 8 days to end its access to ${SAM}, and Google never confirmed it. It has stopped asking and deleted its copy of the token. To be sure the access is gone, remove it by hand: in that Google Account, Security → Your connections to third-party apps & services.` }]);
+    expect(w.told).toEqual([{ ownerId: OWNER, text: `Hatchabot asked Google 144 times over 8 days to end its access to ${SAM}, and Google never confirmed it. It has stopped asking and deleted its copy of the token. To be sure the access is gone, remove it by hand: in that Google Account, Security → Your connections to third-party apps & services. It is listed in Hatchabot under ⚙ Settings → Connections until you mark it done.` }]);
     const given = w.traced.find((t) => t.event === 'connection.revoke_given_up');
     expect(given?.detail).toEqual({ email: SAM, since: new Date(t0).toISOString(), tries: 144, days: 8, error: 'Google answered 503', told: true });
     expect(w.traced.map((t) => t.event)).not.toContain('connection.token_ended');
@@ -614,6 +685,99 @@ describe('a connection deleted, revoked at Google unless another account shares 
     expect(await w3.google.vault.retryCleanups()).toBe(1);
     expect(w3.told).toEqual([]);
     expect(w3.traced.find((t) => t.event === 'connection.token_ended')?.detail).toMatchObject({ revoked: true });
+  });
+
+  it("the Connections page lists a deleted account's access still being ended, and one given up until its owner marks it done (HB-1336)", async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const t0 = Date.parse('2026-11-02T09:00:00Z');
+    vi.setSystemTime(t0);
+    const g = revokeAnswers(status(503));
+    const w = world({ oauthFetch: g.oauthFetch });
+    w.connection('c1');
+    w.connection('c-other', { owner: OTHER, email: 'robin@example.org' });
+    expect(await w.google.vault.remove('c1', OWNER)).toMatchObject({ removed: true, stillEnding: true });
+    await w.google.vault.remove('c-other', OTHER);
+    const listed = await w.google.vault.list(OWNER);
+    expect(listed.connections).toEqual([]);
+    expect(listed.ending).toEqual([{ id: expect.stringMatching(/^[0-9a-f]{16}$/), email: SAM, since: new Date(t0).toISOString(), tries: 1,
+      lastTriedAt: new Date(t0).toISOString(), lastAnswer: 'Google did not revoke it: Google answered 503', givenUpAt: null }]);
+    // Never its token, nor where it is kept; never another account's.
+    expect(JSON.stringify(listed)).not.toContain('connection/c1');
+    expect(JSON.stringify(listed)).not.toContain(made('fixture', 'refresh', 'c1'));
+    expect(JSON.stringify(listed)).not.toContain('robin@example.org');
+    const id = listed.ending[0]!.id;
+    // Still being asked: not the owner's to drop.
+    expect(w.google.vault.dismissEnding(OWNER, id)).toBe(false);
+    // Given up after a week and a day of tries: still listed, as a notice, and never asked again.
+    vi.setSystemTime(t0 + 8 * 24 * 60 * 60_000);
+    w.db.prepare('UPDATE connection_cleanups SET tries = 143').run();
+    expect(await w.google.vault.retryCleanups()).toBe(2);
+    expect(w.secrets.map.has('connection/c1')).toBe(false);
+    const after = (await w.google.vault.list(OWNER)).ending;
+    expect(after).toEqual([expect.objectContaining({ id, email: SAM, tries: 144, givenUpAt: new Date(t0 + 8 * 24 * 60 * 60_000).toISOString() })]);
+    const asked = g.asked.length;
+    w.restart();
+    expect(await w.google.vault.retryCleanups()).toBe(0);
+    expect(g.asked).toHaveLength(asked);
+    expect((await w.google.vault.list(OWNER)).ending).toHaveLength(1);
+    // Marked done by another account: refused; by its owner: gone.
+    expect(w.google.vault.dismissEnding(OTHER, id)).toBe(false);
+    expect(w.google.vault.dismissEnding(OWNER, id)).toBe(true);
+    expect((await w.google.vault.list(OWNER)).ending).toEqual([]);
+    expect(w.google.vault.dismissEnding(OWNER, id)).toBe(false);
+    // The other account's, given up too, goes with that account when it is removed.
+    expect((await w.google.vault.list(OTHER)).ending).toHaveLength(1);
+    w.store.deleteLocalAccount(OTHER);
+    expect((await w.google.vault.list(OTHER)).ending).toEqual([]);
+  });
+
+  it("giving up a revoke Google never confirmed while the secret store keeps the token is never listed as Google's part done (HB-1336 review)", async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const t0 = Date.parse('2026-11-02T09:00:00Z');
+    vi.setSystemTime(t0);
+    const w = world({ oauthFetch: revokeAnswers(status(503)).oauthFetch });
+    w.connection('c1');
+    await w.google.vault.remove('c1', OWNER);
+    vi.setSystemTime(t0 + 8 * 24 * 60 * 60_000);
+    w.db.prepare('UPDATE connection_cleanups SET tries = 143').run();
+    const deleteNow = w.secrets.delete.bind(w.secrets);
+    w.secrets.delete = async () => { throw new Error('the secret store is locked'); };
+    expect(await w.google.vault.retryCleanups()).toBe(0);
+    const [row] = (await w.google.vault.list(OWNER)).ending;
+    expect(row).toMatchObject({ givenUpAt: null, lastAnswer: 'Google did not revoke it: Google answered 503; the secret store did not delete its copy: the secret store is locked' });
+    expect(row).not.toHaveProperty('copyLeft');
+    // The next pass, the store working again, gives it up as it would have.
+    w.secrets.delete = deleteNow;
+    expect(await w.google.vault.retryCleanups()).toBe(1);
+    expect((await w.google.vault.list(OWNER)).ending).toEqual([expect.objectContaining({ givenUpAt: expect.any(String) })]);
+    expect(w.secrets.map.has('connection/c1')).toBe(false);
+  });
+
+  it("a token still being ended when its account is removed is still revoked, and given up it is dropped, not kept as a notice nobody can read", async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const t0 = Date.parse('2026-11-02T09:00:00Z');
+    vi.setSystemTime(t0);
+    const g = revokeAnswers(status(503));
+    const w = world({ oauthFetch: g.oauthFetch });
+    w.connection('c-other', { owner: OTHER, email: 'robin@example.org' });
+    w.connection('c-again', { owner: OTHER, email: 'kit@example.org' });
+    await w.google.vault.remove('c-other', OTHER);
+    await w.google.vault.remove('c-again', OTHER);
+    w.store.deleteLocalAccount(OTHER);
+    expect((await w.google.vault.list(OTHER)).ending).toEqual([]);
+    // Both still asked, though nobody can see them now.
+    g.asked.length = 0;
+    expect(await w.google.vault.retryCleanups()).toBe(0);
+    expect(g.asked).toHaveLength(2);
+    vi.setSystemTime(t0 + 8 * 24 * 60 * 60_000);
+    w.db.prepare('UPDATE connection_cleanups SET tries = 143').run();
+    expect(await w.google.vault.retryCleanups()).toBe(2);
+    expect(w.secrets.map.has('connection/c-other')).toBe(false);
+    expect(w.db.prepare('SELECT COUNT(*) AS n FROM connection_cleanups').get()).toEqual({ n: 0 });
+    expect(w.told).toEqual([]);
+    expect(w.traced.filter((t) => t.event === 'connection.revoke_given_up').map((t) => t.detail)).toEqual([
+      expect.objectContaining({ told: false, ownerRemoved: true }), expect.objectContaining({ told: false, ownerRemoved: true }),
+    ]);
   });
 
   it('the account connected again before the pass: the old token is deleted, not revoked, and the new one stays (HB-1203)', async () => {
@@ -724,6 +888,82 @@ describe('a connection deleted, revoked at Google unless another account shares 
     expect(await w.secrets.get('connection/c1')).toBe(fresh);
     expect(w.traced.find((t) => t.event === 'connection.linked')?.detail).toMatchObject({ oldTokenNotRevoked: 'Google answered 503 (backend_error)' });
     expect(w.warned).toContain('connection.replaced_token_not_revoked');
+  });
+
+  it("a replaced token whose revoke Google does not confirm is kept on record, and the pass revokes it, after a restart too (HB-1396)", async () => {
+    const fresh = made('fixture', 'refresh', 'again');
+    const old = made('fixture', 'refresh', 'c1');
+    const oldClient = clientOf('100000000001', 'fixtureold');
+    const newClient = { clientId: clientOf('100000000002', 'fixturenew'), clientSecret: made('fixture', 'new', 'value') };
+    const revokeAnswer: Array<() => Response> = [() => new Response('{"error":"backend_error"}', { status: 503 }), () => new Response('', { status: 200 })];
+    const revoked: string[] = [];
+    const oauthFetch = (async (url: string, init?: { body?: string }) => {
+      const u = String(url);
+      if (u.includes('/revoke')) { revoked.push(new URLSearchParams(init?.body ?? '').get('token') ?? ''); return (revokeAnswer.length > 1 ? revokeAnswer.shift()! : revokeAnswer[0]!)(); }
+      if (u.includes('/token')) return new Response(JSON.stringify({ access_token: made('fixture', 'access'), refresh_token: fresh, scope: 'https://mail.google.com/' }), { headers: { 'content-type': 'application/json' } });
+      return new Response(JSON.stringify({ email: SAM }), { headers: { 'content-type': 'application/json' } });
+    }) as unknown as typeof fetch;
+    const w = world({ oauthFetch });
+    w.connection('c1', { clientId: oldClient });
+    expect(await w.google.client.link(claim, newClient, 'https://example.invalid/cb', 'code-1')).toMatchObject({ email: SAM, granted: ['gmail'] });
+    expect(await w.secrets.get('connection/c1')).toBe(fresh);
+    expect(w.traced.find((t) => t.event === 'connection.linked')?.detail).toMatchObject({ oldTokenNotRevoked: 'Google answered 503 (backend_error)', triedAgainLater: true });
+    // The replaced token, under a ref of its own, with a record of it still to end.
+    const [rec] = w.store.connectionCleanups();
+    expect(rec).toMatchObject({ secretRef: expect.stringMatching(/^connection\/c1\/replaced\/[0-9a-f]{8}$/), ownerId: OWNER, email: SAM, clientId: oldClient, tries: 1, error: 'Google did not revoke it: Google answered 503 (backend_error)' });
+    expect(await w.secrets.get(rec!.secretRef)).toBe(old);
+    expect((await w.google.vault.list(OWNER)).ending).toEqual([expect.objectContaining({ email: SAM, replaced: true, givenUpAt: null })]);
+    // The next process's pass revokes the old token, never the new one, and deletes its copy.
+    w.restart();
+    expect(await w.google.vault.retryCleanups()).toBe(1);
+    expect(revoked).toEqual([old, old]);
+    expect(w.secrets.map.has(rec!.secretRef)).toBe(false);
+    expect(await w.secrets.get('connection/c1')).toBe(fresh);
+    expect(w.store.getConnection('c1')).toMatchObject({ clientId: newClient.clientId });
+    expect(w.store.connectionCleanups()).toEqual([]);
+    const ended = w.traced.find((t) => t.event === 'connection.token_ended')!;
+    expect(ended.detail).toMatchObject({ revoked: true, keptForOtherAccount: false, replaced: true });
+    expect(eventLabel('connection.token_ended', ended.detail)).toBe("a reconnected account's earlier token, left by an earlier try, is now revoked at Google and removed");
+  });
+
+  it("a replaced token revoked at once, or kept for another account's grant, leaves no copy or record (HB-1396)", async () => {
+    const fresh = made('fixture', 'refresh', 'again');
+    const oldClient = clientOf('100000000001', 'fixtureold');
+    const newClient = { clientId: clientOf('100000000002', 'fixturenew'), clientSecret: made('fixture', 'new', 'value') };
+    for (const otherHolds of [false, true]) {
+      const g = google(fresh);
+      const w = world({ oauthFetch: g.oauthFetch });
+      w.connection('c1', { clientId: oldClient });
+      if (otherHolds) w.connection('c-other', { owner: OTHER, clientId: oldClient });
+      await w.google.client.link(claim, newClient, 'https://example.invalid/cb', 'code-1');
+      expect(g.revoked, String(otherHolds)).toEqual(otherHolds ? [] : [made('fixture', 'refresh', 'c1')]);
+      expect(w.store.connectionCleanups(), String(otherHolds)).toEqual([]);
+      expect([...w.secrets.map.keys()].sort(), String(otherHolds)).toEqual(otherHolds ? ['connection/c-other', 'connection/c1'] : ['connection/c1']);
+      expect((await w.google.vault.list(OWNER)).ending).toEqual([]);
+    }
+  });
+
+  it("a replaced token Google never confirms ending is given up as a deleted one's is, and its owner told which access to remove (HB-1396)", async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const t0 = Date.parse('2026-11-02T09:00:00Z');
+    vi.setSystemTime(t0);
+    const fresh = made('fixture', 'refresh', 'again');
+    const oauthFetch = (async (url: string) => {
+      const u = String(url);
+      if (u.includes('/revoke')) return new Response('', { status: 503 });
+      if (u.includes('/token')) return new Response(JSON.stringify({ access_token: made('fixture', 'access'), refresh_token: fresh, scope: 'https://mail.google.com/' }), { headers: { 'content-type': 'application/json' } });
+      return new Response(JSON.stringify({ email: SAM }), { headers: { 'content-type': 'application/json' } });
+    }) as unknown as typeof fetch;
+    const w = world({ oauthFetch });
+    w.connection('c1', { clientId: clientOf('100000000001', 'fixtureold') });
+    await w.google.client.link(claim, { clientId: clientOf('100000000002', 'fixturenew'), clientSecret: made('fixture', 'new', 'value') }, 'https://example.invalid/cb', 'code-1');
+    vi.setSystemTime(t0 + 8 * 24 * 60 * 60_000);
+    w.db.prepare('UPDATE connection_cleanups SET tries = 143').run();
+    expect(await w.google.vault.retryCleanups()).toBe(1);
+    expect(w.told).toEqual([{ ownerId: OWNER, text: `Hatchabot asked Google 144 times over 8 days to end the access ${SAM} gave the OAuth client Hatchabot used before it was connected again, and Google never confirmed it. It has stopped asking and deleted its copy of the token. To be sure the access is gone, remove it by hand: in that Google Account, Security → Your connections to third-party apps & services (the app of that earlier client, not the one connected now). It is listed in Hatchabot under ⚙ Settings → Connections until you mark it done.` }]);
+    expect(await w.secrets.get('connection/c1')).toBe(fresh);
+    expect((await w.google.vault.list(OWNER)).ending).toEqual([expect.objectContaining({ replaced: true, givenUpAt: expect.any(String) })]);
+    expect(eventLabel('connection.revoke_given_up', w.traced.find((t) => t.event === 'connection.revoke_given_up')!.detail)).toMatch(/^Google never confirmed the revoke of a reconnected account's earlier token in 144 tries/);
   });
 });
 

@@ -467,11 +467,13 @@ export function writeConfigValues(values: Record<string, string | null>, path = 
  * https address (setup saves one when it serves TLS itself), its own
  * certificate (HATCHABOT_TLS_CERT in the checkout's .env) is trusted and
  * pinned there, as doctor trusts it; anywhere else, a plain fetch
- * (config/installTls.ts, HB-1375).
+ * (config/installTls.ts, HB-1375). An address with a zone (HATCHABOT_URL=
+ * http://[fe80::1%25eth0]:8080), which fetch refuses, is asked by its host
+ * and port, as doctor asks it (zonedTarget; HB-1539).
  */
 async function installRequest(url: string, init: RequestInit = {}): Promise<Response> {
-  if (!/^https:/i.test(url)) return fetch(url, init);
-  const { installFetch } = await import('./config/installTls.js');
+  const { installFetch, zonedTarget } = await import('./config/installTls.js');
+  if (!/^https:/i.test(url) && !zonedTarget(url)) return fetch(url, init);
   return installFetch(url, init, join(repoDir(), '.env'));
 }
 
@@ -526,6 +528,11 @@ async function askSecret(q: string): Promise<string> {
   });
 }
 
+/** A hand-built agent's bot, by its account's key in OpenClaw's config: no @handle ("default", say) (HB-1300). `start`: a sentence's first words. */
+function adoptBotName(key: unknown, start = false): string {
+  return `${start ? 'Its' : 'its'} bot (Telegram account ${JSON.stringify(String(key))})`;
+}
+
 /**
  * The line that switches a Telegram account off in OpenClaw's config, as
  * the owner pastes it: the command for a key a shell takes as it is, else
@@ -576,7 +583,10 @@ export function tokenTurnedDown(err: unknown): boolean {
  * The command that restarts OpenClaw's gateway on this machine, as the
  * server's own hand-over runs it (gatewayRestart, HB-0981): its systemd unit
  * on Linux; elsewhere (a Mac, whose launchd runs it) OpenClaw's own command,
- * which knows its service manager (HB-1163).
+ * which knows its service manager (HB-1163). Only for a server whose inspect
+ * sends none: the server's own (existingBot.restartCommand) is built on its
+ * machine with its settings, which this shell and platform need not share,
+ * as with --url to another machine (HB-1282).
  */
 export function gatewayRestartCommand(platform: NodeJS.Platform = process.platform, env: NodeJS.ProcessEnv = process.env): string {
   return platform === 'linux' ? `systemctl --user restart ${env.HATCHABOT_OPENCLAW_GATEWAY_UNIT || 'openclaw-gateway'}` : 'openclaw gateway restart';
@@ -636,6 +646,16 @@ export const HANDOVER_SAYS = 2;
  * for a server without HANDOVER_SAYS.
  */
 const STEP_GRACE_MS = 30_000;
+
+/**
+ * How long the server may take over one hand-over post before the step
+ * shows answered (HB-1427): a workspace's bot is looked at first (5 s,
+ * POLL_STATE_DEADLINE_MS in src/orchestrator/transfer/adopt.ts), its token
+ * checked with Telegram (10 s, VERIFY_DEADLINE_MS in
+ * src/channels/telegramManual.ts), and a margin for the post's way there.
+ * Counted from the last post sent. The web app's handOverBot waits the same.
+ */
+export const HANDOVER_POST_BOUND_MS = 20_000;
 
 /**
  * A bot hand-over that may have gone through, and the agent could not say
@@ -1454,15 +1474,30 @@ function usageCostCell(a: any): string {
   return a.cost ? fmtCostRange(a.cost) : a.unpriced ? 'no price' : '—';
 }
 
+/**
+ * A budget's switch to a cheaper model does not travel with a download or a
+ * move: the copy carries its owner's model, and no budget holds it there
+ * (the list's budgetSwitch, HB-1299). The note that says so, or ''.
+ */
+export function budgetSwitchNote(a: { budgetSwitch?: { to: string; own?: string; scope?: string } }): string {
+  const sw = a.budgetSwitch;
+  if (!sw) return '';
+  const bare = (m: string) => String(m).replace(/^.*\//, '');
+  const runs = sw.own ? `your own model (${bare(sw.own)}) if the AI source there offers it, else its default,` : 'the default model of its AI source there';
+  return `note: ${sw.scope === 'machine' ? "this Hatchabot's budget" : 'its budget'} had switched it to ${bare(sw.to)}; on the other machine it runs on ${runs} until you set a budget on that machine.`;
+}
+
 /** `hatchabot usage` (no agent) — running agents ranked by tokens, with an
- *  estimated API cost range (est. — OpenClaw reports combined in+out tokens). */
+ *  estimated API cost range (est. — OpenClaw reports combined in+out tokens).
+ *  Lifetime totals, billed by the source each agent runs now: one whose total
+ *  includes time on an earlier source is marked (HB-1272). */
 export function fmtFleetUsage(f: any): string {
   const agents: any[] = f.agents ?? [];
   if (!agents.length) {
     return f.skipped ? `No running agents to measure (${f.skipped} stopped — usage is live-only).` : 'No agents yet.';
   }
   const nw = Math.max(5, ...agents.map((a) => String(a.name).length));
-  const cells = agents.map(usageCostCell);
+  const cells = agents.map((a) => usageCostCell(a) + (a.earlierSource ? '*' : ''));
   const cw = Math.max(4, ...cells.map((c) => c.length), f.cost ? fmtCostRange(f.cost).length : 0);
   const lines = agents.map((a, i) => {
     const top = a.byModel?.[0]?.model ? `  ${a.byModel[0].model}${a.byModel.length > 1 ? ` +${a.byModel.length - 1}` : ''}` : '';
@@ -1470,7 +1505,9 @@ export function fmtFleetUsage(f: any): string {
   });
   const totalCost = f.cost ? fmtCostRange(f.cost) : '—';
   lines.push(`  ${'—'.repeat(nw)}  ${fmtTok(f.totalTokens).padStart(6)}  ${totalCost.padStart(cw)}  ${String(f.totalSessions).padStart(3)} sess  (${f.counted} running${f.skipped ? `, ${f.skipped} not counted — live-only` : ''})`);
-  if (f.cost) lines.push(`  est. API cost across ${f.cost.agents} API-keyed agent${f.cost.agents > 1 ? 's' : ''}: ${totalCost} — range brackets in/out; subscription & local agents cost $0.`);
+  if (f.cost) lines.push(`  est. API cost across ${f.cost.agents} API-keyed agent${f.cost.agents > 1 ? 's' : ''}: ${totalCost} — by the source each agent runs now; range brackets in/out; subscription & local agents cost $0.`);
+  else lines.push('  billed by the source each agent runs now; subscription & local agents cost $0.');
+  if (agents.some((a) => a.earlierSource)) lines.push('  * its total includes time on an earlier AI source, billed here as the one it runs now.');
   return lines.join('\n');
 }
 
@@ -1542,7 +1579,7 @@ async function main() {
     const { defaultDbPath } = await import('./envCompat.js');
     // The checkout's .env says where the data lives (a production install keeps
     // it outside the checkout); without reading it, this found no database there.
-    const { envMap } = await import('./doctor.js');
+    const { envMap, servicePort } = await import('./doctor.js');
     const dotenv = envMap('.env');
     const dbPath = process.env.HATCHABOT_DB ?? dotenv.HATCHABOT_DB ?? defaultDbPath();
     if (!existsSync(dbPath)) {
@@ -1626,7 +1663,9 @@ async function main() {
       store.setLocalAccountClaim(id, code, expiresAt);
       const days = Math.min(Math.max(Math.floor(Number(flags.get('token-days') ?? 1)) || 1, 1), 90);
       const token = flags.has('cli-token') ? store.createCliToken(id, 'command line', days) : undefined;
-      const base = (process.env.HATCHABOT_PUBLIC_URL ?? dotenv.HATCHABOT_PUBLIC_URL ?? `http://localhost:${dotenv.PORT ?? 8080}`).replace(/\/$/, '');
+      // The port as the service listens on it (servicePort): an empty PORT gave
+      // http://localhost:/, and one with a note the note (review of HB-1529).
+      const base = (process.env.HATCHABOT_PUBLIC_URL ?? dotenv.HATCHABOT_PUBLIC_URL ?? `http://localhost:${servicePort(dotenv)}`).replace(/\/$/, '');
       const link = `${base}/?claim=${code}`;
       const mode = process.env.HATCHABOT_AUTH ?? dotenv.HATCHABOT_AUTH ?? 'password';
       if (flags.has('json')) {
@@ -1810,22 +1849,42 @@ async function main() {
     // shows until setup takes the token, so open says nothing; nor does a
     // read that failed: HandOverUnknown (HB-1277). `again`: `err` is a 409 to
     // a post sent again after no answer, which an earlier post that landed
-    // brings: said so, not as a post with no answer (HB-1277 review).
+    // brings: said so, not as a post with no answer (HB-1277 review). One
+    // read was a snapshot: a post still being checked with Telegram could
+    // take the bot after it, and the agent was removed with the token it held
+    // (HB-1427). Still open on a server that says, it is read again once the
+    // server's bound on a post (HANDOVER_POST_BOUND_MS) is out, counted from
+    // the last post sent; on an older one it is looked at until STEP_GRACE_MS
+    // from then, as pollAgent watches its step.
     const takenOrNot = async (err: unknown, again = false): Promise<HandOverAnswer> => {
       const said = again
         ? `an earlier hand-over of its bot may have gone through (sent again after no answer, it was refused: ${noAnswerWords(err)})`
         : `the hand-over of its bot may not have gone through (${noAnswerWords(err)})`;
-      let a: any;
-      try { a = await (await api(ctx, `/v1/agents/${id}`)).json(); }
-      catch (e) {
-        if ((e as { status?: unknown }).status === 404) throw new AgentGone(noAnswerWords(e));
-        throw new HandOverUnknown(said, `it could not be read after that (${noAnswerWords(e)})`);
+      const read = async (): Promise<any> => {
+        try { return await (await api(ctx, `/v1/agents/${id}`)).json(); }
+        catch (e) {
+          if ((e as { status?: unknown }).status === 404) throw new AgentGone(noAnswerWords(e));
+          throw new HandOverUnknown(said, `it could not be read after that (${noAnswerWords(e)})`);
+        }
+      };
+      const open = (a: any) => !!a?.pendingAction && a.state !== 'RUNNING' && a.state !== 'FAILED';
+      const until = sentAt + (handoverSays ? HANDOVER_POST_BOUND_MS : STEP_GRACE_MS);
+      let a = await read();
+      if (open(a) && Date.now() < until) {
+        console.error(`  waiting up to ${Math.ceil((until - Date.now()) / 1000)} s for the server to finish with the bot hand-over…`);
+        while (open(a) && Date.now() < until) {
+          await new Promise((r) => setTimeout(r, handoverSays ? until - Date.now() : Math.min(3000, until - Date.now())));
+          a = await read();
+        }
       }
-      if (!a?.pendingAction || a.state === 'RUNNING' || a.state === 'FAILED') return handoverSays ? { stepAnswered: true } : {};
+      if (!open(a)) return handoverSays ? { stepAnswered: true } : {};
       if (handoverSays) throw err;
       throw new HandOverUnknown(said, 'it still asks for a bot token, which this server (v2.177 or before) shows until setup takes one');
     };
+    // When the last post was sent: the bound above is counted from then.
+    let sentAt = 0;
     for (let attempt = 0; ; attempt++) {
+      sentAt = Date.now();
       try {
         return ((await (await jsonPost(`/v1/agents/${id}/channel-token`, body)).json().catch(() => ({}))) ?? {}) as HandOverAnswer;
       } catch (err) {
@@ -2155,10 +2214,10 @@ async function main() {
 
       const bot = preview.existingBot;
       if (bot) {
-        console.log(`  already has a bot: @${bot.accountId} (used by "${bot.sourceAgentId}" in your hand-built instance)`);
+        console.log(`  already has a bot: Telegram account ${JSON.stringify(String(bot.accountId))} (used by "${bot.sourceAgentId}" in your hand-built instance)`);
         if (!flags.has('reuse-bot') && !flags.has('no-telegram')) {
           console.log(`  --reuse-bot takes it over: costs no new bot slot, and whoever already`);
-          console.log(`  messages @${bot.accountId} keeps the same conversation.`);
+          console.log(`  messages that bot keeps the same conversation.`);
           console.log(`  --no-telegram brings it in without a bot: you talk to it in the web console.`);
         }
       } else if (!flags.has('no-telegram')) {
@@ -2179,10 +2238,10 @@ async function main() {
             `Then run this again.`);
         }
         if (bot.enabledInSource || bot.polling === 'busy') {
-          fail(`@${bot.accountId} is still live for "${bot.sourceAgentId}" in your hand-built instance.\n` +
+          fail(`${adoptBotName(bot.accountId, true)} is still live for "${bot.sourceAgentId}" in your hand-built instance.\n` +
             `Hand the bot over there first — two pollers on one token lose messages silently:\n` +
             accountOffLine(String(bot.accountId)) +
-            `  ${gatewayRestartCommand()}\n` +
+            `  ${typeof bot.restartCommand === 'string' && bot.restartCommand ? bot.restartCommand : gatewayRestartCommand()}\n` +
             `Then run this again.`);
         }
       }
@@ -2226,7 +2285,7 @@ async function main() {
       // on the agent is set up with it, and a wait that runs out leaves it.
       let gave: HandOverAnswer | undefined;
       // Before every reason a --reuse-bot run stops.
-      const notTaken = flags.has('reuse-bot') ? `@${bot!.accountId} was not taken over: ` : '';
+      const notTaken = flags.has('reuse-bot') ? `${adoptBotName(bot!.accountId, true)} was not taken over: ` : '';
       try {
         let a = await pollAgent(created.id);
         if (flags.has('reuse-bot')) {
@@ -2268,10 +2327,13 @@ async function main() {
         // refused it, and an adopt without leases from the pool, it or another
         // spare. Taken out of the pool first, --reuse-bot takes it over, and an
         // adopt without asks for its token unless another spare is there. A
-        // delete --no-recycle keeps it out of the pool (HB-1419).
+        // delete --no-recycle keeps it out of the pool (HB-1419). Said for the
+        // removal now too: a setup whose undoing could not remove its container
+        // keeps its bot's row, and a plain delete then parked the bot, which
+        // the adopt again was refused (HB-1426); with nothing kept it changes nothing.
         if (a.state === 'FAILED' && gave) {
           fail(`"${name}" has its bot, but could not start (${a.stateReason ?? 'no reason given'}), so it was kept with its bot, and nothing was adopted.\n` +
-            `To finish the adopt, remove it and run this again: hatchabot delete ${created.id} --yes\n` +
+            `To finish the adopt, remove it and run this again: hatchabot delete ${created.id} --yes --no-recycle\n` +
             `A Retry (hatchabot retry ${created.id}) brings the bot back up on an agent with nothing copied from the old one; to adopt again after that, remove it with: hatchabot delete ${created.id} --yes --no-recycle\n` +
             `(Removed without --no-recycle, the bot is parked in your Bot pool, and an adopt is refused it until it is taken out under ⚙ Settings → Messaging → Telegram.)` +
             (flags.has('reuse-bot') ? `\nDon't switch the bot's account back on in your hand-built instance while this agent holds it: once it runs, both would poll it, and messages would be lost.` : ''));
@@ -2285,7 +2347,7 @@ async function main() {
         // key (bot.accountId) may be any name, such as "default".
         const other = gave ? otherBotLine(a, gave.username) : undefined;
         if (other) console.log(other);
-        else if (flags.has('reuse-bot')) console.log(`  took over @${gave?.username ?? botOf(a) ?? bot!.accountId} — same bot, same conversations`);
+        else if (flags.has('reuse-bot')) console.log(`  took over ${gave?.username ?? botOf(a) ? `@${gave?.username ?? botOf(a)}` : adoptBotName(bot!.accountId)} — same bot, same conversations`);
 
         res = await (await jsonPost(`/v1/agents/${a.id}/adopt-workspace`, { path: dir })).json();
       } catch (err) {
@@ -2334,7 +2396,15 @@ async function main() {
         fail(`${why}\nNothing was adopted, but "${name}" (${created.id}) could not be removed: ${kept}\n` +
           `Remove it with: hatchabot delete ${created.id} --yes — then fix the cause and run this again.`);
       }
-      console.log(`adopted ${res.files} files (${(res.bytes / 1e6).toFixed(1)} MB) into "${name}".`);
+      // Its tasks put off until it runs (into a stopped agent, or one another
+      // operation held just then), and those carried before and edited in
+      // the old workspace since, not brought: said, as the web app says them
+      // (HB-1475, HB-1200).
+      const later = Number(res.crons?.deferred) || 0;
+      const changed = Number(res.crons?.changed) || 0;
+      console.log(`adopted ${res.files} files (${(res.bytes / 1e6).toFixed(1)} MB) into "${name}".`
+        + (later ? ` ${later} scheduled task${later > 1 ? 's' : ''} will be carried, disabled, once it is running.` : '')
+        + (changed ? ` ${changed} task${changed > 1 ? 's' : ''} changed in the old workspace since ${changed > 1 ? 'they were' : 'it was'} carried — not brought.` : ''));
       console.log(`The original at ${preview.path} is untouched — retire it when you're happy,`);
       console.log(webOnly
         ? `It has no Telegram bot: talk to it in the web app (click its icon). A bot can be attached later.`
@@ -2494,8 +2564,21 @@ async function main() {
       const { envMap } = await import('./doctor.js');
       const { baseBuildRepo, baseBuildTag, movesFleetDefault } = await import('./orchestrator/machines/runtimeImages.js');
       const dotenv = envMap(join(repoDir(), '.env'));
-      const env: NodeJS.ProcessEnv = { ...process.env, OPENCLAW_VERSION: version, NO_LATEST: candidate ? '1' : '', ...(flags.has('no-engine') ? { EMBED_ENGINE: 'none' } : {}) };
-      for (const k of ['DOCKER_HOST', 'HATCHABOT_IMAGE', 'HATCHABOT_IMAGE_REGISTRY']) {
+      // Every build is the script's candidate: a default one moves :latest
+      // here once it is built, when the check asked then (built=1) lets it:
+      // the rule the app's build ends with (defaultRefusal), an engine-free
+      // image with the shared memory service off and agents it would strand,
+      // not the pins, as its tag names the new image by then (HB-1450).
+      const env: NodeJS.ProcessEnv = { ...process.env, OPENCLAW_VERSION: version, NO_LATEST: '1', ...(flags.has('no-engine') ? { EMBED_ENGINE: 'none' } : {}) };
+      // The daemon is the service's, as doctor asks it (serviceDockerEnv): the
+      // one .env names, or the default, never one this shell points at. A
+      // shell's DOCKER_CONTEXT, DOCKER_TLS_VERIFY and DOCKER_CERT_PATH were
+      // kept, and its DOCKER_HOST when .env names none, so the build landed
+      // on a daemon the service never looks at (HB-1354). DOCKER_CONFIG goes
+      // too: its config.json's currentContext names a daemon as well.
+      const daemon = ['DOCKER_HOST', 'DOCKER_CONTEXT', 'DOCKER_TLS_VERIFY', 'DOCKER_CERT_PATH', 'DOCKER_CONFIG'];
+      for (const k of daemon) delete env[k];
+      for (const k of [...daemon, 'HATCHABOT_IMAGE', 'HATCHABOT_IMAGE_REGISTRY']) {
         if (k in dotenv) { if (dotenv[k]) env[k] = dotenv[k]; else delete env[k]; }
       }
       // The name the script writes (baseBuildTag, held to its dry run): -lite, -plus-… and -custom-… included.
@@ -2507,29 +2590,76 @@ async function main() {
       // repository HATCHABOT_IMAGE_REPO names another), the build moves that
       // repository's :latest, and the fleet default stays (HB-1256).
       const movesDefault = movesFleetDefault(`${repo}:latest`, fleetDefault);
+      // HATCHABOT_IMAGE_REPO, a by-hand override in this shell, builds where
+      // the app and its image list never look: said, before and after, with
+      // how to bring the image into the fleet's repository (HB-1386).
+      const { imageRepository } = await import('./domain/imageRepository.js');
+      const fleetRepo = imageRepository(fleetDefault);
+      const elsewhere = repo !== fleetRepo
+        ? `⚠ ${built} is built in ${repo} (HATCHABOT_IMAGE_REPO, set in this shell), not in the fleet's repository ${fleetRepo}: the app and its image list do not look there. To use it, build again without HATCHABOT_IMAGE_REPO, or tag it in:  docker tag ${built} ${fleetRepo}:${built.slice(repo.length + 1)}`
+        : undefined;
+      if (elsewhere) console.log(elsewhere);
       // A build onto a tag agents or classes are pinned to replaces what they
       // run, and one made the default may strand agents already past it:
       // refused, as the app's own build is (POST /v1/runtime/build), by the
       // route's own check (HB-1428; its review: the image listing showed
       // fewer pins, and the default not at all). Signed out, or not the
-      // machine's owner, it is refused; a service that cannot be asked (not
+      // machine's owner, it is refused, and so is any other answer that is
+      // not the check's: a 404 is a service older than this CLI (in the
+      // middle of an upgrade), whose answer was read as none and the build
+      // went ahead (HB-1450). Only a service that cannot be asked (not
       // running) is said, before the build and after it, and it builds.
-      const q = new URLSearchParams({ tag: built, version, ...(candidate ? { candidate: '1' } : {}) });
-      const asked = await api(ctx, `/v1/runtime/build/check?${q}`)
-        .then((r) => r.json() as Promise<{ refused?: string | null }>, (err: unknown) => (err instanceof Error ? err : new Error(String(err))));
       let unasked: string | undefined;
-      if (asked instanceof Error) {
+      // Restarted by the install's own script: the CLI has no restart command (HB-1450 review).
+      const older = "Hatchabot's service is older than this CLI: restart it onto this release (./scripts/restart.sh in its install folder), then build.";
+      /** The check's refusal, or undefined: none, or a service that did not answer (said). Any other answer ends here, `then` saying what that leaves. */
+      const check = async (q: URLSearchParams, then: string): Promise<string | undefined> => {
+        const asked = await api(ctx, `/v1/runtime/build/check?${q}`)
+          .then((r) => r.json() as Promise<{ refused?: string | null; built?: boolean }>, (err: unknown) => (err instanceof Error ? err : new Error(String(err))));
+        if (!(asked instanceof Error)) {
+          // Asked once built, a service from before built=1 (2.191, 2.192) answers the check before a build, the pins and no engine check: not taken (HB-1450 review).
+          if (q.get('built') === '1' && asked.built !== true) fail(`${older}${then}`);
+          return asked.refused ?? undefined;
+        }
         const status = (asked as { status?: number }).status;
-        if (status === 401) fail(`Hatchabot did not take this CLI's sign-in, so it could not say whether ${built} may be built. Log in again (hatchabot login), then build.`);
-        if (status === 403) fail(`${asked.message} Building a runtime image is the machine owner's: log in as them (hatchabot login), then build.`);
-        unasked = `⚠ Could not ask Hatchabot whether ${built} may be built (${asked.message}): if agents are pinned to it, or would run it as the new default, this build changes what they run.`;
-        console.log(unasked);
-      } else if (asked.refused) fail(asked.refused);
+        if (status === 401) fail(`Hatchabot did not take this CLI's sign-in, so it could not say whether ${built} may be built. Log in again (hatchabot login), then build.${then}`);
+        if (status === 403) fail(`${asked.message} Building a runtime image is the machine owner's: log in as them (hatchabot login), then build.${then}`);
+        if (status === 404) fail(`${older}${then}`);
+        // A refusal of the question itself (a tag or version it does not take) is said in its own words.
+        if (status !== undefined && status < 500) fail(`${asked.message}${then}`);
+        if (status !== undefined) fail(`Hatchabot could not say whether ${built} may be built (${asked.message}). Try again once it answers.${then}`);
+        // Said as it is first met, and again as the last line.
+        if (!unasked) console.log((unasked = `⚠ Could not ask Hatchabot whether ${built} may be built (${asked.message}): if agents are pinned to it, or would run it as the new default, this build changes what they run.`));
+        return undefined;
+      };
+      const refused = await check(new URLSearchParams({ tag: built, version, ...(candidate ? { candidate: '1' } : {}) }), '');
+      if (refused) fail(refused);
       console.log(`Building ${built} for OpenClaw ${version}${candidate ? ' (candidate — :latest untouched)' : movesDefault ? ` (promotes to ${repo}:latest)` : ` (moves ${repo}:latest; the fleet default stays ${fleetDefault})`}…\n`);
       try {
         execFileSync('bash', [script], { stdio: 'inherit', env });
       } catch {
         fail('Image build failed — see the output above.');
+      }
+      if (!candidate) {
+        // Asked again now it is built (built=1), as the app's build is as it
+        // ends: an agent that reached 2026.8 or newer during the build (up to
+        // 90 minutes), or an engine-free image with the shared memory service
+        // off, went unseen while the script moved :latest itself (HB-1450).
+        // Refused, it stays the candidate the script built, and says why.
+        const latest = `${repo}:latest`;
+        const notMoved = movesDefault ? 'Then Hatchabot did not make it the fleet default' : `Then Hatchabot did not move ${latest} to it`;
+        const stays = `\nIt stays a candidate: ${built}, with ${latest} untouched.`;
+        const after = await check(new URLSearchParams({ tag: built, version, built: '1' }), `\n${notMoved}.${stays}`);
+        if (after) fail(`${notMoved}: ${after}${stays}`);
+        try {
+          execFileSync('docker', ['tag', built, latest], { stdio: ['ignore', 'ignore', 'pipe'], env });
+        } catch (err) {
+          fail(`${notMoved}: docker could not tag it as ${latest} (${String((err as { stderr?: Buffer }).stderr ?? (err as Error).message ?? err).trim().slice(0, 200)}).${stays}`);
+        }
+        // What was done, after the script's own last line ("candidate — :latest untouched"), as the app's build says it (HB-1508).
+        console.log(movesDefault
+          ? `Then Hatchabot made it the fleet default: ${latest} names ${built} now.`
+          : `Then Hatchabot moved ${latest} to it: ${latest} names ${built} now. The fleet default stays ${fleetDefault}${elsewhere ? '' : ', as HATCHABOT_IMAGE pins it'}.`);
       }
       if (candidate && movesDefault) {
         console.log(`\nCandidate built as ${built} (:latest untouched). Smoke-test it, then promote:`);
@@ -2539,14 +2669,21 @@ async function main() {
         // Under the pin, retagging :latest moves no default (HB-1256): the setting does.
         console.log(`\nCandidate built as ${built} (:latest untouched). Smoke-test it:`);
         console.log(`  HATCHABOT_IMAGE=${built} npm run e2e:docker   (from ${repoDir()})`);
-        console.log(`The fleet default stays ${fleetDefault} (HATCHABOT_IMAGE): to make ${built} the default, set HATCHABOT_IMAGE in .env to it and restart Hatchabot.`);
+        // Outside the fleet's repository, how to use it is the warning's alone (below): one way said, not three (review of HB-1386).
+        if (!elsewhere) console.log(`The fleet default stays ${fleetDefault} (HATCHABOT_IMAGE): to make ${built} the default, set HATCHABOT_IMAGE in .env to it and restart Hatchabot.`);
+      } else if (elsewhere) {
+        console.log(`\nDone — ${built} is built, and ${repo}:latest moved with it. The fleet default stays ${fleetDefault}.`);
       } else if (movesDefault) {
         console.log(`\nDone — ${repo}:latest is now OpenClaw ${version}. Each agent shows "update available";`);
         console.log(`Rebuild it to adopt the new version, memory kept:  hatchabot rebuild "<agent>"`);
       } else {
         console.log(`\nDone — ${repo}:latest is now OpenClaw ${version}. The fleet default stays ${fleetDefault}:`);
         console.log(`only agents pinned to ${repo}:latest show "update available". Rebuild one to adopt it, memory kept:  hatchabot rebuild "<agent>"`);
+        // How the fleet moves onto it (set HATCHABOT_IMAGE, Promote being off under the pin): said once
+        // (HB-1355), here now that the script builds a candidate and says nothing of it (HB-1450).
+        console.log(`To make it the fleet default, set HATCHABOT_IMAGE in .env to ${built} and restart Hatchabot.`);
       }
+      if (elsewhere) console.log(`\n${elsewhere}`);
       if (unasked) console.log(`\n${unasked}`);
       return;
     }
@@ -2612,6 +2749,8 @@ async function main() {
         // the command for good (review of HB-1229).
         const limit = minutesFlag(60), deadline = Date.now() + limit * 60_000;
         const res: any = (await pollJson(ctx, '/v1/images', deadline, jsonInit(body))) ?? imageBuildOver(name, limit, false);
+        // The base it took for the fleet's image, when that is pinned by digest (HB-1353).
+        if (res.said) console.log(res.said);
         console.log(`Building ${res.tag}… (runs as root, then restores USER node)\n`);
         await streamImageBuild(ctx, name, res.tag, limit, deadline);
         return;
@@ -2718,6 +2857,7 @@ async function main() {
       const peer = peers.find((p) => p.id === ref || p.name === ref);
       if (!peer) fail(`no server matches "${ref}"`);
       console.log(`rehosting "${a.name}" to ${peer.name}…`);
+      if (budgetSwitchNote(a)) console.log(budgetSwitchNote(a));
       // A pinned image is rebuilt there from its recipe; --drop-pin opts out.
       // --profile <id>: run on that AI source there (the one a refusal offers).
       const source = flags.get('profile');
@@ -3065,6 +3205,7 @@ async function main() {
       } catch (e) { await save.discard(); throw e; }
       console.log(`backed up to ${out}`);
       if (droppedHeader) console.log(`note: NOT in the file — its ${droppedHeader.split(',').join(' and ')} bot and the people linked there (they stay on this machine).`);
+      if (budgetSwitchNote(a)) console.log(budgetSwitchNote(a));
       console.log('note: the file is a complete private copy — it contains the bot token, treat it like a password.');
       console.log(`note: "${a.name}" is now STOPPED here; keep it stopped once restored elsewhere.`);
       return;

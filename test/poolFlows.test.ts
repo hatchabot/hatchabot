@@ -8,19 +8,25 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CompositeTelegramProvisioner } from '../src/channels/composite.js';
 import { TelegramManualProvisioner } from '../src/channels/telegramManual.js';
 import { makeWorld, seedRunningAgent, as } from './support/world.js';
+import { urlHost } from './helpers/urlHost.js';
 
-/** verifyBotToken hits api.telegram.org — fake Telegram's getMe. */
-function fakeTelegram(username: string | undefined) {
-  return vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-    new Response(
-      JSON.stringify(
-        username
-          ? { ok: true, result: { username } }
-          : { ok: false, description: 'Unauthorized' },
-      ),
-      { status: username ? 200 : 401 },
-    ),
-  );
+/**
+ * Telegram as the routes are handed it (HB-1447): getMe names the bot `says`
+ * gives, or is Telegram's own "no" with none; every other call is answered
+ * empty, as the world's own stand-in answers it. Made up, and asked of
+ * nothing real: the token check goes through the routes' fetch.
+ */
+function fakeTelegram() {
+  let username: string | undefined;
+  const getMes: string[] = [];
+  const fetchImpl = (async (input: string | URL | Request) => {
+    const url = String(input instanceof Request ? input.url : input);
+    if (urlHost(url) !== 'api.telegram.org') return new Response('{"error":"stubbed"}', { status: 404 });
+    if (!/\/getMe$/.test(url)) return new Response(JSON.stringify({ ok: true, result: [] }), { status: 200 });
+    getMes.push(url);
+    return new Response(JSON.stringify(username ? { ok: true, result: { username } } : { ok: false, error_code: 401, description: 'Unauthorized' }), { status: username ? 200 : 401 });
+  }) as typeof fetch;
+  return { fetchImpl, getMes, says: (u: string | undefined) => { username = u; } };
 }
 
 afterEach(() => vi.restoreAllMocks());
@@ -58,11 +64,13 @@ describe('GET /v1/pool: who holds a shared bot (HB-0036)', () => {
 });
 
 describe('POST /v1/pool', () => {
-  it('verifies the token with Telegram and stocks the pool', async () => {
-    const w = await makeWorld();
-    fakeTelegram('freshbot');
+  it('verifies the token with the Telegram the routes are handed, and stocks the pool', async () => {
+    const tg = fakeTelegram();
+    const w = await makeWorld(undefined, 0, { oauthFetch: tg.fetchImpl });
+    tg.says('freshbot');
     const res = await w.f.inject({ method: 'POST', url: '/v1/pool', headers: as(), payload: { token: '1:AA' } });
     expect(res.statusCode).toBe(201);
+    expect(tg.getMes).toHaveLength(1); // asked of the routes' Telegram, not the global fetch (HB-1447)
     expect(res.json()).toMatchObject({ username: 'freshbot', availableBots: 1 });
     // Yours by default — its minter's, not the house's.
     expect(w.channel.pool.entries[0]).toMatchObject({ username: 'freshbot', token: '1:AA', ownerId: w.owner });
@@ -72,13 +80,14 @@ describe('POST /v1/pool', () => {
   });
 
   it('rejects a bad token (400) and a bot already wired to an agent (409)', async () => {
-    const w = await makeWorld();
-    fakeTelegram(undefined);
-    expect((await w.f.inject({ method: 'POST', url: '/v1/pool', headers: as(), payload: { token: 'bad' } })).statusCode).toBe(400);
-    vi.restoreAllMocks();
+    const tg = fakeTelegram();
+    const w = await makeWorld(undefined, 0, { oauthFetch: tg.fetchImpl });
+    tg.says(undefined);
+    expect((await w.f.inject({ method: 'POST', url: '/v1/pool', headers: as(), payload: { token: '7:refused' } })).statusCode).toBe(400);
+    expect(tg.getMes).toHaveLength(1);
 
     await seedRunningAgent(w, { accountId: 'kitchenbot' });
-    fakeTelegram('kitchenbot');
+    tg.says('kitchenbot');
     const dupe = await w.f.inject({ method: 'POST', url: '/v1/pool', headers: as(), payload: { token: '2:BB' } });
     expect(dupe.statusCode).toBe(409);
     expect(dupe.json().error).toMatch(/live identity/);
@@ -89,8 +98,9 @@ describe('POST /v1/pool', () => {
     // per-owner — so a member parking a bot they minted is the design, not an
     // intrusion. A blanket host-owner guard used to refuse it with a message
     // about mounting host folders (reported 2026-09-16).
-    const w = await makeWorld();
-    fakeTelegram('memberbot');
+    const tg = fakeTelegram();
+    const w = await makeWorld(undefined, 0, { oauthFetch: tg.fetchImpl });
+    tg.says('memberbot');
     const own = await w.f.inject({ method: 'POST', url: '/v1/pool', headers: as('member'), payload: { token: '9:CC' } });
     expect(own.statusCode).toBe(201);
     expect(w.channel.pool.entries.find((e: any) => e.username === 'memberbot').ownerId).toBe('member');
@@ -99,7 +109,6 @@ describe('POST /v1/pool', () => {
     const donate = await w.f.inject({ method: 'POST', url: '/v1/pool', headers: as('member'), payload: { token: '9:CC', shared: true } });
     expect(donate.statusCode).toBe(403);
     expect(donate.json().error).not.toMatch(/host folders/i);
-    vi.restoreAllMocks();
   });
 });
 

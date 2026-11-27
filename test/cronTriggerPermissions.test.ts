@@ -1,10 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { clearBusy } from '../src/orchestrator/lifecycle/busy.js';
 import { rebuildAgent } from '../src/orchestrator/lifecycle/provision.js';
 import { as, makeWorld, seedRunningAgent, type World } from './support/world.js';
 
 describe('event-trigger permissions reach the runtime (HB-0690)', () => {
-  afterEach(() => { vi.unstubAllEnvs(); clearBusy('a1'); });
+  afterEach(() => { vi.unstubAllEnvs(); });
   const ready = async () => {
     vi.stubEnv('HATCHABOT_REBUILD_POLICY', 'manual');
     vi.stubEnv('HATCHABOT_READY_POLL_MS', '1');

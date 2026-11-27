@@ -2,21 +2,26 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
-import { busyWaiters, clearBusy, isBusy, markBusy } from '../src/orchestrator/lifecycle/busy.js';
+import { busyWaiters, clearBusy, heldFor, isBusy, markBusy } from '../src/orchestrator/lifecycle/busy.js';
 import { createAgentSettings, type AgentSettings } from '../src/orchestrator/lifecycle/agentSettings.js';
+import type { OwedRefusal } from '../src/orchestrator/lifecycle/modelRuntime.js';
 import type { ClassEdit } from '../src/orchestrator/lifecycle/classChanges.js';
-import { buildRuntimeSpec, finishInterruptedRebuild, NAME_TAKEN_WHY, recordApplied, reindexMemoryIfSwitched, runProvisionSteps, SKIP_POOL, type ProvisionDeps } from '../src/orchestrator/lifecycle/provision.js';
+import { buildRuntimeSpec, finishInterruptedRebuild, NAME_TAKEN_WHY, recordApplied, reindexMemoryIfSwitched, runProvisionSteps, SKIP_POOL, waitsForItsOwner, type ProvisionDeps } from '../src/orchestrator/lifecycle/provision.js';
 import { ChannelSetupRequired, type ChannelProvisioner } from '../src/channels/channel.js';
 import { embedKeyHash } from '../src/embedder/embedder.js';
 import { memoryBudgetSection } from '../src/domain/memoryCap.js';
 import { as, makeWorld, restartWorld, seedRunningAgent, type World } from './support/world.js';
-import { runBudgets, type BudgetDeps } from '../src/orchestrator/usage/budgets.js';
+import { MACHINE, runBudgets, type BudgetDeps } from '../src/orchestrator/usage/budgets.js';
 import { createMonthlyBudgets } from '../src/orchestrator/usage/monthlyBudgets.js';
 import { HOUR_FIELDS, type WindowModelStats } from '../src/orchestrator/usage/usage.js';
 import type { Agent } from '../src/domain/types.js';
 import { beginOperation, handleFor, oweStart, startOwedIn } from '../src/orchestrator/lifecycle/operations.js';
 import { createAiSources } from '../src/orchestrator/sources/aiSources.js';
 import { rollbackMarkPath, takeRollbackMark } from '../src/store/rollbackMark.js';
+import { startCutOffDownloads } from '../src/orchestrator/transfer/transfer.js';
+import { reconcileAgents } from '../src/orchestrator/lifecycle/reconcile.js';
+import { eventLabel } from '../src/orchestrator/health/eventLabels.js';
+import { forgetDmPolicy } from '../src/orchestrator/channels/dmPolicyMemo.js';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -58,17 +63,15 @@ interface House {
   /** The pause between two looks for a container that is not up yet (afterRestart.ts): no real wait here. */
   pause: (ms: number) => Promise<void>;
   /** Told of an owed model the runtime refused at a start (modelRuntime.ts, HB-1404): the budgets' hook, where a test wires one. */
-  owedRefused?: (agentId: string, ask: string) => void;
+  owedRefused?: (agentId: string, ask: string, how?: OwedRefusal) => void;
   /** What src/index.ts does with the store before anything else at a start, where a test sets it (takeRollbackMark, HB-0840). */
   atStart?: (store: Store) => void;
 }
 
-const busyIds: string[] = [];
 const lives: Life[] = [];
 const closers: Array<() => Promise<unknown>> = [];
 afterEach(async () => {
   for (const l of lives.splice(0)) l.settings.stop();
-  for (const id of busyIds.splice(0)) clearBusy(id);
   for (const c of closers.splice(0)) await c();
 });
 
@@ -88,9 +91,8 @@ function house(): House {
       inFlight: (agentId) => flights.get(agentId),
       agentGone: (id) => { const state = store.getAgent(id)?.state; return !state || state === 'DELETED' || state === 'DELETING'; },
       withAgentsMdTurn: (_agentId, fn) => fn(),
-      sourceHoldMs: 600_000,
       sleep: (ms) => h.pause(ms),
-      owedRefused: (agentId, ask) => h.owedRefused?.(agentId, ask),
+      owedRefused: (agentId, ask, how) => h.owedRefused?.(agentId, ask, how),
     });
     const life = { store, settings, flights };
     lives.push(life);
@@ -167,7 +169,7 @@ describe('a model stored and not yet on its runtime when the process ends', () =
     // The first six asked are held by something else (a backup each).
     const order = next.store.agentHolds('model-apply').map((x) => x.agentId);
     const busyOnes = order.slice(0, 6), last = order[6]!;
-    for (const id of busyOnes) { markBusy(id); busyIds.push(id); }
+    for (const id of busyOnes) markBusy(id);
     const resumed = next.settings.resume();
     await settle(() => next.store.getAgent(last)?.appliedModel === OTHER);
     // Was: the seventh waited until the six were free (up to five half hours each).
@@ -256,7 +258,7 @@ describe('a model stored and not yet on its runtime when the process ends', () =
 
   it('put off because the agent was busy, it stays asked and the next start puts it on', async () => {
     const h = house(), a = await h.agent('a1'), { store, settings } = h.now;
-    markBusy(a.id); busyIds.push(a.id);
+    markBusy(a.id);
     store.setAgentModel(a.id, OTHER, { apply: true });
     expect(await settings.models.applyModelToRuntime(a.id)).toBe('none');
     expect(store.agentHold(a.id, 'model-apply')).toBeTruthy();
@@ -737,7 +739,7 @@ describe('a memory budget still to be told when the process ends', () => {
       return shell(ref, script, opts);
     };
     // Kitchen's cap moves and it is busy (a backup): the ask waits for it to be free. The process ends there.
-    markBusy(a.id); busyIds.push(a.id);
+    markBusy(a.id);
     store.setAgentMemoryCap(a.id, '3g');
     const waiting = settings.limits.tellMemoryBudget(a.id);
     await tick();
@@ -790,6 +792,396 @@ describe('through the routes, as src/index.ts starts them', () => {
     expect(modelsSet(w.provider)).toEqual([`anthropic/${OTHER}`]);
     expect(w.store.getAgent(id)?.appliedModel).toBe(OTHER);
     expect((await send(w, 'GET', '/v1/agents')).json()[0].pendingModel).toBeUndefined();
+  });
+
+  /**
+   * "Anyone can knock" turned on while a rebuild holds the agent, and
+   * Hatchabot restarted before it was free: the world after the restart, the
+   * rebuild over, with the doors the agent's volume is written (each pass
+   * its own: the memo of what was written is the module's, and kept across
+   * worlds, so it is forgotten here).
+   */
+  const knockDoorAcrossRestart = async () => {
+    let w = await makeWorld();
+    closers.push(() => w.f.close());
+    const id = await seedRunningAgent(w);
+    forgetDmPolicy(id);
+    const doors: string[] = [];
+    let writes: 'take' | 'refuse' = 'take';
+    w.provider.execShellOnVolume = (async (_ref: string, script: string) => {
+      const t = /const t = (\{.*?\});/.exec(script)?.[1];
+      const door = t ? JSON.parse(t) as { channel?: string; policy?: string } : undefined;
+      if (door?.policy) {
+        if (writes === 'refuse') return { code: 1, stdout: '', stderr: 'made-up failure' };
+        doors.push(`${door.channel}:${door.policy}`);
+      }
+      return { code: 0, stdout: 'set\n', stderr: '' };
+    }) as never;
+    // A rebuild under way, its config (the door shut) written already.
+    w.store.setAgentState(id, 'REBUILDING');
+    markBusy(id);
+    const r = await send(w, 'POST', `/v1/agents/${id}/allow-knocks`, { on: true });
+    expect(r.json()).toEqual({ allowKnocks: true });
+    expect(w.store.agentHold(id, 'knock-door')).toBeDefined();
+    // Hatchabot restarts: the wait ends with the process, and the agent's flag with it; the rebuild comes to its end.
+    w = await restartWorld(w);
+    closers.push(() => w.f.close());
+    clearBusy(id);
+    w.store.setAgentState(id, 'RUNNING');
+    for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+    expect(doors, 'the old process opened nothing once it was stopped').toEqual([]);
+    return { w, id, doors, refuse: (on: boolean) => { writes = on ? 'refuse' : 'take'; } };
+  };
+  const failures = (w: World, id: string) => w.store.listEvents([id], 50).filter((e) => e.event === 'agent.knock_door_failed');
+
+  it('HB-1264: "Anyone can knock" turned on while a rebuild held the agent, Hatchabot restarted before it was free: the next process opens the door once it is; turned off, stopped or archived meanwhile, nothing is opened', async () => {
+    const meanwhile: Array<[string, (w: World, id: string) => void, boolean]> = [
+      ['nothing', () => {}, true],
+      ['turned off', (w, id) => w.store.setAllowKnocks(id, false), false],
+      ['stopped', (w, id) => w.store.setAgentState(id, 'STOPPED'), false],
+      ['archived', (w, id) => w.store.setAgentState(id, 'ARCHIVED'), false],
+    ];
+    for (const [what, change, opens] of meanwhile) {
+      const { w, id, doors } = await knockDoorAcrossRestart();
+      change(w, id);
+      await w.routes!.resumeOperations();
+      await settle(() => w.store.agentHold(id, 'knock-door') === undefined);
+      expect(w.store.agentHold(id, 'knock-door'), what).toBeUndefined();
+      // Was: lost with the process, the door shut until the next rebuild.
+      expect(doors.filter((d) => d.endsWith(':pairing')), what).toEqual(opens ? ['telegram:pairing'] : []);
+    }
+  });
+
+  it('HB-1264 review: at the start, a door whose container does not answer yet, or whose write fails, stays owed to the next start', async () => {
+    const { w, id, doors, refuse } = await knockDoorAcrossRestart();
+    // The whole machine restarted: Docker does not answer yet.
+    const status = w.provider.status.bind(w.provider);
+    let looks = 0;
+    w.provider.status = (async () => { looks++; throw new Error('made-up: docker is not answering'); }) as never;
+    await w.routes!.resumeOperations();
+    await settle(() => looks > 0);
+    for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+    // Was: written at once, refused, and the hold dropped for good.
+    expect(doors).toEqual([]);
+    expect(w.store.agentHold(id, 'knock-door')).toBeDefined();
+    // The next start: Docker answers, but the write fails. Said, and still owed.
+    w.provider.status = status;
+    refuse(true);
+    let w2 = await restartWorld(w);
+    closers.push(() => w2.f.close());
+    await w2.routes!.resumeOperations();
+    await settle(() => failures(w2, id).length > 0);
+    expect(failures(w2, id)).toHaveLength(1);
+    expect(w2.store.agentHold(id, 'knock-door')).toBeDefined();
+    // The one after: it takes, and is let go.
+    refuse(false);
+    forgetDmPolicy(id);
+    w2 = await restartWorld(w2);
+    closers.push(() => w2.f.close());
+    await w2.routes!.resumeOperations();
+    await settle(() => w2.store.agentHold(id, 'knock-door') === undefined);
+    expect(w2.store.agentHold(id, 'knock-door')).toBeUndefined();
+    expect(doors).toEqual(['telegram:pairing']);
+  });
+
+  it('HB-1264 review: turned off, stopped or rebuilt while the start waits for its container: nothing is opened, and it is let go', async () => {
+    const meanwhile: Array<[string, (w: World, id: string) => void]> = [
+      ['turned off', (w, id) => w.store.setAllowKnocks(id, false)],
+      ['stopped', (w, id) => w.store.setAgentState(id, 'STOPPED')],
+      ['rebuilt', (w, id) => w.store.setAgentRuntimeRef(id, 'made-up-new-container')],
+    ];
+    for (const [what, change] of meanwhile) {
+      const { w, id, doors } = await knockDoorAcrossRestart();
+      // The container answers only on its second look; the change lands between the two.
+      const status = w.provider.status.bind(w.provider);
+      let looks = 0;
+      w.provider.status = (async (ref: string) => {
+        if (++looks === 1) { change(w, id); return { phase: 'starting' }; }
+        return status(ref);
+      }) as never;
+      await w.routes!.resumeOperations();
+      await settle(() => w.store.agentHold(id, 'knock-door') === undefined, 10_000);
+      expect(looks, what).toBeGreaterThan(1);
+      // Was: opened on what it read before the looks.
+      expect(doors, what).toEqual([]);
+      expect(w.store.agentHold(id, 'knock-door'), what).toBeUndefined();
+    }
+  });
+
+  it('HB-1264 review: a door owed at the start whose machine is not known here any more is said on its timeline and let go, not tried at every start', async () => {
+    const { w, id, doors } = await knockDoorAcrossRestart();
+    w.store.insertHost({ id: 'h-gone', ownerId: w.owner, kind: 'local', provider: 'mock', name: 'old box', settings: {}, createdAt: 'now' });
+    w.store.setAgentHost(id, 'h-gone');
+    w.db!.prepare(`DELETE FROM hosts WHERE id = 'h-gone'`).run();
+    await w.routes!.resumeOperations();
+    await settle(() => w.store.agentHold(id, 'knock-door') === undefined);
+    expect(w.store.agentHold(id, 'knock-door')).toBeUndefined();
+    expect(failures(w, id).map((e) => e.detail?.why)).toEqual([expect.stringContaining('No such host')]);
+    expect(doors).toEqual([]);
+  });
+
+  it('HB-1479: a download cut off by a restart during its copy: the next process starts the agent again; one whose file was made stays stopped', async () => {
+    let w = await makeWorld();
+    closers.push(() => w.f.close());
+    const id = await seedRunningAgent(w);
+    const ref = w.store.getAgent(id)!.runtimeRef!;
+    const take = w.provider.exportState.bind(w.provider);
+    // The copy never ends in the first process: Hatchabot restarts during it.
+    w.provider.exportState = () => new Promise(() => {});
+    void send(w, 'GET', `/v1/agents/${id}/backup`).catch(() => undefined);
+    await settle(() => w.store.getAgent(id)?.state === 'STOPPED');
+    expect((await w.provider.status(ref)).phase).toBe('stopped');
+    w.provider.exportState = take;
+    w = await restartWorld({ ...w, f: { close: async () => undefined } as never });
+    closers.push(() => w.f.close());
+    clearBusy(id); // the first process's hold on it went with it
+    await w.routes!.resumeOperations();
+    // Was: stopped, with no file, until its owner pressed Start.
+    expect(w.store.getAgent(id)?.state).toBe('RUNNING');
+    expect((await w.provider.status(ref)).phase).toBe('running');
+    expect(w.store.agentHold(id, 'download-stop')).toBeUndefined();
+    expect(w.store.listEvents([id]).map((e) => e.event)).toContain('export.cut_off');
+
+    // A download whose file was made, and the process ended before it let go: it stays stopped, as after any download.
+    const kept = w.store.clearAgentHold.bind(w.store);
+    w.store.clearAgentHold = (agentId, kind, onlyIf) => kind === 'download-stop' ? false : kept(agentId, kind, onlyIf);
+    const done = await send(w, 'GET', `/v1/agents/${id}/backup`);
+    expect(done.statusCode).toBe(200);
+    expect(w.store.getAgent(id)?.state).toBe('STOPPED');
+    w = await restartWorld(w);
+    closers.push(() => w.f.close());
+    expect(w.store.agentHold(id, 'download-stop')).toBeDefined();
+    await w.routes!.resumeOperations();
+    expect(w.store.getAgent(id)?.state).toBe('STOPPED');
+    expect((await w.provider.status(ref)).phase).toBe('stopped');
+    expect(w.store.agentHold(id, 'download-stop')).toBeUndefined();
+  });
+
+  it("HB-1479: two downloads cut off: one its owner started and stopped while the other's start was slow is not started again", async () => {
+    let w = await makeWorld();
+    closers.push(() => w.f.close());
+    const a = await seedRunningAgent(w);
+    const b = await seedRunningAgent(w, { id: 'a2', name: 'Garden', slug: 'garden', accountId: 'gardenbot' });
+    const take = w.provider.exportState.bind(w.provider);
+    w.provider.exportState = () => new Promise(() => {});
+    for (const id of [a, b]) void send(w, 'GET', `/v1/agents/${id}/backup`).catch(() => undefined);
+    await settle(() => [a, b].every((id) => w.store.getAgent(id)?.state === 'STOPPED'));
+    w.provider.exportState = take;
+    w = await restartWorld({ ...w, f: { close: async () => undefined } as never });
+    closers.push(() => w.f.close());
+    for (const id of [a, b]) clearBusy(id);
+    // Kitchen's start is slow (its machine is slow to answer).
+    const refA = w.store.getAgent(a)!.runtimeRef!;
+    const start = w.provider.start.bind(w.provider);
+    const entered = gate(), slow = gate();
+    w.provider.start = async (ref) => { if (ref === refA) { entered.open(); await slow.held; } return start(ref); };
+    const pass = w.routes!.resumeOperations();
+    await entered.held;
+    // Meanwhile Garden's owner presses Start, then Stop.
+    await settle(() => !isBusy(b));
+    await send(w, 'POST', `/v1/agents/${b}/start`);
+    await settle(() => w.store.getAgent(b)?.state === 'RUNNING' && !isBusy(b));
+    expect((await send(w, 'POST', `/v1/agents/${b}/stop`)).statusCode).toBe(200);
+    slow.open();
+    await pass;
+    expect(w.store.getAgent(a)?.state).toBe('RUNNING');
+    // Was: started by the pass after the owner's Stop.
+    expect(w.store.getAgent(b)?.state).toBe('STOPPED');
+    expect(w.store.agentHolds('download-stop')).toEqual([]);
+  });
+
+  it('HB-1479: a download cut off whose agent has a rebuild queued is left to the rebuild, and its timeline says so', async () => {
+    const w = await makeWorld();
+    closers.push(() => w.f.close());
+    const id = await seedRunningAgent(w);
+    w.store.setAgentState(id, 'STOPPED');
+    w.store.setAgentHold(id, 'download-stop', 'made-up-hold');
+    const asked: string[] = [];
+    const said: Array<Record<string, unknown>> = [];
+    await startCutOffDownloads({
+      store: w.store,
+      startStopped: async (agentId) => { asked.push(agentId); return { ok: true }; },
+      isInFlight: () => true,
+      logFor: () => (_event, detail) => { said.push(detail); },
+    });
+    expect(asked).toEqual([]);
+    expect(said).toEqual([{ started: false, rebuilding: true }]);
+    expect(eventLabel('export.cut_off', said[0]!)).toBe('a restart cut off its download, and no file was made: its rebuild starts it');
+    expect(w.store.agentHold(id, 'download-stop')).toBeUndefined();
+  });
+
+  it("HB-1480: an owner's Stop cut off in its docker stop, a budget's pause still open: the pause's end does not start it", async () => {
+    let w = await makeWorld();
+    closers.push(() => w.f.close());
+    const id = await seedRunningAgent(w);
+    // A budget's pause of a month that is over, still open: a rebuild had the agent up again.
+    w.store.addBudgetPause(id, '2026-01', id, '2026-01-20T00:00:00.000Z');
+    const stop = w.provider.stop.bind(w.provider);
+    const reached = gate();
+    // Its owner presses Stop. The container stops; the answer never comes back to this process.
+    w.provider.stop = async (ref) => { await stop(ref); reached.open(); await new Promise(() => {}); };
+    void send(w, 'POST', `/v1/agents/${id}/stop`).catch(() => undefined);
+    await reached.held;
+    w.provider.stop = stop;
+    w = await restartWorld({ ...w, f: { close: async () => undefined } as never });
+    closers.push(() => w.f.close());
+    clearBusy(id); // the first process's hold on it went with it
+    // What src/index.ts does first: the record judged by its container.
+    await reconcileAgents(w.store, w.providers, () => {});
+    expect(w.store.getAgent(id)?.state).toBe('STOPPED');
+    // A budget pass (one runs at once when a budget changes).
+    const pass = await send(w, 'PUT', `/v1/agents/${id}/budget`, { usd: null });
+    expect(pass.statusCode, pass.body).toBe(200);
+    for (let i = 0; i < 20; i++) await tick();
+    // Was: the stop read as the budget's, and the pause's end started it again.
+    expect(w.store.getAgent(id)?.state).toBe('STOPPED');
+    expect(w.store.listBudgetPauses({ open: true }).filter((p) => p.agentId === id)).toEqual([]);
+    expect(w.store.listEvents([id], 50).map((e) => e.event)).toEqual(expect.arrayContaining(['budget.pause_disowned', 'budget.pause_closed']));
+    expect(w.store.listEvents([id], 50).some((e) => e.event === 'budget.resumed')).toBe(false);
+  });
+
+  it("HB-1517: a drain of its machine cut off in its docker stop, a budget's pause still open: the pause's end does not start it", async () => {
+    let w = await makeWorld();
+    closers.push(() => w.f.close());
+    const id = await seedRunningAgent(w);
+    // A budget's pause of a month that is over, still open: a rebuild had the agent up again.
+    w.store.addBudgetPause(id, '2026-01', id, '2026-01-20T00:00:00.000Z');
+    const stop = w.provider.stop.bind(w.provider);
+    const reached = gate();
+    // The machine's owner drains it. The container stops; the answer never comes back to this process.
+    w.provider.stop = async (ref) => { await stop(ref); reached.open(); await new Promise(() => {}); };
+    void send(w, 'POST', '/v1/hosts/h1/drain').catch(() => undefined);
+    await reached.held;
+    w.provider.stop = stop;
+    w = await restartWorld({ ...w, f: { close: async () => undefined } as never });
+    closers.push(() => w.f.close());
+    clearBusy(id); // the first process's hold on it went with it
+    await reconcileAgents(w.store, w.providers, () => {});
+    expect(w.store.getAgent(id)?.state).toBe('STOPPED');
+    const pass = await send(w, 'PUT', `/v1/agents/${id}/budget`, { usd: null });
+    expect(pass.statusCode, pass.body).toBe(200);
+    for (let i = 0; i < 20; i++) await tick();
+    // Was: the drain's stop read as the budget's, and the pause's end started it again.
+    expect(w.store.getAgent(id)?.state).toBe('STOPPED');
+    expect(w.store.listBudgetPauses({ open: true }).filter((p) => p.agentId === id)).toEqual([]);
+    expect(w.store.listEvents([id], 50).map((e) => e.event)).toEqual(expect.arrayContaining(['budget.pause_disowned', 'budget.pause_closed']));
+    expect(w.store.listEvents([id], 50).some((e) => e.event === 'budget.resumed')).toBe(false);
+  });
+
+  it("HB-1252: an owner's Start then Stop while the boot's owed start is in its checks: the boot's start is not made, and says nothing", async () => {
+    let w = await makeWorld();
+    closers.push(() => w.f.close());
+    const id = await seedRunningAgent(w);
+    // An adopt finished, owing its start, in the last process's boot; the agent stopped.
+    const op = beginOperation(w.store, 'adopt-workspace', id, { from: '/made/up/workspace', wasRunning: true });
+    oweStart(w.store, op.id);
+    op.done('Adopted the workspace again.');
+    w.store.updateOperation(op.id, { params: { ...w.store.getOperation(op.id)!.params, startOwed: 'boot_an-earlier-one' } });
+    await w.provider.stop(w.store.getAgent(id)!.runtimeRef!);
+    w.store.setAgentState(id, 'STOPPED');
+    w = await restartWorld(w);
+    closers.push(() => w.f.close());
+    // The boot's start asks the machine whether a rebuild is needed first; that answer is slow (a slow runner).
+    const info = w.provider.info.bind(w.provider);
+    const asked = gate(), slow = gate();
+    let first = true;
+    w.provider.info = async (ref) => { if (first) { first = false; asked.open(); await slow.held; } return info(ref); };
+    const pass = w.routes!.resumeOperations();
+    await asked.held;
+    // Meanwhile its owner presses Start, then Stop.
+    const started = await send(w, 'POST', `/v1/agents/${id}/start`);
+    expect(started.statusCode, started.body).toBe(200);
+    expect(startOwedIn(w.store.getOperation(op.id)!)).toBeUndefined();
+    await settle(() => !isBusy(id));
+    expect((await send(w, 'POST', `/v1/agents/${id}/stop`)).statusCode).toBe(200);
+    slow.open();
+    await pass;
+    for (let i = 0; i < 20; i++) await tick();
+    // Was: the boot's start took the lock once they were done, and started what its owner had stopped.
+    expect(w.store.getAgent(id)?.state).toBe('STOPPED');
+    expect(w.store.listEvents([id], 50).some((e) => e.event === 'op.start_failed')).toBe(false);
+    expect(w.store.getOperation(op.id)!.outcome).toBe('Adopted the workspace again. Its owner has started it since.');
+  });
+
+  it("HB-1252: an owner's Start while the boot's owed start is in its checks: no stray failure on its timeline", async () => {
+    let w = await makeWorld();
+    closers.push(() => w.f.close());
+    const id = await seedRunningAgent(w);
+    const op = beginOperation(w.store, 'adopt-workspace', id, { from: '/made/up/workspace', wasRunning: true });
+    oweStart(w.store, op.id);
+    op.done('Adopted the workspace again.');
+    w.store.updateOperation(op.id, { params: { ...w.store.getOperation(op.id)!.params, startOwed: 'boot_an-earlier-one' } });
+    await w.provider.stop(w.store.getAgent(id)!.runtimeRef!);
+    w.store.setAgentState(id, 'STOPPED');
+    w = await restartWorld(w);
+    closers.push(() => w.f.close());
+    const info = w.provider.info.bind(w.provider);
+    const asked = gate(), slow = gate();
+    let first = true;
+    w.provider.info = async (ref) => { if (first) { first = false; asked.open(); await slow.held; } return info(ref); };
+    const pass = w.routes!.resumeOperations();
+    await asked.held;
+    expect((await send(w, 'POST', `/v1/agents/${id}/start`)).statusCode).toBe(200);
+    slow.open();
+    await pass;
+    for (let i = 0; i < 20; i++) await tick();
+    expect(w.store.getAgent(id)?.state).toBe('RUNNING');
+    // Was: "Cannot start while RUNNING", as a failed start, after its owner's own.
+    expect(w.store.listEvents([id], 50).filter((e) => e.event === 'op.start_failed')).toEqual([]);
+  });
+
+  it('HB-1445: a bulk switch with "recover after", cut off once its rebuild had made the new container: the boot finishes the rebuild, then the recovery runs, on the new source', async () => {
+    let w = await makeWorld();
+    closers.push(() => w.f.close());
+    w.store.insertAIProfile({ id: 'p2', ownerId: OWNER, name: 'Other key', vendor: 'anthropic', kind: 'api_key', model: DEFAULT, secretRef: 'ai/p2', createdAt: 'now' });
+    await w.secrets.put('ai/p2', 'made-up-key');
+    const id = await seedRunningAgent(w);
+    // Its rebuild had made the new container on the new source, and it was up, when the process ended.
+    w.store.setAgentAIProfile(id, 'p2');
+    w.store.setAgentState(id, 'REBUILDING');
+    recordApplied(w.store, id);
+    expect(w.store.getAgent(id)).toMatchObject({ aiProfileId: 'p2', appliedProfileId: 'p2' });
+    const op = beginOperation(w.store, 'rebuild', id, { checkpoint: false, was: {}, recoverOn: 'p2' });
+    w.store.updateOperation(op.id, { bootId: 'an-earlier-boot' });
+    w = await restartWorld(w);
+    closers.push(() => w.f.close());
+    w.provider.execResponses.set('sh', { code: 0, stderr: '', stdout: JSON.stringify({ conversations: 1, messages: 5 }) });
+    await w.routes!.resumeOperations();
+    expect(w.store.getOperation(op.id)).toMatchObject({ status: 'succeeded' });
+    const recovered = () => w.provider.execLog.find((c) => c[0] === 'sh' && String(c[1]).includes("MODE='recover'"));
+    await settle(() => recovered() !== undefined, 10_000);
+    // Was: the rebuild was finished, and the recovery its switch asked for never came.
+    expect(w.store.getAgent(id)).toMatchObject({ state: 'RUNNING', aiProfileId: 'p2', appliedProfileId: 'p2' });
+    expect(String(recovered()?.[1])).toContain("INCLUDE_LIVE='1'");
+  });
+
+  it('HB-1445: switched again since, or a rebuild that did not finish: no recovery', async () => {
+    let w = await makeWorld();
+    closers.push(() => w.f.close());
+    w.store.insertAIProfile({ id: 'p2', ownerId: OWNER, name: 'Other key', vendor: 'anthropic', kind: 'api_key', model: DEFAULT, secretRef: 'ai/p2', createdAt: 'now' });
+    await w.secrets.put('ai/p2', 'made-up-key');
+    // Switched back to p1 after its rebuild for p2 began.
+    const back = await seedRunningAgent(w);
+    w.store.setAgentState(back, 'REBUILDING');
+    const op = beginOperation(w.store, 'rebuild', back, { checkpoint: false, was: {}, recoverOn: 'p2' });
+    w.store.updateOperation(op.id, { bootId: 'an-earlier-boot' });
+    // Its container not up: the rebuild is not finished here.
+    const down = await seedRunningAgent(w, { id: 'a2', name: 'Garden', slug: 'garden', accountId: 'gardenbot' });
+    w.store.setAgentAIProfile(down, 'p2');
+    w.store.setAgentState(down, 'REBUILDING');
+    await w.provider.stop(w.store.getAgent(down)!.runtimeRef!);
+    const op2 = beginOperation(w.store, 'rebuild', down, { checkpoint: false, was: {}, recoverOn: 'p2' });
+    w.store.updateOperation(op2.id, { bootId: 'an-earlier-boot' });
+    w = await restartWorld(w);
+    closers.push(() => w.f.close());
+    w.provider.execResponses.set('sh', { code: 0, stderr: '', stdout: JSON.stringify({ conversations: 1, messages: 5 }) });
+    await w.routes!.resumeOperations();
+    for (let i = 0; i < 20; i++) await tick();
+    expect(w.store.getOperation(op.id)).toMatchObject({ status: 'succeeded' });
+    expect(w.provider.execLog.some((c) => c[0] === 'sh' && String(c[1]).includes("MODE='recover'"))).toBe(false);
+    // No recovery slot left held: one would keep it from sleeping for good (HB-0887).
+    const slept = await send(w, 'POST', `/v1/agents/${back}/hibernate`);
+    expect(slept.statusCode, slept.body).toBe(200);
   });
 
   it('HB-0832: a bulk switch with "recover after", cut off before its rebuild ran: the resumed rebuild is followed by the recovery, on the new source', async () => {
@@ -912,6 +1304,210 @@ describe('through the routes, as src/index.ts starts them', () => {
     expect(w.store.dataSourceRemovals(held)).toEqual([]);
   });
 
+  it("HB-1252 review: the boot's owed start done with its checks while its owner's Start is in its docker start: not made, and nothing said", async () => {
+    let w = await makeWorld();
+    closers.push(() => w.f.close());
+    const id = await seedRunningAgent(w);
+    const op = beginOperation(w.store, 'adopt-workspace', id, { from: '/made/up/workspace', wasRunning: true });
+    oweStart(w.store, op.id);
+    op.done('Adopted the workspace again.');
+    w.store.updateOperation(op.id, { params: { ...w.store.getOperation(op.id)!.params, startOwed: 'boot_an-earlier-one' } });
+    await w.provider.stop(w.store.getAgent(id)!.runtimeRef!);
+    w.store.setAgentState(id, 'STOPPED');
+    w = await restartWorld(w);
+    closers.push(() => w.f.close());
+    // The boot's start is in its checks (a slow machine) ...
+    const info = w.provider.info.bind(w.provider);
+    const asked = gate(), slow = gate();
+    let first = true;
+    w.provider.info = async (ref) => { if (first) { first = false; asked.open(); await slow.held; } return info(ref); };
+    const pass = w.routes!.resumeOperations();
+    await asked.held;
+    // ... and its owner presses Start, whose docker start takes a while.
+    const start = w.provider.start.bind(w.provider);
+    const inStart = gate(), letStart = gate();
+    w.provider.start = async (ref) => { inStart.open(); await letStart.held; return start(ref); };
+    const pressed = send(w, 'POST', `/v1/agents/${id}/start`);
+    await inStart.held;
+    // The boot's checks are done while the owner's Start holds the agent.
+    slow.open();
+    for (let i = 0; i < 20; i++) await tick();
+    letStart.open();
+    expect((await pressed).statusCode).toBe(200);
+    await pass;
+    for (let i = 0; i < 20; i++) await tick();
+    expect(w.store.getAgent(id)?.state).toBe('RUNNING');
+    // Was: "Another operation is already running on this agent." as a failed start, and an outcome saying it was not started.
+    expect(w.store.listEvents([id], 50).filter((e) => e.event === 'op.start_failed')).toEqual([]);
+    expect(w.store.getOperation(op.id)!.outcome).toBe('Adopted the workspace again. Its owner has started it since.');
+  });
+
+  it("HB-1252 review: the boot's owed start that begins while its owner's Start is in its docker start: not made, and nothing said", async () => {
+    let w = await makeWorld();
+    closers.push(() => w.f.close());
+    const id = await seedRunningAgent(w);
+    const op = beginOperation(w.store, 'adopt-workspace', id, { from: '/made/up/workspace', wasRunning: true });
+    oweStart(w.store, op.id);
+    op.done('Adopted the workspace again.');
+    w.store.updateOperation(op.id, { params: { ...w.store.getOperation(op.id)!.params, startOwed: 'boot_an-earlier-one' } });
+    await w.provider.stop(w.store.getAgent(id)!.runtimeRef!);
+    w.store.setAgentState(id, 'STOPPED');
+    w = await restartWorld(w);
+    closers.push(() => w.f.close());
+    // Its owner presses Start first, whose docker start takes a while ...
+    const start = w.provider.start.bind(w.provider);
+    const inStart = gate(), letStart = gate();
+    w.provider.start = async (ref) => { inStart.open(); await letStart.held; return start(ref); };
+    const pressed = send(w, 'POST', `/v1/agents/${id}/start`);
+    await inStart.held;
+    // ... and the boot's pass comes to the owed start while that Start holds the agent.
+    const pass = w.routes!.resumeOperations();
+    for (let i = 0; i < 20; i++) await tick();
+    letStart.open();
+    expect((await pressed).statusCode).toBe(200);
+    await pass;
+    for (let i = 0; i < 20; i++) await tick();
+    expect(w.store.getAgent(id)?.state).toBe('RUNNING');
+    // Was: refused at its first look ("Another operation is already running on this agent."), as a failed start, and an outcome saying it was not started.
+    expect(w.store.listEvents([id], 50).filter((e) => e.event === 'op.start_failed')).toEqual([]);
+    expect(w.store.getOperation(op.id)!.outcome).toBe('Adopted the workspace again. Its owner has started it since.');
+  });
+
+  it("HB-1252 review: the boot's owed start held off by the rebuild its owner's Start began: not made, and nothing said", async () => {
+    let w = await makeWorld();
+    closers.push(() => w.f.close());
+    const id = await seedRunningAgent(w);
+    const op = beginOperation(w.store, 'adopt-workspace', id, { from: '/made/up/workspace', wasRunning: true });
+    oweStart(w.store, op.id);
+    op.done('Adopted the workspace again.');
+    w.store.updateOperation(op.id, { params: { ...w.store.getOperation(op.id)!.params, startOwed: 'boot_an-earlier-one' } });
+    await w.provider.stop(w.store.getAgent(id)!.runtimeRef!);
+    w.store.setAgentState(id, 'STOPPED');
+    w = await restartWorld(w);
+    closers.push(() => w.f.close());
+    // The boot's start is in its checks (a slow machine) ...
+    const info = w.provider.info.bind(w.provider);
+    const asked = gate(), slow = gate();
+    let first = true;
+    w.provider.info = async (ref) => { if (first) { first = false; asked.open(); await slow.held; } return info(ref); };
+    const pass = w.routes!.resumeOperations();
+    await asked.held;
+    // ... a change is saved for its next start, and its owner presses Start: a
+    // rebuild, whose new container takes a while.
+    w.store.setRebuildOnStart(id, new Date().toISOString());
+    const provision = w.provider.provision.bind(w.provider);
+    const inRebuild = gate(), letRebuild = gate();
+    w.provider.provision = async (spec) => { inRebuild.open(); await letRebuild.held; return provision(spec); };
+    const pressed = await send(w, 'POST', `/v1/agents/${id}/start`);
+    expect(pressed.statusCode, pressed.body).toBe(202);
+    expect(startOwedIn(w.store.getOperation(op.id)!)).toBeUndefined();
+    await inRebuild.held;
+    expect(heldFor(id)).toBe('rebuild');
+    // The boot's checks are done while the rebuild holds the agent.
+    slow.open();
+    for (let i = 0; i < 20; i++) await tick();
+    letRebuild.open();
+    await pass;
+    await settle(() => !isBusy(id) && w.store.getAgent(id)?.state === 'RUNNING');
+    expect(w.store.getAgent(id)?.state).toBe('RUNNING');
+    // Was: "Another operation is already running on this agent." as a failed start (a rebuild's hold is not one that takes a start over).
+    expect(w.store.listEvents([id], 50).filter((e) => e.event === 'op.start_failed')).toEqual([]);
+    expect(w.store.getOperation(op.id)!.outcome).toBe('Adopted the workspace again. Its owner has started it since.');
+  });
+
+  it("HB-1252 review: the process stopping while the boot's owed start waits for its owner's Start: the wait ends, and the start is still owed, with nothing said", async () => {
+    let w = await makeWorld();
+    closers.push(() => w.f.close());
+    const id = await seedRunningAgent(w);
+    const op = beginOperation(w.store, 'adopt-workspace', id, { from: '/made/up/workspace', wasRunning: true });
+    oweStart(w.store, op.id);
+    op.done('Adopted the workspace again.');
+    w.store.updateOperation(op.id, { params: { ...w.store.getOperation(op.id)!.params, startOwed: 'boot_an-earlier-one' } });
+    await w.provider.stop(w.store.getAgent(id)!.runtimeRef!);
+    w.store.setAgentState(id, 'STOPPED');
+    w = await restartWorld(w);
+    closers.push(() => w.f.close());
+    const start = w.provider.start.bind(w.provider);
+    const inStart = gate(), letStart = gate();
+    w.provider.start = async (ref) => { inStart.open(); await letStart.held; return start(ref); };
+    const pressed = send(w, 'POST', `/v1/agents/${id}/start`);
+    await inStart.held;
+    const pass = w.routes!.resumeOperations();
+    await settle(() => busyWaiters(id) > 0);
+    expect(busyWaiters(id)).toBe(1);
+    // The process stops (its routes' stop) while the owed start waits for the owner's Start.
+    w.routes!.stop();
+    let over = false;
+    void pass.then(() => { over = true; });
+    await settle(() => over);
+    expect(over).toBe(true);
+    expect(busyWaiters(id)).toBe(0);
+    expect(startOwedIn(w.store.getOperation(op.id)!)).toBe('boot_an-earlier-one');
+    expect(w.store.listEvents([id], 50).filter((e) => e.event === 'op.start_failed')).toEqual([]);
+    letStart.open();
+    expect((await pressed).statusCode).toBe(200);
+  });
+
+  it('HB-1409: a template task the agent itself refused is not owed at every boot; one it never answered for still is', async () => {
+    let w = await makeWorld();
+    closers.push(() => w.f.close());
+    // Its answer was a refusal: it waits for its owner (Try again, or remove it), as a clash does.
+    const refused = await seedRunningAgent(w, { id: 'a1', name: 'Pantry', slug: 'pantry', accountId: 'pantrybot' });
+    w.store.setPendingSchedules(refused, [{ name: 'Weekly menu', message: 'Plan the menu.', cron: '0 9 * * 1', why: 'the agent refused it: Invalid cron expression' }]);
+    // The call never reached it (its container did not answer): still owed.
+    const unreached = await seedRunningAgent(w, { id: 'a2', name: 'Porch', slug: 'porch', accountId: 'porchbot' });
+    w.store.setPendingSchedules(unreached, [{ name: 'Morning brief', message: 'Post the brief.', everyMs: 3_600_000, why: 'the agent refused it: exec failed' }]);
+    // Its list of tasks could not be read: still owed.
+    const unread = await seedRunningAgent(w, { id: 'a3', name: 'Attic', slug: 'attic', accountId: 'atticbot' });
+    w.store.setPendingSchedules(unread, [{ name: 'Morning brief', message: 'Post the brief.', everyMs: 3_600_000, why: 'its list of tasks could not be read, so it was not added (it may be there already)' }]);
+    w = await restartWorld(w);
+    closers.push(() => w.f.close());
+    const execs: Array<{ ref: string; argv: string[] }> = [];
+    const exec = w.provider.exec.bind(w.provider);
+    w.provider.exec = async (ref, argv, opts) => { execs.push({ ref, argv }); return exec(ref, argv, opts); };
+    await w.routes!.resumeOperations();
+    const refOf = (id: string) => w.store.getAgent(id)!.runtimeRef!;
+    await settle(() => !w.store.getPendingSchedules(unreached).length && !w.store.getPendingSchedules(unread).length);
+    for (let i = 0; i < 20; i++) await tick();
+    expect(w.store.getPendingSchedules(unreached)).toEqual([]);
+    expect(w.store.getPendingSchedules(unread)).toEqual([]);
+    // Was: tried again at every boot, with what follows a start, though nothing had changed.
+    expect(execs.filter((x) => x.ref === refOf(refused) && x.argv[0] === 'cron')).toEqual([]);
+    expect(w.store.getPendingSchedules(refused)).toHaveLength(1);
+    // Its owner's Try again still tries it.
+    const retried = await send(w, 'POST', `/v1/agents/${refused}/crons/waiting`);
+    expect(retried.statusCode, retried.body).toBe(200);
+    expect(w.store.getPendingSchedules(refused)).toEqual([]);
+  });
+
+  it('HB-1409 review: a task whose add timed out or never reached the agent is recorded as not answered, and still owed at the boot', async () => {
+    const w = await makeWorld();
+    closers.push(() => w.f.close());
+    const id = await seedRunningAgent(w);
+    const exec = w.provider.exec.bind(w.provider);
+    // The docker exec of each add times out, as LocalDockerProvider answers after its 60 s; then the machine does not answer.
+    const answers = [
+      { code: 1, stdout: '', stderr: 'docker exec timed out', timedOut: true },
+      { code: 1, stdout: '', stderr: 'the runner did not answer', unreachable: true },
+      { code: 1, stdout: '', stderr: 'Invalid cron expression' },
+    ];
+    for (const answer of answers) {
+      w.store.setPendingSchedules(id, [{ name: 'Weekly menu', message: 'Plan the menu.', cron: '0 9 * * 1' }]);
+      w.provider.exec = async (ref, argv, opts) => (argv[0] === 'cron' && argv[1] === 'add' ? answer : exec(ref, argv, opts));
+      expect((await send(w, 'POST', `/v1/agents/${id}/crons/waiting`)).statusCode).toBe(200);
+      const [why] = w.store.getPendingSchedules(id).map((t) => t.why);
+      // Was: "the agent refused it: docker exec timed out", which the boot then left for the owner as a refusal.
+      if (answer.timedOut || answer.unreachable) {
+        expect(why).toBe('the agent refused it: exec failed');
+        expect(waitsForItsOwner(why)).toBe(false);
+      } else {
+        expect(why).toBe('the agent refused it: Invalid cron expression');
+        expect(waitsForItsOwner(why)).toBe(true);
+      }
+    }
+    w.provider.exec = exec;
+  });
+
   it('HB-0834 review: six agents busy at the boot hold up no other agent\'s template tasks: each waits for its own in the background', async () => {
     let w = await makeWorld();
     closers.push(() => w.f.close());
@@ -926,7 +1522,7 @@ describe('through the routes, as src/index.ts starts them', () => {
     // The first six the boot takes are held by something else (a backup each).
     const order = w.store.listAllActiveAgents().map((a) => a.id).filter((id) => ids.includes(id));
     const busyOnes = order.slice(0, 6), last = order[6]!;
-    for (const id of busyOnes) { markBusy(id); busyIds.push(id); }
+    for (const id of busyOnes) markBusy(id);
     const resumed = w.routes!.resumeOperations();
     try {
       await settle(() => w.store.getPendingSchedules(last).length === 0);
@@ -975,7 +1571,6 @@ describe('through the routes, as src/index.ts starts them', () => {
     w = await restartWorld(w);
     closers.push(() => w.f.close());
     markBusy(id);
-    busyIds.push(id);
     const resumed = w.routes!.resumeOperations();
     await settle(() => busyWaiters(id) > 0);
     const adds = () => w.provider.execLog.filter((c) => c[0] === 'cron' && c[1] === 'add').length;
@@ -1072,7 +1667,6 @@ describe('through the routes, as src/index.ts starts them', () => {
     w.provider.execShell = async (ref, script, opts) => { if (SYNC_READ.test(script)) synced.push(ref); return shell(ref, script, opts); };
     // Something else holds it the while (a backup, say). Its memory budget's turn waits for it (memoryLimits.ts).
     markBusy(id);
-    busyIds.push(id);
     const resumed = w.routes!.resumeOperations();
     try {
       await settle(() => w.store.agentHold(id, 'docs-sync') !== 'made-up-ask');
@@ -1446,6 +2040,96 @@ describe("a budget's pause cut off between the agent's stop and the pause's reco
     expect(started).toEqual([]);
     expect(store.getAgent('a1')!.state).toBe('STOPPED');
   });
+
+  it("HB-1416: its machine does not answer after the restart and the budget is still over: the pass's own stop keeps the earlier hold, so the stop found later is the budget's", async () => {
+    const db = new Database(':memory:');
+    let store = new Store(db);
+    store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
+    store.insertAIProfile({ id: 'key', ownerId: OWNER, name: 'API key', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/key', createdAt: 'now' });
+    store.insertAgent({ id: 'a1', ownerId: OWNER, name: 'Trip Planner', slug: 'trip', state: 'RUNNING', aiProfileId: 'key', hostId: 'h1', runtimeRef: 'mock://trip', persona: '', sharedMemory: true, webOnly: true, createdAt: 'now', updatedAt: 'now' });
+    store.setBudget('a1', OWNER, 20, 'pause', iso(NOW));
+    store.setModelProfile('a1', { since: NOW - 30 * 86_400_000, models: { 'claude-opus-4-8': spentOver() }, promptErrors: 0, crons: 0, firstCall: NOW - 60 * 86_400_000, hourly: true } as never, iso(NOW));
+    // The budget's stop: Docker stopped the container, and the process ends
+    // before the pause's STOPPED write, so the record still says RUNNING.
+    const cutOff = gate();
+    void runBudgets(budgetDeps(store, async () => { cutOff.open(); await new Promise(() => {}); return true; }, []), NOW).catch(() => undefined);
+    await cutOff.held;
+    const kept = store.agentHold('a1', 'budget-pause');
+    expect(kept).toBeDefined();
+
+    // The restart. Its machine does not answer: neither the pass's look at its
+    // runtime nor the stop the pass tries itself, its budget still over.
+    store = new Store(db);
+    const asleep = async (): Promise<never> => { throw new Error('the machine did not answer'); };
+    await runBudgets({ ...budgetDeps(store, asleep, []), runtimeUp: asleep }, NOW + 90_000);
+    // Was: replaced by the pass's own hold, and let go when that stop failed.
+    expect(store.agentHold('a1', 'budget-pause')).toBe(kept);
+    expect(store.getBudgetPause('a1', '2026-10')).toBeUndefined();
+    // Its machine answers again, and reconcile finds the container stopped.
+    store.setAgentState('a1', 'STOPPED');
+    const started: string[] = [];
+    const deps = budgetDeps(store, async () => true, started);
+    await runBudgets(deps, NOW + 10 * 60_000);
+    // The budget's pause, not a stop by hand (was: alreadyStopped, which starts nothing).
+    expect(store.getBudgetPause('a1', '2026-10')).toMatchObject({ kind: 'pause' });
+    expect(store.getBudgetPause('a1', '2026-10')!.alreadyStopped).toBeUndefined();
+    expect(store.agentHold('a1', 'budget-pause')).toBeUndefined();
+    // November 1st: the budget's pause ends, and the agent is started again.
+    await runBudgets(deps, Date.parse('2026-11-01T00:10:00Z'));
+    expect(started).toEqual(['a1']);
+  });
+
+  it("HB-1406: its owner's Start over a budget stop a restart cut off before the pause's record: the next pass leaves it running until the 1st", async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(NOW);
+    try {
+      let w = await makeWorld();
+      closers.push(() => w.f.close());
+      const id = await seedRunningAgent(w);
+      w.store.setBudget(id, OWNER, 20, 'pause', iso(NOW));
+      w.store.setModelProfile(id, { since: NOW - 30 * 86_400_000, models: { 'claude-opus-4-8': spentOver() }, promptErrors: 0, crons: 0, firstCall: NOW - 60 * 86_400_000, hourly: true } as never, iso(NOW));
+      // The budget's stop: its hold, then Docker stopped the container; the
+      // process ends before the record says STOPPED or the pause is recorded.
+      w.store.setAgentHold(id, 'budget-pause', JSON.stringify({ month: '2026-10', scope: id, at: iso(NOW) }));
+      await w.provider.stop(w.store.getAgent(id)!.runtimeRef!);
+      w = await restartWorld(w);
+      closers.push(() => w.f.close());
+      await w.routes!.resumeOperations();
+      // The boot leaves the hold of a record that says RUNNING for a pass (HB-0835 review).
+      expect(w.store.agentHold(id, 'budget-pause')).toBeDefined();
+      // Reconcile finds the container stopped, and its owner presses Start before the first budget pass.
+      w.store.setAgentState(id, 'STOPPED');
+      const res = await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/start`, headers: as() });
+      expect(res.statusCode, res.body).toBe(200);
+      expect(w.store.getAgent(id)?.state).toBe('RUNNING');
+      const stops: string[] = [];
+      await runBudgets(budgetDeps(w.store, async (a) => { stops.push(a.id); return true; }, []), NOW + 90_000);
+      // Was: no pause was recorded, so nothing marked the Start, and this pass stopped it again.
+      expect(stops).toEqual([]);
+      expect(w.store.getBudgetPause(id, '2026-10')).toMatchObject({ kind: 'pause', resumedBy: 'owner' });
+      expect(w.store.agentHold(id, 'budget-pause')).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('HB-1416: a stop the pass makes over an earlier hold that takes is recorded, and the hold goes with it', async () => {
+    const db = new Database(':memory:');
+    const store = new Store(db);
+    store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
+    store.insertAIProfile({ id: 'key', ownerId: OWNER, name: 'API key', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/key', createdAt: 'now' });
+    store.insertAgent({ id: 'a1', ownerId: OWNER, name: 'Trip Planner', slug: 'trip', state: 'RUNNING', aiProfileId: 'key', hostId: 'h1', runtimeRef: 'mock://trip', persona: '', sharedMemory: true, webOnly: true, createdAt: 'now', updatedAt: 'now' });
+    store.setBudget('a1', OWNER, 20, 'pause', iso(NOW));
+    store.setModelProfile('a1', { since: NOW - 30 * 86_400_000, models: { 'claude-opus-4-8': spentOver() }, promptErrors: 0, crons: 0, firstCall: NOW - 60 * 86_400_000, hourly: true } as never, iso(NOW));
+    store.setAgentHold('a1', 'budget-pause', JSON.stringify({ month: '2026-10', scope: 'a1', at: iso(NOW - 60_000) }));
+    const stops: string[] = [];
+    // Its runtime not seen (the look failed), and the stop takes.
+    await runBudgets({ ...budgetDeps(store, async (a) => { stops.push(a.id); store.setAgentState(a.id, 'STOPPED'); return true; }, []), runtimeUp: async () => false }, NOW + 90_000);
+    expect(stops).toEqual(['a1']);
+    expect(store.getBudgetPause('a1', '2026-10')).toMatchObject({ kind: 'pause' });
+    expect(store.getBudgetPause('a1', '2026-10')!.alreadyStopped).toBeUndefined();
+    expect(store.agentHold('a1', 'budget-pause')).toBeUndefined();
+  });
 });
 
 describe("a budget's switch to a cheaper model cut off before its runtime answered (HB-1404)", () => {
@@ -1494,7 +2178,7 @@ describe("a budget's switch to a cheaper model cut off before its runtime answer
     h.provider.execResponses.set('models set', { code: 1, stdout: '', stderr: 'no such model' });
     const next = h.restart();
     const budgets = budgetsOf(h, next);
-    h.owedRefused = (id, ask) => budgets.cheaperRefused(id, ask);
+    h.owedRefused = (id, ask, how) => budgets.cheaperRefused(id, ask, how);
     await next.settings.resume();
     // Was: the cheaper model and the open switch stayed, the agent on its dearer model, and no pass tried again.
     expect(next.store.getAgent(a.id)?.model ?? null).toBeNull(); // its own: its source's default
@@ -1519,7 +2203,7 @@ describe("a budget's switch to a cheaper model cut off before its runtime answer
     const { h, a } = await cutOffSwitch();
     const next = h.restart();
     const budgets = budgetsOf(h, next);
-    h.owedRefused = (id, ask) => budgets.cheaperRefused(id, ask);
+    h.owedRefused = (id, ask, how) => budgets.cheaperRefused(id, ask, how);
     await next.settings.resume();
     expect(next.store.getAgent(a.id)).toMatchObject({ model: OTHER, appliedModel: OTHER });
     expect(next.store.openCheaperPause(a.id)).toMatchObject({ toModel: OTHER });
@@ -1535,7 +2219,7 @@ describe("a budget's switch to a cheaper model cut off before its runtime answer
     h.provider.execResponses.set('models set', { code: 1, stdout: '', stderr: 'no such model' });
     const next = h.restart();
     const budgets = budgetsOf(h, next);
-    h.owedRefused = (id, ask) => budgets.cheaperRefused(id, ask);
+    h.owedRefused = (id, ask, how) => budgets.cheaperRefused(id, ask, how);
     await next.settings.resume();
     expect(next.store.getAgent(a.id)?.model).toBe(OTHER);
     expect(next.store.openCheaperPause(a.id)).toMatchObject({ toModel: OTHER });
@@ -1547,7 +2231,7 @@ describe("a budget's switch to a cheaper model cut off before its runtime answer
   const nextProcess = (h: House) => {
     const next = h.restart();
     const budgets = budgetsOf(h, next);
-    h.owedRefused = (id, ask) => budgets.cheaperRefused(id, ask);
+    h.owedRefused = (id, ask, how) => budgets.cheaperRefused(id, ask, how);
     return { next, budgets };
   };
   const failed = (h: House, id: string) => h.events.filter((e) => e.event === 'budget.downgrade_failed' && e.agentId === id);
@@ -1647,6 +2331,138 @@ describe("a budget's switch to a cheaper model cut off before its runtime answer
     expect(failed(h, a.id)).toEqual([]);
     budgets.stop();
   });
+
+  // What HB-1404 left (HB-1444).
+  it("HB-1444 (1): the cheaper model put back for a pause that did not take, cut off and then refused at the next start: its own model comes back and the switch closes, as in the pass", async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(NOW);
+    const h = house(), a = await h.agent('a1');
+    const { store } = h.now;
+    // On the cheaper model its own budget chose, and the machine's budget, set to pause, reached too.
+    store.setBudget(a.id, OWNER, 20, 'cheaper', new Date(NOW).toISOString());
+    store.setBudget(MACHINE, OWNER, 20, 'pause', new Date(NOW).toISOString());
+    store.setModelProfile(a.id, { since: NOW - 30 * 86_400_000, models: { [DEFAULT]: spentOver() }, promptErrors: 0, crons: 0, firstCall: NOW - 60 * 86_400_000, hourly: true } as never, new Date(NOW).toISOString());
+    store.setAgentModel(a.id, OTHER, { hatchabot: true });
+    store.setAgentApplied(a.id, 'p1', OTHER);
+    store.addBudgetPause(a.id, '2026-10', a.id, new Date(NOW - 3_600_000).toISOString(), { fromModel: null, toModel: OTHER });
+    // The machine's pause: its own model goes back first, then its stop fails, so the cheaper model goes back
+    // on (reapplyCheaper); the process ends while its runtime is told.
+    const stop = h.provider.stop.bind(h.provider);
+    h.provider.stop = async () => { throw new Error('docker said no'); };
+    const exec = h.provider.exec.bind(h.provider);
+    const asked = gate();
+    h.provider.exec = async (ref, argv, opts) => {
+      if (argv[0] === 'models' && argv[1] === 'set' && String(argv[2]).endsWith(OTHER)) { asked.open(); await new Promise(() => {}); }
+      return exec(ref, argv, opts);
+    };
+    const first = budgetsOf(h, h.now);
+    void first.runPass();
+    await asked.held;
+    first.stop();
+    h.provider.stop = stop;
+    h.provider.exec = exec;
+    expect(store.getAgent(a.id)).toMatchObject({ model: OTHER, appliedModel: DEFAULT });
+    expect(store.agentHold(a.id, 'model-apply')).toBeTruthy();
+    expect(store.openCheaperPause(a.id)).toMatchObject({ toModel: OTHER });
+    // Hatchabot restarts, and the runtime refuses the cheaper model now.
+    h.provider.execResponses.set('models set', { code: 1, stdout: '', stderr: 'no such model' });
+    const { next, budgets } = nextProcess(h);
+    await next.settings.resume();
+    // Was: the cheaper model stayed on the record and its switch open, the agent on its own, dearer model.
+    expect(next.store.getAgent(a.id)?.model ?? null).toBeNull();
+    expect(next.store.openCheaperPause(a.id)).toBeUndefined();
+    expect(next.store.getBudgetPause(a.id, '2026-10')).toMatchObject({ resumedBy: 'budget-changed' });
+    expect(h.events.filter((e) => e.event === 'budget.model_restored' && e.agentId === a.id).map((e) => e.detail.why)).toEqual(['budget-changed']);
+    budgets.stop();
+  });
+
+  it("HB-1444 (2): answered 'rebuild' at the next start (a source switch waits for its rebuild): taken as refused, its own model back", async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(NOW);
+    const { h, a } = await cutOffSwitch();
+    // Its container still runs another source's setup, which a rebuild is owed to replace.
+    h.now.store.insertAIProfile({ id: 'p2', ownerId: OWNER, name: 'Claude 2', vendor: 'anthropic', kind: 'api_key', model: DEFAULT, secretRef: 'ai/p2', createdAt: 'now' });
+    h.now.store.setAgentApplied(a.id, 'p2', DEFAULT);
+    const { next, budgets } = nextProcess(h);
+    await next.settings.resume();
+    expect(h.events.some((e) => e.event === 'model.after_restart' && e.detail.how === 'rebuild')).toBe(true);
+    // Was: the cheaper model and its switch stood, the budget counting it as made while the agent ran its dearer one.
+    expect(next.store.getAgent(a.id)?.model ?? null).toBeNull();
+    expect(next.store.openCheaperPause(a.id)).toBeUndefined();
+    expect(failed(h, a.id)).toHaveLength(1);
+    budgets.stop();
+  });
+
+  it("HB-1444 review: answered 'rebuild' because its owner switched it since to a source that offers the cheaper model: the model and the budget's switch stand", async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(NOW);
+    const { h, a } = await cutOffSwitch();
+    // Switched to another source that offers the same model, before the restart; its rebuild has not run.
+    h.now.store.insertAIProfile({ id: 'p2', ownerId: OWNER, name: 'Claude 2', vendor: 'anthropic', kind: 'api_key', model: SONNET, models: [OTHER], secretRef: 'ai/p2', createdAt: 'now' });
+    expect(h.now.store.setAgentAIProfile(a.id, 'p2')).toBe('ok');
+    const { next, budgets } = nextProcess(h);
+    await next.settings.resume();
+    expect(h.events.some((e) => e.event === 'model.after_restart' && e.detail.how === 'rebuild')).toBe(true);
+    // That switch is what waits: its rebuild puts the model on. The budget's row stays, so the 1st puts its own model back.
+    expect(next.store.getAgent(a.id)).toMatchObject({ aiProfileId: 'p2', model: OTHER });
+    expect(next.store.openCheaperPause(a.id)).toMatchObject({ toModel: OTHER });
+    expect(failed(h, a.id)).toEqual([]);
+    budgets.stop();
+  });
+
+  it("HB-1444 (3): an owner's choice of the same model, without an apply, made while a seventh agent waits for its turn: not undone by the refusal", async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(NOW);
+    const h = house();
+    const ids: string[] = [];
+    for (const [i, name] of ['Kitchen', 'Garden', 'Laundry', 'Pantry', 'Porch', 'Attic', 'Cellar'].entries()) {
+      const { id } = await h.agent(`a${i + 1}`, name);
+      // Each on the cheaper model a budget chose, its ask cut off before the runtime answered.
+      h.now.store.setAgentModel(id, OTHER, { hatchabot: true, apply: `budget-cheaper:${JSON.stringify({ source: 'p1', defaultThen: DEFAULT, n: `made-up-${i}` })}` });
+      h.now.store.addBudgetPause(id, '2026-10', id, new Date(NOW).toISOString(), { fromModel: null, toModel: OTHER });
+      ids.push(id);
+    }
+    const { next, budgets } = nextProcess(h);
+    // Each write of the six that go first is slow, then refused.
+    const exec = h.provider.exec.bind(h.provider);
+    const g = gate();
+    const writing = new Set<string>();
+    h.provider.exec = async (ref, argv, opts) => {
+      if (argv[0] === 'models' && argv[1] === 'set') { writing.add(ref); await g.held; return { code: 1, stdout: '', stderr: 'no such model' }; }
+      return exec(ref, argv, opts);
+    };
+    const resumed = next.settings.resume();
+    try {
+      for (let i = 0; i < 200 && writing.size < 6; i++) await tick();
+      expect(writing.size).toBe(6);
+      for (let i = 0; i < 20; i++) await tick();
+      expect(writing.size).toBe(6);
+      // The seventh, waiting for a slot: its owner chooses the same model on its page, without an apply.
+      const seventh = ids.find((id) => !writing.has(next.store.getAgent(id)!.runtimeRef!))!;
+      next.store.setAgentModel(seventh, OTHER);
+      g.open();
+      await resumed;
+      // Was: its generation read only in its slot, after their write: the refusal put back null over their choice.
+      expect(next.store.getAgent(seventh)?.model).toBe(OTHER);
+      expect(next.store.openCheaperPause(seventh)).toMatchObject({ toModel: OTHER });
+      // The six refused are undone, as before.
+      for (const id of ids.filter((x) => x !== seventh)) expect(next.store.getAgent(id)?.model ?? null).toBeNull();
+    } finally { g.open(); h.provider.exec = exec; }
+    budgets.stop();
+  });
+
+  it('HB-1444 (4): an open switch to a cheaper model is dropped only by the budget that made it', () => {
+    const h = house();
+    const { store } = h.now;
+    store.insertAgent({ id: 'a1', ownerId: OWNER, name: 'Kitchen', slug: 'kitchen', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' });
+    // The machine's budget made it.
+    store.addBudgetPause('a1', '2026-10', MACHINE, new Date(NOW).toISOString(), { fromModel: null, toModel: OTHER });
+    // Was: the agent's own budget's undoing dropped it all the same.
+    store.dropCheaperPause('a1', '2026-10', 'a1');
+    expect(store.openCheaperPause('a1')).toMatchObject({ scope: MACHINE, toModel: OTHER });
+    store.dropCheaperPause('a1', '2026-10', MACHINE);
+    expect(store.openCheaperPause('a1')).toBeUndefined();
+  });
 });
 
 // Last in the file: these load provision.ts afresh (vi.resetModules), as a new process does.
@@ -1739,5 +2555,26 @@ describe('the memory index to rebuild after a build that changed its engine', ()
     await (await nextProcess()).reindexMemoryIfSwitched(w.depsOver(next), 'todo', runtimeRef, () => {});
     expect(w.calls.map((c) => c.slice(0, 2).join(' '))).toEqual(['memory index', 'memory status']);
     expect(next.agentHold('todo', 'embed-reindex')).toBeUndefined();
+  });
+});
+
+describe('the shutdown, as src/index.ts runs it (HB-1171 review)', () => {
+  it("a service whose stop throws keeps none after it from stopping, and a merge the shutdown cuts off is waiting again", async () => {
+    const w = await makeWorld();
+    closers.push(() => w.f.close());
+    const id = await seedRunningAgent(w);
+    w.store.insertProposal({ id: 'p1', masterAgentId: id, childAgentId: 'c1', childName: 'Homework Helper', text: 'a lesson' });
+    expect(w.store.resolveProposal(id, 'p1', 'merging')).toBe(true);
+    expect(w.store.listProposals(id)).toEqual([]);
+    // One stop throws: the routes' own, which every request in flight hears.
+    const errors = vi.spyOn(w.f.log, 'error');
+    const abort = vi.spyOn(AbortController.prototype, 'abort').mockImplementation(() => { throw new Error('made-up stop failure'); });
+    try { expect(() => w.routes!.stop()).not.toThrow(); } finally { abort.mockRestore(); }
+    expect(errors).toHaveBeenCalledWith(expect.objectContaining({ service: 'routes', err: 'made-up stop failure' }), 'shutdown: a service did not stop');
+    // The stops after it were still run: those that end an abort of their own say so too.
+    const failed = errors.mock.calls.map((c) => (c[0] as { service?: string }).service);
+    expect(failed[0]).toBe('routes');
+    expect(failed.length).toBeGreaterThan(1);
+    expect(w.store.listProposals(id).map((p) => p.id)).toEqual(['p1']);
   });
 });

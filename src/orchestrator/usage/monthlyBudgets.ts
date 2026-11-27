@@ -8,7 +8,7 @@ import {
 } from './budgets.js';
 import { AgentBusyError, isBusy, whileBusy } from '../lifecycle/busy.js';
 import { settleStartsOwedOn } from '../lifecycle/operations.js';
-import type { ModelApplied } from '../lifecycle/modelRuntime.js';
+import type { ModelApplied, OwedRefusal } from '../lifecycle/modelRuntime.js';
 import { modelOverrideProblem } from '../lifecycle/modelRuntime.js';
 import { recordChanges, snapshotModels, type ChangeMeta } from './modelLedger.js';
 import { LOCAL_MODEL, modelOption } from '../sources/modelOptions.js';
@@ -21,17 +21,27 @@ export const NO_CHAT_NOTE = 'No chat app can reach you for this, so no message w
 /** The start of the model ask a budget's switch to a cheaper model makes (Store.setAgentModel's `apply`, HB-1404). */
 const CHEAPER_ASK = 'budget-cheaper:';
 /**
- * The switch's ask: unique, and carrying what the pass's own undoing judges
- * by (the source it was made on, the default a follower followed), so the
- * next process, told it was refused (cheaperRefused), undoes it the same way.
+ * What a switch's ask carries: what the pass's own undoing judges by (the
+ * source it was made on, the default a follower followed), the switch's row
+ * (its budget, month and cheaper model), and for the cheaper model put back
+ * for a pause that did not take (reapplyCheaper), the model it replaced.
+ * An ask made before 2.193.0 names only the source and the default.
  */
-const cheaperAsk = (source: string, defaultThen: string | undefined): string =>
-  `${CHEAPER_ASK}${JSON.stringify({ source, defaultThen: defaultThen ?? null, n: randomUUID() })}`;
-const readCheaperAsk = (ask: string): { source: string; defaultThen: string | null } | undefined => {
+interface CheaperAsk { source: string; defaultThen: string | null; scope?: string; month?: string; to?: string; reapply?: { own: string | null } }
+/** The switch's ask: unique, so the next process, told it was refused (cheaperRefused), undoes it the same way. */
+const cheaperAsk = (made: CheaperAsk): string => `${CHEAPER_ASK}${JSON.stringify({ ...made, n: randomUUID() })}`;
+const readCheaperAsk = (ask: string): CheaperAsk | undefined => {
   if (!ask.startsWith(CHEAPER_ASK)) return undefined;
   try {
-    const v = JSON.parse(ask.slice(CHEAPER_ASK.length)) as { source?: unknown; defaultThen?: unknown };
-    return typeof v?.source === 'string' ? { source: v.source, defaultThen: typeof v.defaultThen === 'string' ? v.defaultThen : null } : undefined;
+    const v = JSON.parse(ask.slice(CHEAPER_ASK.length)) as Record<string, unknown> | null;
+    if (typeof v?.source !== 'string') return undefined;
+    const text = (k: string): string | undefined => (typeof v[k] === 'string' ? v[k] as string : undefined);
+    const own = (v.reapply as { own?: unknown } | undefined)?.own;
+    return {
+      source: v.source, defaultThen: text('defaultThen') ?? null,
+      ...(text('scope') ? { scope: text('scope') } : {}), ...(text('month') ? { month: text('month') } : {}), ...(text('to') ? { to: text('to') } : {}),
+      ...(typeof own === 'string' || own === null ? { reapply: { own } } : {}),
+    };
   } catch { return undefined; }
 };
 
@@ -84,7 +94,7 @@ export interface MonthlyBudgets {
    * record and its switch is dropped, so the next pass tries again and its
    * 100% message waits for it (HB-1404). Any other ask is left. Never throws.
    */
-  cheaperRefused(agentId: string, ask: string): void;
+  cheaperRefused(agentId: string, ask: string, how?: OwedRefusal): void;
   /** How an agent's AI is paid for: a plan, an API key, or a local model. */
   billingOf(a: Agent): 'plan' | 'api' | 'local';
   /** The model an agent runs on now, when it has no known price (a local one needs none). */
@@ -205,7 +215,7 @@ export function createMonthlyBudgets(deps: MonthlyBudgetsDeps): MonthlyBudgets {
         // "Switch to a cheaper model" at the limit: the cheapest model its source
         // offers, live, in the ledger as the budget's (the quality guard and the
         // Right-size savings leave such changes out); its own pin comes back after.
-        downgrade: async (a, hold) => {
+        downgrade: async (a, hold, made) => {
           const profile = store.getAIProfile(a.aiProfileId);
           if (!profile || profile.vendor === 'local') return undefined;
           const price = (m: string) => { const o = modelOption(m); return o ? o.input + o.output / 5 : undefined; };
@@ -229,7 +239,7 @@ export function createMonthlyBudgets(deps: MonthlyBudgetsDeps): MonthlyBudgets {
           // `apply`: asked for with the write, so a restart before the
           // runtime is told leaves it to the next start (HB-0809).
           // The ask is the switch's own (CHEAPER_ASK), so a refusal at the next start is known as its (cheaperRefused).
-          store.transact(() => { store.setAgentModel(a.id, cheapest, { hatchabot: true, apply: cheaperAsk(a.aiProfileId, defaultThen) }); hold(from, cheapest); });
+          store.transact(() => { store.setAgentModel(a.id, cheapest, { hatchabot: true, apply: cheaperAsk({ source: a.aiProfileId, defaultThen: defaultThen ?? null, scope: made.scope, month: made.month, to: cheapest }) }); hold(from, cheapest); });
           const ours = store.modelGeneration(a.id), source = store.getAgent(a.id)?.aiProfileId;
           // A switch the runtime refused is not a switch: the record goes back and
           // the budget tries again next pass, its 100% message waiting (budgets.ts).
@@ -282,13 +292,17 @@ export function createMonthlyBudgets(deps: MonthlyBudgetsDeps): MonthlyBudgets {
         // The cheaper model a budget chose, back for a pause that did not take
         // (budgets.ts putCheaperBackOrClose): the budget's switch, kept only if
         // the runtime took it, as with the switch down.
-        reapplyCheaper: async (a, model) => {
+        reapplyCheaper: async (a, model, made) => {
           const current = store.getAgent(a.id);
           const was = restored.get(a.id);
           if (!current || !was || current.aiProfileId !== was.source || store.modelGeneration(a.id) !== was.generation) return false;
           const own = current.model ?? null, source = current.aiProfileId;
           const before = snapshotModels(store, [a.id]);
-          store.setAgentModel(a.id, model, { hatchabot: true, apply: true });
+          // Its ask says it is this, and what it replaced: refused at the next
+          // start, it is undone as here (cheaperRefused). A plain ask was not,
+          // and the cheaper model stayed on the record over its own (HB-1444).
+          const ask = model ? cheaperAsk({ source, defaultThen: null, scope: made.scope, month: made.month, to: model, reapply: { own } }) : true;
+          store.setAgentModel(a.id, model, { hatchabot: true, apply: ask });
           const ours = store.modelGeneration(a.id);
           const applied = await applyModelToRuntime(a.id).catch(() => 'failed' as const);
           if (applied !== 'live' && applied !== 'staged') {
@@ -406,16 +420,35 @@ export function createMonthlyBudgets(deps: MonthlyBudgetsDeps): MonthlyBudgets {
   // The switch's own ask, refused at the next start (modelRuntime.ts serveOwed,
   // which tells only of one nothing was asked or written over since): undone
   // as the pass undoes a switch its runtime refused (downgrade, above).
-  const cheaperRefused = (agentId: string, ask: string): void => {
+  const cheaperRefused = (agentId: string, ask: string, how?: OwedRefusal): void => {
     try {
       const made = readCheaperAsk(ask);
       if (!made) return;
-      const open = store.openCheaperPause(agentId);
+      // The switch's own row, by the budget and month its ask names: another
+      // budget's open switch was undone as this one's (HB-1444). An ask made
+      // before 2.193.0 names neither: the agent's open switch, as before.
+      const row = made.month ? store.getBudgetPause(agentId, made.month) : store.openCheaperPause(agentId);
+      const open = row && row.kind === 'cheaper' && !row.resumedAt && (!made.scope || row.scope === made.scope) && (!made.to || row.toModel === made.to) ? row : undefined;
       const a = store.getAgent(agentId);
       // Still on the model the switch chose: nobody has chosen another since (that ask would be theirs, not this one).
       if (!open?.toModel || !a || (a.model ?? null) !== open.toModel) return;
+      // Waiting for a rebuild because of a source switch made since the ask
+      // (the owner's, onto a source that offers this model): that switch is
+      // what waits, and its rebuild puts the model on. The model and the
+      // budget's switch stand, and the 1st puts its own model back (HB-1444 review).
+      if (how === 'rebuild' && a.aiProfileId !== made.source) return;
       const p = store.getAIProfile(a.aiProfileId);
       if (!p) return;
+      if (made.reapply) {
+        // The cheaper model put back for a pause that did not take: undone as
+        // the pass undoes it (reapplyCheaper, putCheaperBackOrClose), the model
+        // it replaced back (on the same source) and the switch closed as the
+        // budget's doing, so the next pass judges it afresh (HB-1444).
+        const back = a.aiProfileId === made.source ? made.reapply.own : undefined;
+        store.transact(() => { if (back !== undefined) store.setAgentModel(agentId, back, { hatchabot: true }); store.resumeBudgetPause(agentId, open.month, new Date().toISOString(), 'budget-changed'); });
+        trace(agentId)('budget.model_restored', { agentId, why: 'budget-changed', model: open.fromModel ?? null });
+        return;
+      }
       // A source switched since changes what the model means, so it stands:
       // only the switch's record goes, as in the pass.
       const back = a.aiProfileId !== made.source ? undefined
@@ -423,7 +456,7 @@ export function createMonthlyBudgets(deps: MonthlyBudgetsDeps): MonthlyBudgets {
         : open.fromModel ? (modelOverrideProblem(p, open.fromModel) ? null : open.fromModel)
         // A follower whose source's default moved since is held on the default it followed, while the menu offers it.
         : made.defaultThen && p.model !== made.defaultThen && !modelOverrideProblem(p, made.defaultThen) ? made.defaultThen : null;
-      store.transact(() => { if (back !== undefined) store.setAgentModel(agentId, back, { hatchabot: true }); store.dropCheaperPause(agentId, open.month); });
+      store.transact(() => { if (back !== undefined) store.setAgentModel(agentId, back, { hatchabot: true }); store.dropCheaperPause(agentId, open.month, open.scope); });
       trace(agentId)('budget.downgrade_failed', { agentId, error: `the runtime did not take ${open.toModel} when Hatchabot restarted` });
     } catch (err) { deps.warn({ agentId, err: String((err as Error)?.message ?? err).slice(0, 200) }, 'budget.cheaper_refused_unsettled'); }
   };

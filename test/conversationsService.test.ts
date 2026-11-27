@@ -163,6 +163,64 @@ describe('the sessions read', () => {
     expect(w.reads).toEqual(['sessions', 'tasks']);
   });
 
+  it('a read under way when the agent is archived does not put its quiet tasks back (HB-1362 review)', async () => {
+    const w = world();
+    const a = w.agent('a1');
+    const runs = JSON.stringify({ 'agent:x:cron:job1:run:x': { updatedAt: 5 } });
+    w.sessions = () => ({ code: 0, stdout: runs, stderr: '' });
+    let finish!: (r: ExecResult) => void;
+    w.tasks = () => new Promise<ExecResult>((r) => { finish = r; }) as never;
+    const late = w.c.readSessions(a);
+    await new Promise((r) => setImmediate(r));
+    // The archive is done, and forgets what was cached (agentRecords' archive).
+    w.store.setAgentState('a1', 'ARCHIVED');
+    w.c.forgetAgent('a1');
+    finish({ code: 0, stdout: '{"jobs":[]}', stderr: '' });
+    await late;
+    // Brought back where it was: its tasks are read again, not answered from before the archive.
+    w.store.setAgentState('a1', 'PROVISIONING');
+    w.store.setAgentState('a1', 'RUNNING');
+    w.tasks = () => ({ code: 0, stdout: '{"jobs":[]}', stderr: '' });
+    w.reads.length = 0;
+    await w.c.readSessions(w.store.getAgent('a1')!);
+    expect(w.reads).toEqual(['sessions', 'tasks']);
+  });
+
+  it('after a move, its sessions and its quiet tasks are read where it runs now, and a read begun where it ran is never answered (HB-1362)', async () => {
+    const w = world();
+    w.store.insertHost({ id: 'h2', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'other box', settings: {}, createdAt: 'now' });
+    const a = w.agent('a1');
+    const runs = JSON.stringify({ 'agent:x:cron:job1:run:x': { updatedAt: 5 } });
+    w.sessions = () => ({ code: 0, stdout: runs, stderr: '' });
+    await w.c.sessionsFor(a);
+    await w.c.sessionsFor(a);
+    expect(w.reads).toEqual(['sessions', 'tasks']); // read once, then cached
+    w.store.setAgentHost('a1', 'h2');
+    w.reads.length = 0;
+    await w.c.sessionsFor(w.store.getAgent('a1')!);
+    expect(w.reads).toEqual(['sessions', 'tasks']); // nothing of the other machine's was kept
+    // A rebuild keeps its place, and its entry: the same volume.
+    w.reads.length = 0;
+    await w.c.sessionsFor(w.store.getAgent('a1')!);
+    expect(w.reads).toEqual([]);
+
+    // A first read under way on the old container, ending after the agent
+    // was put somewhere else, does not put the old answer back.
+    const b = w.agent('b1');
+    let finish!: (r: ExecResult) => void;
+    w.sessions = () => new Promise<ExecResult>((r) => { finish = r; });
+    void w.c.sessionsFor(b);
+    await new Promise((r) => setImmediate(r));
+    const old = finish;
+    w.store.setAgentRuntimeRef('b1', 'docker://hatchabot-b1-elsewhere');
+    const movedB = w.store.getAgent('b1')!;
+    w.sessions = () => ({ code: 0, stdout: at(3000), stderr: '' });
+    expect(w.c.newestActivity(await w.c.sessionsFor(movedB))).toBe(new Date(3000).toISOString());
+    old({ code: 0, stdout: at(1000), stderr: '' });
+    await new Promise((r) => setImmediate(r));
+    expect(w.c.newestActivity(await w.c.sessionsFor(movedB))).toBe(new Date(3000).toISOString());
+  });
+
   it('activity evidence for an unattended rebuild is read now, never the list\'s cached idle reading (HB-0896)', async () => {
     const w = world();
     const a = w.agent('a1');

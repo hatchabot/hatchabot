@@ -11,6 +11,7 @@ import { MockProvider } from '../src/providers/mockProvider.js';
 import { TurnRefused } from '../src/orchestrator/files/coreFileTurns.js';
 import { clearBusy, markBusy } from '../src/orchestrator/lifecycle/busy.js';
 import type { ChangeMeta } from '../src/orchestrator/usage/modelLedger.js';
+import { buildTokenHealth } from '../src/orchestrator/usage/tokenHealth.js';
 import type { Agent } from '../src/domain/types.js';
 import type { ExecResult } from '../src/providers/provider.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
@@ -45,6 +46,10 @@ interface World {
   answer: (slug: string, argv: string[]) => Promise<ExecResult>;
   /** What staging a recovery finds. */
   staged: { conversations: number; messages: number };
+  /** What a look at its context (the renderer's stats) answers, and what it waits for first (when set). */
+  stats: ExecResult; statsWait?: Promise<void>;
+  /** The timeline: "<agent> <event>". */
+  traced: string[];
   /** What the launch of a recovery turn prints about its process ('' when nothing), and what a look at it answers. */
   launched: string; turnLook: ExecResult;
   /** Staging a recovery waits for this (the render of a long history), when set. */
@@ -65,10 +70,11 @@ function world(from?: { db: Database.Database; files: Map<string, string> }): Wo
     store.insertAIProfile({ id: 'p1', ownerId: OWNER, name: 'AI', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p1', createdAt: 'now' });
     store.insertAIProfile({ id: 'local', ownerId: OWNER, name: 'Local', vendor: 'local', kind: 'api_key', model: 'small', secretRef: 'ai/local', createdAt: 'now' } as never);
   }
-  const w = { store, files: from?.files ?? new Map(), turns: [], shells: [], fileTurns: [], told: [], rebuilding: new Map() } as unknown as World;
+  const w = { store, files: from?.files ?? new Map(), turns: [], shells: [], fileTurns: [], told: [], traced: [], rebuilding: new Map() } as unknown as World;
   w.restart = () => world({ db, files: w.files });
   w.answer = async () => ({ code: 0, stdout: 'DONE', stderr: '' });
   w.staged = { conversations: 2, messages: 12 };
+  w.stats = { code: 0, stdout: JSON.stringify({ lastReset: null, lostMessages: 0, liveMessages: 0, liveStarted: null, conversations: 0 }), stderr: '' };
   w.launched = '';
   w.turnLook = { code: 0, stdout: 'running\n', stderr: '' };
   w.memoryPrint = 'a'.repeat(64);
@@ -88,6 +94,7 @@ function world(from?: { db: Database.Database; files: Map<string, string> }): Wo
         return { code: 0, stdout: '', stderr: '' };
       }
       if (script.includes("MODE='recover'")) { w.shells.push('stage'); await w.staging; return { code: 0, stdout: JSON.stringify(w.staged), stderr: '' }; }
+      if (script.includes("MODE='stats'")) { w.shells.push('stats'); await w.statsWait; return w.stats; }
       if (script.includes("MODE='export'")) { w.shells.push('export'); return { code: 0, stdout: JSON.stringify({ text: '# history', conversations: 1, messages: 3, unreadable: 0 }), stderr: '' }; }
       if (script.includes('sha256sum') && script.includes('MEMORY.md')) return { code: 0, stdout: w.memoryPrint, stderr: '' };
       if (script.startsWith('nohup ')) { w.shells.push('recovery turn'); return { code: 0, stdout: w.launched, stderr: '' }; }
@@ -97,7 +104,7 @@ function world(from?: { db: Database.Database; files: Map<string, string> }): Wo
     },
   };
   const secrets = new MemSecrets();
-  const trace = () => () => {};
+  const trace = (id?: string) => (event: string) => { w.traced.push(`${id ?? '-'} ${event}`); };
   w.consults = createConsults({
     store, secrets, providerFor: () => provider as never, trace, agentGone: () => false, warn: () => {},
     ensureAwake: async (a) => a, forgetSessions: () => {}, unreadFor: async () => false,
@@ -338,6 +345,89 @@ describe('Recover context', () => {
     w.m.stop();
   });
 
+  it('a recovery after a switch not run beside an ask leaves Recover context offered, with what it would have restored (HB-1176)', async () => {
+    const stats = (o: object) => ({ code: 0, stdout: JSON.stringify({ lastReset: null, lostMessages: 0, liveMessages: 0, liveStarted: null, conversations: 1, ...o }), stderr: '' });
+    const skipped = async (w: World, id: string, before?: () => void) => {
+      w.agent(id);
+      before?.();
+      let rebuilt!: () => void;
+      w.rebuilding.set(id, new Promise<void>((r) => { rebuilt = r; }));
+      const asked = Date.now();
+      w.m.history.afterRebuild(id);
+      w.store.setAgentApplied(id, 'p1', 'claude-opus-4-8');
+      expect(w.consults.turns.take(id)).toBe(true); // an ask to the rebuilt agent
+      rebuilt();
+      await vi.waitFor(() => expect(w.m.history.recovering(id)).toBe(false));
+      await vi.waitFor(() => expect(w.shells).toContain('stats'));
+      await new Promise((r) => setImmediate(r));
+      w.consults.turns.release(id);
+      expect(w.shells).not.toContain('recovery turn');
+      return asked;
+    };
+    // The ask has not ended the conversation yet: what is current now is what it ends.
+    const w = world();
+    w.stats = stats({ lostMessages: 3, liveMessages: 14 });
+    const asked = await skipped(w, 'a');
+    const offer = w.store.getContextReset('a');
+    expect(offer).toMatchObject({ lostMessages: 17 });
+    expect(Date.parse(offer!.resetAt)).toBeGreaterThanOrEqual(asked);
+    expect(w.traced).toContain('a context.recover_offered_after_switch');
+    expect(w.traced).not.toContain('a context.reset_after_rebuild');
+    // It has: the conversation ended since the switch, as the rebuild's own look would offer it.
+    const v = world();
+    const endedAt = new Date(Date.now() + 1000).toISOString();
+    v.stats = stats({ lastReset: endedAt, lostMessages: 20, liveMessages: 1 });
+    await skipped(v, 'b');
+    expect(v.store.getContextReset('b')).toMatchObject({ resetAt: endedAt, lostMessages: 20 });
+    expect(v.traced).toContain('b context.reset_after_rebuild');
+    // A container that does not answer, or nothing to restore: nothing offered.
+    const u = world();
+    u.stats = { code: 1, stdout: '', stderr: 'made-up failure' };
+    await skipped(u, 'c');
+    expect(u.store.getContextReset('c')).toBeUndefined();
+    const t = world();
+    await skipped(t, 'd');
+    expect(t.store.getContextReset('d')).toBeUndefined();
+    // Nothing current, only what an older reset ended, which the owner dismissed: not offered again.
+    const s = world();
+    s.stats = stats({ lastReset: '2026-09-01T10:00:00.000Z', lostMessages: 5, liveMessages: 0 });
+    await skipped(s, 'e', () => { s.store.setContextReset('e', { resetAt: '2026-09-01T10:00:00.000Z', lostMessages: 5 }); s.store.clearContextReset('e'); });
+    await new Promise((done) => setImmediate(done));
+    expect(s.store.getContextReset('e')).toBeUndefined();
+    // An offer the owner dismisses while the context is read stays dismissed.
+    const r = world();
+    let read!: () => void;
+    r.statsWait = new Promise<void>((done) => { read = done; });
+    r.stats = stats({ lastReset: '2026-09-01T10:00:00.000Z', lostMessages: 5, liveMessages: 9 });
+    await skipped(r, 'f', () => r.store.setContextReset('f', { resetAt: '2026-09-01T10:00:00.000Z', lostMessages: 5 }));
+    r.store.clearContextReset('f'); // while the context is read
+    read();
+    for (let i = 0; i < 5; i++) await new Promise((done) => setImmediate(done));
+    expect(r.store.getContextReset('f')).toBeUndefined();
+    expect(r.traced.filter((e) => e.startsWith('f context.'))).toEqual([]);
+    for (const x of [w, v, u, t, s, r]) x.m.stop();
+  });
+
+  it("after a switch's rebuild, a look that throws (its machine no longer known) frees the slot it reserved", async () => {
+    const w = world();
+    w.agent('a');
+    let rebuilt!: () => void;
+    w.rebuilding.set('a', new Promise<void>((r) => { rebuilt = r; }));
+    w.m.history.afterRebuild('a');
+    expect(w.m.history.recovering('a')).toBe(true);
+    w.store.setAgentApplied('a', 'p1', 'claude-opus-4-8');
+    // A stand-in for any throw on the way (providerFor for a machine that was removed throws so).
+    const turns = w.consults.turns as { inFlight: (id: string) => boolean };
+    const inFlight = turns.inFlight;
+    turns.inFlight = () => { throw new Error('No such host: h1'); };
+    try {
+      rebuilt();
+      // Was: swallowed, the slot held until a restart, and Recover context refused ("already recovering").
+      await vi.waitFor(() => expect(w.m.history.recovering('a')).toBe(false));
+    } finally { turns.inFlight = inFlight; }
+    w.m.stop();
+  });
+
   it('a reservation with no rebuild to wait for leaves a recovery that holds the slot alone (HB-0887)', async () => {
     const w = world();
     const a = w.agent('a');
@@ -440,7 +530,7 @@ describe('Recover context', () => {
         applyModelToRuntime: async () => 'live', askToApply: () => {}, pushModelList: async () => {},
       },
       detachClassIfDrifted: () => ({ detached: false }),
-      withSourceHold: createSourceHolds({ holdMs: 600_000, warn: () => {} }).withSourceHold,
+      withSourceHold: createSourceHolds().withSourceHold,
       kickRebuild: () => true, oweRebuild: () => '',
       // As routes.ts hands it in: the memory service's one slot per agent.
       recoverAfterRebuild: (id) => w.m.history.afterRebuild(id),
@@ -538,6 +628,28 @@ describe('the token steward', () => {
       error: 'It runs a local model until its rebuild onto its new source, and a local model costs nothing per token: set a cap after the rebuild.',
     });
     expect(w.store.getContextCap('b')).toBeUndefined();
+  });
+
+  it('while a switch of source waits for its rebuild and the source it still runs was deleted, the cap is judged by what its container runs (HB-1344)', async () => {
+    const w = world();
+    // Saved onto the local source, still running the cloud one, and the cloud one deleted since.
+    w.agent('a', { state: 'STOPPED', vendor: 'local' });
+    w.store.setAgentApplied('a', 'p1', 'claude-opus-4-8');
+    w.store.deleteAIProfile('p1');
+    const set = await w.m.steward.setContextCap(w.store.getAgent('a')!, 100_000, META);
+    expect(set.ok).toBe(true);
+    // Was: taken with no model named.
+    expect(w.store.listTokenActions({ ownerId: OWNER, limit: 5 })[0]!.detail).toMatchObject({ model: 'anthropic/claude-opus-4-8' });
+    // Its token health row says the same (was: no model, and billed as nothing ran).
+    expect(buildTokenHealth(w.store, OWNER).rows.find((r) => r.id === 'a')).toMatchObject({ model: 'claude-opus-4-8', billing: 'api' });
+    // Nothing kept of it (deleted before Hatchabot kept a record of deleted sources): refused until its rebuild.
+    (w.store as unknown as { db: Database.Database }).db.prepare(`DELETE FROM ai_profile_tombstones`).run();
+    expect(await w.m.steward.setContextCap(w.store.getAgent('a')!, 120_000, META)).toEqual({
+      ok: false, status: 409, error: "Hatchabot can't tell which model its container runs (the AI source it was built with is gone): set a cap after its next rebuild.",
+    });
+    expect(w.store.getContextCap('a')?.tokens).toBe(100_000);
+    // Taking the cap off is still taken.
+    expect((await w.m.steward.setContextCap(w.store.getAgent('a')!, null, META)).ok).toBe(true);
   });
 
   it('a switch from one local model to another waiting for its rebuild needs no cap either, and says so (HB-1170)', async () => {
@@ -648,6 +760,34 @@ describe('a child\'s distillation and its merge', () => {
     expect(next.store.listProposals('m')).toEqual([]);
     // Merged for good: the start after that leaves it merged.
     expect(next.restart().store.listProposals('m')).toEqual([]);
+  });
+
+  it('a merge the shutdown cuts off is left waiting, as a release from before \'merging\' lists one (HB-1171)', async () => {
+    const w = world();
+    w.agent('m');
+    w.files.set(AGENTS, '# Playbook\n');
+    w.store.insertProposal({ id: 'p1', masterAgentId: 'm', childAgentId: 'c', childName: 'Agent c', text: 'a lesson' });
+    const [proposal] = w.store.listProposals('m');
+    // What a release before 2.191.0 reads: only 'pending' is listed, and nothing reopens 'merging'.
+    const olderReleaseLists = () => (w.store['db'] as Database.Database).prepare(`SELECT id FROM agent_proposals WHERE master_agent_id = ? AND status = 'pending'`).all('m');
+    // A merge held in its files turn when the process is told to stop.
+    const running = createProposals({
+      store: w.store, providerFor: () => { throw new Error('never reached'); }, trace: () => () => {}, turns: w.consults.turns,
+      withCoreFilesTurn: () => new Promise<never>(() => {}), freshRunning: () => { throw new Error('never reached'); }, askTimeoutMs: 1000,
+    });
+    void running.merge(w.store.getAgent('m')!, proposal!);
+    expect(olderReleaseLists()).toEqual([]);
+    running.stop();
+    expect(olderReleaseLists()).toEqual([{ id: 'p1' }]);
+    // The memory service's stop (the routes' stop, at SIGTERM) does it.
+    expect(w.store.resolveProposal('m', 'p1', 'merging')).toBe(true);
+    w.m.stop();
+    expect(olderReleaseLists()).toEqual([{ id: 'p1' }]);
+    // Merged once from there.
+    expect(await w.m.proposals.merge(w.store.getAgent('m')!, proposal!)).toEqual({ ok: true, body: { merged: true } });
+    expect(w.files.get(AGENTS)!.split('(proposal p1) -->')).toHaveLength(2);
+    w.m.stop();
+    expect(olderReleaseLists()).toEqual([]);
   });
 
   it('a merge whose write landed before a restart is not appended again (HB-0888)', async () => {

@@ -4,7 +4,7 @@ import type { Store } from '../../store/store.js';
 import { isBusy } from '../lifecycle/busy.js';
 import { refused, said, type Answer } from '../consult/answers.js';
 import type { AgentTurns } from '../consult/consults.js';
-import { exportTranscript, recoverContext, recoveryRunning, type RecoveryProcess, type TranscriptResult } from './transcript.js';
+import { contextStats, exportTranscript, recoverContext, recoveryRunning, type RecoveryProcess, type TranscriptResult } from './transcript.js';
 
 /** A recovery begun (its staged file's counts), or nothing to recover and why. */
 export type RecoveryAnswer =
@@ -32,9 +32,10 @@ export interface ContextRecovery {
   /**
    * Chained onto the rebuild just kicked for a switched agent, so recovery
    * runs on the NEW source, after the container is healthy. Best-effort. The
-   * slot is reserved now.
+   * slot is reserved now. `done`: the rebuild to wait for when it is not the
+   * queue's (one the boot's pass finishes itself, HB-1445); it never rejects.
    */
-  afterRebuild(agentId: string): void;
+  afterRebuild(agentId: string, done?: Promise<unknown>): void;
   /** Is a recovery turn running (or reserved) for this agent? */
   recovering(agentId: string): boolean;
   /**
@@ -182,12 +183,44 @@ export function createContextRecovery(deps: ContextRecoveryDeps): ContextRecover
     return said({ started: true, ...r });
   };
 
-  const afterRebuild: ContextRecovery['afterRebuild'] = (id) => {
+  /**
+   * The page's Recover context offer, when the recovery after a switch was
+   * not run because a turn was answering: that turn is the first on the
+   * new source and ends the conversation the recovery was for, and the
+   * rebuild's own look at the agent's context came before it, so nothing
+   * offered it and only the timeline said so (HB-1176). What it would have
+   * restored, read now: a conversation ended since the switch was asked
+   * (`since`) is offered as the rebuild's look offers one; one not ended
+   * yet, with the conversation still current, which the new source does not
+   * have. Only when there is one: an offer made now is news again, and
+   * with none current it offered again only what the owner had dismissed.
+   * A container that does not answer is no evidence: nothing is offered;
+   * and an offer the owner dismissed while it was read stays dismissed.
+   */
+  const offerRecovery = async (agent: Agent, since: number): Promise<void> => {
+    const shown = store.getContextReset(agent.id);
+    let stats;
+    try { stats = await contextStats(providerFor(agent.hostId), agent); } catch { return; }
+    if (shown && !store.getContextReset(agent.id)) return;
+    const ended = stats.lastReset ? Date.parse(stats.lastReset) : 0;
+    if (ended && ended >= since - 60_000 && stats.lostMessages) {
+      store.setContextReset(agent.id, { resetAt: stats.lastReset!, lostMessages: stats.lostMessages });
+      trace(agent.id)('context.reset_after_rebuild', { resetAt: stats.lastReset, lost: stats.lostMessages });
+      return;
+    }
+    if (!stats.liveMessages) return;
+    const offer = { resetAt: new Date().toISOString(), lostMessages: stats.lostMessages + stats.liveMessages };
+    store.setContextReset(agent.id, offer);
+    trace(agent.id)('context.recover_offered_after_switch', { lost: offer.lostMessages, live: stats.liveMessages });
+  };
+
+  const afterRebuild: ContextRecovery['afterRebuild'] = (id, done) => {
     // No rebuild to wait for: nothing would ever free a reservation, and the
     // agent would never sleep again (HB-0887's idle sweep reads it). Looked
     // at before the claim, which would put aside a recovery holding the slot.
-    const rebuild = inFlight(id);
+    const rebuild = done ?? inFlight(id);
     if (!rebuild) return;
+    const since = Date.now();
     // Reserve the slot now so a manual click can't double up.
     const attempt = claim(id);
     // The source it was switched to: the recovery is for after that runs.
@@ -208,11 +241,11 @@ export function createContextRecovery(deps: ContextRecoveryDeps): ContextRecover
       // An ask, a checkpoint or a consult that came after the rebuild is
       // answering in the conversation the recovery would go into: it is not
       // run beside it, as Recover context is not (HB-0887). Not waited for:
-      // that turn may take minutes, and the page offers Recover context when
-      // the rebuild cost the conversation (the rebuild queue's check).
+      // that turn may take minutes. The page offers Recover context instead.
       if (turns.inFlight(id)) {
         release(id, attempt);
         trace(id)('transcript.recover_after_switch_skipped', { why: 'it was answering something when its rebuild was done' });
+        await offerRecovery(fresh, since);
         return;
       }
       attempt.preparing = true;
@@ -224,7 +257,10 @@ export function createContextRecovery(deps: ContextRecoveryDeps): ContextRecover
       trace(id)('transcript.recover_after_switch', r);
       if (!r.messages) { release(id, attempt); return; }
       started(fresh, attempt, proc);
-    }).catch(() => {});
+      // A throw on the way (providerFor for a machine no longer known) frees
+      // the slot it reserved: swallowed, it held it until a restart, and
+      // Recover context was refused meanwhile.
+    }).catch(() => { release(id, attempt); });
   };
 
   return {

@@ -6,13 +6,20 @@ import { pingRunner } from '../../providers/resolveProvider.js';
 import { tcpTlsProblem } from '../../providers/runnerEndpoint.js';
 import type { Store } from '../../store/store.js';
 import { isBusy, whileBusy } from '../lifecycle/busy.js';
+import { settleStartsOwedOn } from '../lifecycle/operations.js';
 import { ensureRunnerKey, ensureSshConfigBlock, parseSshEndpoint } from './runnerSetup.js';
 
 /** What a runner's probe said when it was added (pingRunner). */
 export type RunnerPing = Awaited<ReturnType<typeof pingRunner>>;
 
-/** Why a host cannot be removed now: agents on it, a move to or from it not over, or an image copy to it under way. */
-export type HostInUse = { error: string; operation?: string };
+/**
+ * Why a host cannot be removed now: agents on it, a move to or from it not
+ * over, or an image copy to it under way (`code` IMAGE_COPY: Remove anyway
+ * stops it, HB-1254).
+ */
+export type HostInUse = { error: string; operation?: string; code?: typeof IMAGE_COPY };
+/** The refusal of a removal for an image copy under way, which `remove`'s `stopImageCopy` overrides (HB-1254). */
+export const IMAGE_COPY = 'image_copy';
 
 /**
  * This install's machines (HB-0808):
@@ -51,9 +58,11 @@ export interface Hosts {
   /**
    * Remove a runner's row, and what Hatchabot ran there when it can be told
    * apart from this machine and answers. `going`: a removal of it is under
-   * way. The caller has refused this machine itself.
+   * way. The caller has refused this machine itself. `stopImageCopy` (Remove
+   * anyway): an image copy under way to it is stopped first, and waited for,
+   * rather than refused (HB-1254).
    */
-  remove(host: Host): Promise<{ refused: HostInUse } | { going: true } | { ok: true; warning?: string }>;
+  remove(host: Host, opts?: { stopImageCopy?: boolean }): Promise<{ refused: HostInUse } | { going: true } | { ok: true; warning?: string }>;
 }
 
 /** What the machines need from the process they run in. Functions only, so a test hands them fakes. */
@@ -89,9 +98,9 @@ export const sameEndpoint = (a: unknown, b: unknown) => !!endpointKey(a) && endp
  * `installs`: the image copies (imageInstalls.ts). A copy under way to a runner
  * keeps it from being removed: the row went while docker went on pulling and
  * loading gigabytes there for hours, past anything that could follow or stop
- * it (HB-1025).
+ * it (HB-1025). Remove anyway stops it first (`stop`, HB-1254).
  */
-export function createHosts(deps: HostsDeps, installs?: { underWay(hostId: string): boolean }): Hosts {
+export function createHosts(deps: HostsDeps, installs?: { underWay(hostId: string): boolean; stop(hostId: string, why: string): Promise<void> }): Hosts {
   const { store, providerFor, trace, disownPauseOnStop } = deps;
 
   /**
@@ -146,6 +155,13 @@ export function createHosts(deps: HostsDeps, installs?: { underWay(hostId: strin
   const addProblem: Hosts['addProblem'] = (ownerId, dockerHost) => {
     const tlsProblem = tcpTlsProblem(dockerHost);
     if (tlsProblem) return { invalid: tlsProblem };
+    // ssh reads a user or host that starts with "-" as an option, and since
+    // OpenSSH 9.6 refuses it ("hostname contains invalid characters"); the
+    // console tunnel never takes one (sshTarget). Added, every console on
+    // that runner failed (HB-1258).
+    if (/^ssh:\/\/(?:[^@/]*@)?-/.test(dockerHost)) {
+      return { invalid: 'A user or host that starts with "-" cannot be reached over ssh: ssh takes it for an option and refuses it, so neither Docker nor an agent\'s console could reach that runner. Use the machine\'s own name or address.' };
+    }
     // What the key's ssh block can be written for: saved anyway, an address in IPv6
     // form got none, and could never sign in (HB-0436).
     if (dockerHost.startsWith('ssh://') && !parseSshEndpoint(dockerHost)) {
@@ -208,9 +224,18 @@ export function createHosts(deps: HostsDeps, installs?: { underWay(hostId: strin
           // new home's row was marked STOPPED while it ran there (HB-0904).
           const a = store.getAgent(listed.id);
           if (!a || a.hostId !== host.id || a.state !== 'RUNNING' || !a.runtimeRef) return false;
-          await providerFor(host.id).stop(a.runtimeRef);
+          // The stop is the owner's in the store before its docker stop, as
+          // an owner's Stop is (HB-1480): a restart during that stop left the
+          // budget's pause the budget's, and its end started the agent again
+          // (HB-1517).
           disownPauseOnStop(a.id);
+          await providerFor(host.id).stop(a.runtimeRef);
           store.setAgentState(a.id, 'STOPPED');
+          // Stopped on purpose, as an owner's Stop settles them (power.ts
+          // stopRunning, HB-0980): a start a restart left owed on it, or a
+          // download's that a restart cut off, is not to undo the drain, under
+          // the lock, before it is let go (HB-1517 review).
+          settleStartsOwedOn(store, a.id, 'host-drain');
           return true;
         });
         if (done) stopped++;
@@ -244,16 +269,27 @@ export function createHosts(deps: HostsDeps, installs?: { underWay(hostId: strin
       };
     }
     if (installs?.underWay(hostId)) {
-      return { error: 'The runtime image is being installed on this host — wait for Install image to finish (its row shows how far it has come), then remove it.' };
+      return { error: 'The runtime image is being installed on this host — wait for Install image to finish (its row shows how far it has come), then remove it.', code: IMAGE_COPY };
     }
     return undefined;
   };
 
-  const remove: Hosts['remove'] = async (host) => {
-    { const busy = inUse(host.id); if (busy) return { refused: busy }; }
-    // Reserved until the row is gone: nothing new is placed on it meanwhile.
+  const remove: Hosts['remove'] = async (host, opts = {}) => {
+    // An image copy under way is no bar to Remove anyway, which stops it below;
+    // anything else still is (agents there, a move not over).
+    { const busy = inUse(host.id); if (busy && !(busy.code === IMAGE_COPY && opts.stopImageCopy)) return { refused: busy }; }
+    // Reserved until the row is gone: nothing new is placed on it meanwhile,
+    // and no new copy starts there once this one is stopped.
     if (!deps.beginRemoval(host.id)) return { going: true };
     try {
+      // Remove anyway (HB-1254): the copy's docker killed, its operation failed
+      // "Stopped: …", and waited for. Before, it went on pulling or loading
+      // for up to hours, and only a restart ended it. Its words say what was
+      // asked, not that the runner went: the removal can still be refused
+      // below (an agent that arrived meanwhile), the copy stopped all the same.
+      if (opts.stopImageCopy && installs?.underWay(host.id)) {
+        await installs.stop(host.id, `Remove anyway was chosen for ${host.name} while its image was being installed.`);
+      }
       // What it ran for this Hatchabot goes with it (2026-10-09): its memory
       // search service and agents' browsers on the machine when it answers,
       // and the service's key and state here either way. Not answering, they

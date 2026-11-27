@@ -330,6 +330,37 @@ export const SCHEMA_STEPS: readonly SchemaStep[] = [
   // it writes again keeps the column, under another generation, which reads
   // as none here.
   { n: 116, additive: true, sql: `ALTER TABLE pairing_windows ADD COLUMN exclude_ids TEXT` },
+  // What a carried task's source task held when an adopt carried it, and
+  // the copy it became (HB-1200; cronImport.ts carriedFingerprint): an
+  // adopt again says how many changed in the old workspace since. NULL:
+  // carried before it was kept, never counted as changed. Additive: an
+  // older release never reads it; a copy it records keeps the old value,
+  // which names another copy, and is read as none.
+  { n: 117, additive: true, sql: `ALTER TABLE adopt_carried_tasks ADD COLUMN fingerprint TEXT` },
+  // The account a deleted AI source belonged to (HB-1179): the removal of
+  // that account takes the source's tombstone with it. NULL: deleted before
+  // it was kept, and pruned with its readings only. Additive: an older
+  // release never reads it, and a tombstone it writes has none.
+  { n: 118, additive: true, sql: `ALTER TABLE ai_profile_tombstones ADD COLUMN owner_id TEXT` },
+  // A task Hatchabot made on an agent, recorded after the copy its volume
+  // was replaced by (HB-1317): it may be in the copy all the same (found by
+  // its name when it was recorded, renamed by hand since), so the next build
+  // looks for it by its id before it makes one. 0: as recorded. Additive: an
+  // older release never reads it, and takes such a record for one the copy
+  // holds, as before HB-1123.
+  { n: 119, additive: true, sql: `ALTER TABLE managed_crons ADD COLUMN after_copy INTEGER NOT NULL DEFAULT 0` },
+  // When the vault's pass gave up asking Google to end a deleted
+  // connection's token (HB-1336): the row then stays, its token deleted, as
+  // the Connections page's notice to remove the access by hand, until its
+  // owner marks it done. NULL: still being asked. Additive: an older
+  // release reads such a row as still to end, finds no token under it, and
+  // settles it at its next pass.
+  { n: 120, additive: true, sql: `ALTER TABLE connection_cleanups ADD COLUMN given_up_at TEXT` },
+  // The calls a practice run's source refused (a rate limit), which answered
+  // nothing (HB-1497): the source's request counts add them as refused. 0:
+  // none, or a row from before. Additive: an older release never reads it,
+  // and a row it writes has none.
+  { n: 121, additive: true, sql: `ALTER TABLE practice_usage ADD COLUMN refused INTEGER NOT NULL DEFAULT 0` },
   // ↑ Append the next step above this line, with the next number. Then run
   //   test/schemaVersion.test.ts: it prints the fingerprint line to record.
 ];

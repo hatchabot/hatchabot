@@ -7,6 +7,25 @@
 // request as "FIXTURE_REQUEST {...}" (its query, if any, as `search`; routes
 // are matched by path alone) for the test to read, and refuses
 // anything else: nothing the CLI does reaches a network or a real install.
+//
+// HB_CLI_FIXTURE_CLOCK=virtual: a virtual clock, so a test of a long wait
+// (the hand-over's, HB-1427) costs no real time. A timer of a second or more
+// fires at once and moves Date.now() on by its delay; shorter ones run as
+// they are. Each request then carries `at`, the virtual ms since the start.
+const virtual = process.env.HB_CLI_FIXTURE_CLOCK === 'virtual';
+const realNow = Date.now.bind(Date);
+const started = realNow();
+let ahead = 0;
+if (virtual) {
+  Date.now = () => realNow() + ahead;
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn, ms, ...args) => {
+    const wait = Number(ms) || 0;
+    if (wait < 1000) return realSetTimeout(fn, wait, ...args);
+    ahead += wait;
+    return realSetTimeout(fn, 0, ...args);
+  };
+}
 const routes = JSON.parse(process.env.HB_CLI_FIXTURE || '[]');
 globalThis.fetch = async (url, init = {}) => {
   const { origin, pathname: path, search } = new URL(String(url));
@@ -14,7 +33,7 @@ globalThis.fetch = async (url, init = {}) => {
   let body;
   if (typeof init.body === 'string') { try { body = JSON.parse(init.body); } catch { body = init.body; } }
   const authorization = init.headers?.authorization;
-  console.log('FIXTURE_REQUEST ' + JSON.stringify({ path, method, body, origin, ...(search ? { search } : {}), ...(authorization ? { authorization } : {}) }));
+  console.log('FIXTURE_REQUEST ' + JSON.stringify({ path, method, body, origin, ...(search ? { search } : {}), ...(authorization ? { authorization } : {}), ...(virtual ? { at: Date.now() - started } : {}) }));
   const hit = routes.find((r) => r.path === path && r.method === method) ?? routes.find((r) => r.path === path && !r.method);
   if (!hit) throw new Error('Unexpected fixture request: ' + method + ' ' + path);
   const answer = hit.replies ? (hit.replies.length > 1 ? hit.replies.shift() : hit.replies[0]) : hit;

@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { claudePlanAllowed, CLAUDE_PLAN_HOSTED } from '../../config/claudePlan.js';
 import { snapshotModels } from '../../orchestrator/usage/modelLedger.js';
 import { claudeAuthDir } from '../../orchestrator/lifecycle/provision.js';
-import { checkLocalServer, CURATED_ANTHROPIC_MODELS, isPrivateModelUrl, limitsSaid, usesSource, type KeptLine } from '../../orchestrator/sources/aiSources.js';
+import { checkLocalServer, CURATED_ANTHROPIC_MODELS, isPrivateModelUrl, limitsSaid, SOURCE_MODELS_MAX, usesSource, type KeptLine } from '../../orchestrator/sources/aiSources.js';
 import { usableForMgmt } from '../ops/mgmtLlm.js';
 import { ownerIdOf } from '../principal.js';
 import { MACHINE_OWNER_ONLY, zodMessage, type RouteContext } from '../routeContext.js';
@@ -15,7 +15,7 @@ const LocalProfile = z.object({
   kind: z.literal('local'),
   name: z.string().min(1),
   model: z.string().min(1),
-  models: z.array(z.string().min(1)).max(16).optional(),
+  models: z.array(z.string().min(1)).max(SOURCE_MODELS_MAX).optional(),
   /** As the AGENT sees it — containers can't reach the host's loopback. */
   /**
    * Must be a private address: "nothing leaves this machine" has to be
@@ -38,7 +38,7 @@ const CreateAIProfile = z.union([
     name: z.string().min(1),
     vendor: z.enum(['anthropic', 'google', 'openai']),
     model: z.string().min(1),
-    models: z.array(z.string().min(1)).max(16).optional(),
+    models: z.array(z.string().min(1)).max(SOURCE_MODELS_MAX).optional(),
     apiKey: z.string().min(1),
   }),
   z.object({
@@ -46,7 +46,7 @@ const CreateAIProfile = z.union([
     name: z.string().min(1),
     vendor: z.literal('anthropic'),
     model: z.string().min(1),
-    models: z.array(z.string().min(1)).max(16).optional(),
+    models: z.array(z.string().min(1)).max(SOURCE_MODELS_MAX).optional(),
     /** From `claude setup-token` — the subscription path for hosts where the
      *  login lives in the macOS Keychain instead of ~/.claude. */
     oauthToken: z.string().min(1).optional(),
@@ -264,7 +264,7 @@ export function registerAiSourceRoutes(app: FastifyInstance, ctx: RouteContext):
       const parsed = z
         .object({
           model: z.string().trim().min(1).optional(),
-          models: z.array(z.string().min(1)).max(16).optional(),
+          models: z.array(z.string().min(1)).max(SOURCE_MODELS_MAX).optional(),
           /** Owner opt-in: every account on this installation may use this
            *  source for their agents. Shared spend, so explicit only. */
           shared: z.boolean().optional(),
@@ -457,7 +457,7 @@ export function registerAiSourceRoutes(app: FastifyInstance, ctx: RouteContext):
           model: z.string().trim().min(1),
           /** The owner's "also switchable" extras; the final menu adds held
            *  models on top so their pins stay valid. */
-          models: z.array(z.string().min(1)).max(16).optional(),
+          models: z.array(z.string().min(1)).max(SOURCE_MODELS_MAX).optional(),
           /** Agent ids that should switch TO the new default. Everything else
            *  of yours on this source is held on its current model. */
           apply: z.array(z.string()).max(500).optional(),
@@ -466,7 +466,8 @@ export function registerAiSourceRoutes(app: FastifyInstance, ctx: RouteContext):
       if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
       const out = await applyDefaultModel(profile, ownerIdOf(req), parsed.data, (source, before) => recordLedger(req, source, before));
       // A list longer than a source holds, once the held models are on it: nothing was written (HB-0907).
-      if ('refused' in out) return reply.code(400).send({ error: out.error });
+      // The source deleted while its checks waited: nothing was written either.
+      if ('refused' in out) return reply.code(out.refused === 'gone' ? 404 : 400).send({ error: out.error });
       return out;
     },
   );

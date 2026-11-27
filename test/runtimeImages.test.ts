@@ -5,7 +5,8 @@ import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { LocalDockerProvider } from '../src/providers/localDockerProvider.js';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { needsSharedEmbedder } from '../src/orchestrator/machines/buildFailure.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { SecretStore } from '../src/secrets/secretStore.js';
@@ -333,7 +334,10 @@ describe('runtime guards (audit 15)', () => {
     expect((await f.inject({ method: 'DELETE', url: '/v1/runtime/images/' + encodeURIComponent('postgres:16'), headers: as })).statusCode).toBe(400);
     expect((await f.inject({ method: 'GET', url: '/v1/runtime/images/' + encodeURIComponent('postgres:16') + '/history', headers: as })).statusCode).toBe(400);
     expect((await f.inject({ method: 'POST', url: '/v1/runtime/build', headers: as, payload: { version: 'latest', candidate: true } })).statusCode).toBe(400);
-    expect((await f.inject({ method: 'POST', url: '/v1/runtime/build', headers: as, payload: { version: 'derived-x' } })).statusCode).toBe(400);
+    const derived = await f.inject({ method: 'POST', url: '/v1/runtime/build', headers: as, payload: { version: 'derived-x' } });
+    expect(derived.statusCode).toBe(400);
+    // Said as it is: no word of Promote, which a pinned HATCHABOT_IMAGE turns off (HB-1454).
+    expect(derived.json().error).toBe('Name the OpenClaw version to build, such as 2026.9.8: "latest" and "derived-" names are image tags, not versions.');
   });
 });
 
@@ -435,6 +439,29 @@ describe('POST /v1/runtime/build', () => {
     expect((await check('tag=hatchabot-runtime%3A2026.9.6&version=..%2Fx')).statusCode).toBe(400);
     await new Promise((r) => setTimeout(r, 10));
     expect(builds).toBe(0);
+  });
+
+  it('GET /v1/runtime/build/check?built=1 asks what a default build is asked as it ends: an engine-free image with the shared service off, agents it would strand, not the pins (HB-1450 review)', async () => {
+    const { f, store, provider } = await world(async () => ({ ok: true }));
+    const check = async (q: string) => (await f.inject({ method: 'GET', url: `/v1/runtime/build/check?${q}`, headers: as })).json();
+    // Kitchen pinned to the tag it built: its tag names the new image by now, so no refusal.
+    store.setAgentImage('a1', 'hatchabot-runtime:2026.9.4');
+    expect(await check('tag=hatchabot-runtime%3A2026.9.4&version=2026.9.4')).toEqual({ refused: expect.stringMatching(/is pinned by Kitchen/) });
+    // Said to be the once-built answer: a service from before it answers the check above, which the CLI does not take.
+    expect(await check('tag=hatchabot-runtime%3A2026.9.4&version=2026.9.4&built=1')).toEqual({ refused: null, built: true });
+    // Built engine-free, with the shared memory service off: no agent could be built on it.
+    provider.imageEmbedEngine = 'none';
+    expect(await check('tag=hatchabot-runtime%3A2026.9.4&version=2026.9.4&built=1')).toEqual({ refused: 'it has no memory search engine of its own and the shared service is off, so no agent could be built on it. It is kept as hatchabot-runtime:2026.9.4: turn the service on (Settings → Hosts), then promote it.', built: true });
+    // The check before the build does not ask that: the image is not built yet.
+    store.setAgentImage('a1', null);
+    expect(await check('tag=hatchabot-runtime%3A2026.9.4&version=2026.9.4')).toEqual({ refused: null });
+    // An agent that reached 2026.8 or newer meanwhile, made the default: refused as the app's build is.
+    provider.imageEmbedEngine = 'baked';
+    provider.infoOverride.set(store.getAgent('a2')!.runtimeRef!, { openclawVersion: '2026.9.6' });
+    expect(await check('tag=hatchabot-runtime%3A2026.7.1-2&version=2026.7.1-2&built=1')).toEqual({ refused: 'OpenClaw 2026.7.1-2 cannot read the data of agents that reached 2026.8 or newer while it built (Garage). It is kept as hatchabot-runtime:2026.7.1-2: pin those agents to their current image, then promote it.', built: true });
+    // A candidate moves nothing: there is nothing to ask once it is built.
+    expect((await f.inject({ method: 'GET', url: '/v1/runtime/build/check?tag=hatchabot-runtime%3A2026.9.4&candidate=1&built=1', headers: as })).statusCode).toBe(400);
+    expect(provider.tagged).toEqual([]);
   });
 
   it('a default build is held to that check again as it ends: a follower that reached 2026.8 meanwhile keeps the default where it is (HB-1187)', async () => {
@@ -577,6 +604,18 @@ describe('POST /v1/runtime/build', () => {
     expect(ok.statusCode).toBe(202); expect(ok.json().engine).toBe('baked');
     await new Promise((r) => setTimeout(r, 10));
     expect(seen[0]?.engine).toBeUndefined();
+  });
+
+  it("a build with no version is judged by the Dockerfile's OpenClaw, which it builds (HB-1185)", async () => {
+    const seen: Array<{ version?: string; engine?: string }> = [];
+    const { f } = await world(async (o) => { seen.push(o); return { ok: true }; });
+    const dockerfile = /^ARG OPENCLAW_VERSION=(\S+)/m.exec(readFileSync('docker/Dockerfile.runtime', 'utf8'))![1]!;
+    expect(needsSharedEmbedder(dockerfile)).toBe(true); // the release builds 2026.8+
+    const none = await f.inject({ method: 'POST', url: '/v1/runtime/build', headers: as, payload: { candidate: true } });
+    expect(none.statusCode).toBe(400);
+    expect(none.json().error).toBe(`OpenClaw ${dockerfile} has no memory search engine of its own to bake, so its agents need the shared memory search service: start it first (Settings → Hosts).`);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(seen).toEqual([]);
   });
 });
 

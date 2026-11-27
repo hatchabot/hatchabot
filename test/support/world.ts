@@ -91,10 +91,17 @@ export interface World {
   routes?: import("./../../src/api/routes.js").RoutesHandle;
   /** The database under the store: what a restart keeps (restartWorld). A world made by makeWorld has it. */
   db?: Database.Database;
+  /** Telegram (and Google) as the routes are handed it: the world's empty answers, or the test's own (makeWorld's `oauthFetch`). */
+  oauthFetch?: typeof fetch;
 }
 
-/** A fresh installation whose local host + AI profile belong to `owner`. */
-export async function makeWorld(owner: string = OWNER, availableBots = 0): Promise<World> {
+/**
+ * A fresh installation whose local host + AI profile belong to `owner`.
+ * `oauthFetch`: what Telegram (and Google) say to the routes, for a test that
+ * means Telegram to answer a token check (HB-1447); the world's empty answers
+ * without one. A restart (restartWorld) keeps it.
+ */
+export async function makeWorld(owner: string = OWNER, availableBots = 0, opts: { oauthFetch?: typeof fetch } = {}): Promise<World> {
   const db = new Database(':memory:');
   const store = new Store(db);
   const secrets = new MemSecrets();
@@ -107,8 +114,9 @@ export async function makeWorld(owner: string = OWNER, availableBots = 0): Promi
   const providers = new Map<string, MockProvider>([['mock', provider]]);
   // Peer calls go through the global fetch, so a test can stand in for the other server with a spy.
   // A push to the owner's phone is told as the real Telegram tells a made-up token (HB-1437).
-  const routes = await registerRoutes(f, { store, secrets, providers, channel, oauthFetch, pushFetch: telegramRefuses, peerFetch: viaGlobalFetch });
-  return { store, secrets, provider, providers, f, owner, channel, routes, db };
+  const told = opts.oauthFetch ?? oauthFetch;
+  const routes = await registerRoutes(f, { store, secrets, providers, channel, oauthFetch: told, pushFetch: telegramRefuses, peerFetch: viaGlobalFetch });
+  return { store, secrets, provider, providers, f, owner, channel, routes, db, oauthFetch: told };
 }
 
 /**
@@ -125,7 +133,7 @@ export async function restartWorld(w: World): Promise<World> {
   await w.f.close();
   const store = new Store(w.db);
   const f = Fastify();
-  const routes = await registerRoutes(f, { store, secrets: w.secrets, providers: w.providers, channel: w.channel, oauthFetch, pushFetch: telegramRefuses, peerFetch: viaGlobalFetch });
+  const routes = await registerRoutes(f, { store, secrets: w.secrets, providers: w.providers, channel: w.channel, oauthFetch: w.oauthFetch ?? oauthFetch, pushFetch: telegramRefuses, peerFetch: viaGlobalFetch });
   return { ...w, store, f, routes };
 }
 

@@ -159,14 +159,25 @@ export function costsFor(store: Store, viewer: string, days: number, now = Date.
   const agents = costAgents(store, viewer);
   const profiles = store.modelProfiles(agents.map((a) => a.id)) as Map<string, { profile: StoredProfile; at: string }>;
   const practice = practiceMixes(store, agents.map((a) => a.id), now - days * DAY, now);
-  const sources = new Map<string, { kind?: string; vendor?: string } | undefined>();
+  const sources = new Map<string, SourceKind>();
   const out: Record<string, AgentCost> = {};
   for (const a of agents) {
-    if (!sources.has(a.aiProfileId)) sources.set(a.aiProfileId, store.getAIProfile(a.aiProfileId));
-    out[a.id] = agentCost(a, profiles.get(a.id), sources.get(a.aiProfileId), days, now, bands, practice.get(a.id));
+    // Billed by the source its container runs (HB-1498).
+    const on = runsOnId(a);
+    if (!sources.has(on)) sources.set(on, sourceRecord(store, on));
+    out[a.id] = agentCost(a, profiles.get(a.id), sources.get(on), days, now, bands, practice.get(a.id));
   }
   return out;
 }
+
+/**
+ * The source an agent's container runs now: while a switch of source waits
+ * for its rebuild, the one it was built with, not the one chosen, as the
+ * model scorecard and its token health row have it (HB-1343, HB-1498).
+ */
+const runsOnId = (a: Pick<Agent, 'appliedProfileId' | 'aiProfileId'>): string => a.appliedProfileId ?? a.aiProfileId;
+/** A source's record, or a deleted one's as its tombstone keeps it. */
+const sourceRecord = (store: Store, id: string): SourceKind => store.getAIProfile(id) ?? store.formerAIProfile(id);
 
 /** The agents whose cost this person sees now (costsFor's). */
 export function costAgents(store: Store, viewer: string): Agent[] {
@@ -197,17 +208,26 @@ export const costBadgesOn = (): boolean => !/^(off|0|false|no)$/i.test(String(pr
 export function mixesInWindow(p: StoredProfile | undefined, hours: number, now: number): Map<string, TokenMix> {
   const out = new Map<string, TokenMix>();
   if (!p?.models) return out;
-  const from = now - hours * HOUR;
   for (const [model, s] of Object.entries(p.models)) {
     const mix: TokenMix = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-    for (const [h, v] of Object.entries(s.h ?? {})) {
-      const start = Date.parse(`${h}:00:00Z`);
-      if (!(start + HOUR > from) || start > now) continue;
-      const span = Math.max(1, Math.min(HOUR, now - start));
-      const w = start >= from ? 1 : Math.max(0, Math.min(1, (start + span - from) / span));
-      HOUR_FIELDS.forEach((f, i) => { if (f in mix) mix[f as keyof TokenMix] += (Number(v[i]) || 0) * w; });
-    }
+    for (const [, m] of hourMixes(s, now - hours * HOUR, now)) (Object.keys(mix) as Array<keyof TokenMix>).forEach((k) => { mix[k] += m[k]; });
     if (mix.input + mix.output + mix.cacheRead + mix.cacheWrite > 0) out.set(model, mix);
+  }
+  return out;
+}
+
+/** One model's hour buckets in [from, now], each with when it starts, one the window only partly covers counted for that part. */
+function hourMixes(s: { h?: Record<string, unknown[]> }, from: number, now: number): Array<[number, TokenMix]> {
+  const out: Array<[number, TokenMix]> = [];
+  for (const [h, v] of Object.entries(s.h ?? {})) {
+    const start = Date.parse(`${h}:00:00Z`);
+    if (!(start + HOUR > from) || start > now) continue;
+    const span = Math.max(1, Math.min(HOUR, now - start));
+    const w = start >= from ? 1 : Math.max(0, Math.min(1, (start + span - from) / span));
+    const mix: TokenMix = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+    HOUR_FIELDS.forEach((f, i) => { if (f in mix) mix[f as keyof TokenMix] += (Number(v[i]) || 0) * w; });
+    // An hour of calls that carried no tokens (all failed) prices nothing and leaves nothing out.
+    if (mix.input + mix.output + mix.cacheRead + mix.cacheWrite > 0) out.push([start, mix]);
   }
   return out;
 }
@@ -239,6 +259,28 @@ export interface WindowPricing {
   unpriced?: boolean;
 }
 
+type SourceKind = { kind?: string; vendor?: string } | undefined;
+/**
+ * The source an agent's container ran at an instant: before each change of
+ * the source it runs, the one that change left (applied_source_changes; with
+ * none kept, its record's last change), after the last the one it runs now;
+ * a deleted one as its record was kept. An hour a change falls in is the old
+ * source's, as the usage pass files a rewritten hour's slots. What a window's
+ * spend is split by: its current source made a plan's earlier hours API
+ * spend after a move to a key or a local model (HB-1180).
+ */
+export function sourceTimeline(store: Store, a: Agent): { at: (ms: number) => SourceKind; of: (profileId: string) => SourceKind } {
+  const changes = store.appliedSourceChanges(a.id).map((c) => ({ at: Date.parse(c.at), from: c.from }));
+  if (!changes.length && a.appliedProfileAt && a.appliedProfilePrevId) changes.push({ at: Date.parse(a.appliedProfileAt), from: a.appliedProfilePrevId });
+  const current = a.appliedProfileId ?? a.aiProfileId;
+  const seen = new Map<string, SourceKind>();
+  const of = (id: string): SourceKind => {
+    if (!seen.has(id)) seen.set(id, store.getAIProfile(id) ?? store.formerAIProfile(id));
+    return seen.get(id);
+  };
+  return { at: (ms) => of(changes.find((c) => ms < c.at)?.from ?? current), of };
+}
+
 export function windowPricing(store: Store, viewer: string, hours: number, now = Date.now()): WindowPricing {
   const agents = store.listAgents(viewer).filter((a) => a.state !== 'DELETED' && a.state !== 'DELETING');
   const profiles = store.modelProfiles(agents.map((a) => a.id)) as Map<string, { profile: StoredProfile; at: string }>;
@@ -248,24 +290,31 @@ export function windowPricing(store: Store, viewer: string, hours: number, now =
   const per: Record<string, { cost: number; parts: CostParts }> = {};
   let unpriced = false;
   for (const a of agents) {
-    const src = store.getAIProfile(a.aiProfileId);
     // On a local model now: what it spent on a priced one before still
     // counts, as its badge and its budget count it. Left out whole, a switch
     // to a local source took its earlier spend off the chart (HB-0955). Its
-    // local model's tokens have no price, and are not "unpriced".
-    const local = src?.vendor === 'local';
+    // local model's tokens have no price, and are not "unpriced". Each hour
+    // is billed by the source it ran on (sourceTimeline, HB-1180).
+    const sources = sourceTimeline(store, a);
     const ap = noParts();
-    const mixes = [...mixesInWindow(profiles.get(a.id)?.profile, hours, now)].concat((practice.get(a.id) ?? []).map((r) => [r.model, r.mix] as [string, TokenMix]));
-    for (const [model, mix] of mixes) {
+    let onPlan = 0;
+    const mixes: Array<[string, TokenMix, SourceKind]> = [];
+    for (const [model, s] of Object.entries(profiles.get(a.id)?.profile?.models ?? {})) {
+      for (const [at, mix] of hourMixes(s, now - hours * HOUR, now)) mixes.push([model, mix, sources.at(at)]);
+    }
+    for (const r of practice.get(a.id) ?? []) mixes.push([r.model, r.mix, r.profileId ? sources.of(r.profileId) : sources.at(r.at)]);
+    for (const [model, mix, src] of mixes) {
       const pp = priceParts(model, mix);
-      if (!pp) { if (!local && !LOCAL_MODEL.test(model)) unpriced = true; continue; }
+      if (!pp) { if (src?.vendor !== 'local' && !LOCAL_MODEL.test(model)) unpriced = true; continue; }
       (Object.keys(ap) as Array<keyof CostParts>).forEach((k) => { ap[k] += pp[k]; });
-      byModel.set(model.replace(/^.*\//, ''), (byModel.get(model.replace(/^.*\//, '')) ?? 0) + pp.input + pp.cacheWrite + pp.cacheRead + pp.output);
+      const c = pp.input + pp.cacheWrite + pp.cacheRead + pp.output;
+      byModel.set(model.replace(/^.*\//, ''), (byModel.get(model.replace(/^.*\//, '')) ?? 0) + c);
+      if (src?.kind === 'subscription') onPlan += c;
     }
     const cost = ap.input + ap.cacheWrite + ap.cacheRead + ap.output;
     if (!(cost > 0)) continue;
     (Object.keys(parts) as Array<keyof CostParts>).forEach((k) => { parts[k] += ap[k]; });
-    if (src?.kind === 'subscription') billing.plan += cost; else billing.api += cost;
+    billing.plan += onPlan; billing.api += cost - onPlan;
     per[a.id] = { cost: r2(cost), parts: { input: r2(ap.input), cacheWrite: r2(ap.cacheWrite), cacheRead: r2(ap.cacheRead), output: r2(ap.output) } };
   }
   const total = parts.input + parts.cacheWrite + parts.cacheRead + parts.output;
@@ -391,7 +440,8 @@ export function spendSeries(store: Store, viewer: string, range: SpendRange, opt
   // one before (HB-0955): only that; its local tokens are not charted, as
   // they never were, nor is it offered as a choice with nothing to show.
   const mine = store.listAgents(viewer).filter((a) => a.state !== 'DELETED' && a.state !== 'DELETING');
-  const isLocal = (a: { aiProfileId: string }) => store.getAIProfile(a.aiProfileId)?.vendor === 'local';
+  // On a local model now: the source its container runs, during a switch of source too (HB-1498).
+  const isLocal = (a: Agent) => sourceRecord(store, runsOnId(a))?.vendor === 'local';
   const picked = opts.agentId ? new Set([opts.agentId]) : opts.agentIds?.length ? new Set(opts.agentIds) : undefined;
   // One AI source (Settings → AI): the agents on it NOW. Spend is kept per agent and model, not per source,
   // so an agent that switched sources brings its earlier spend with it (rare; the panel says "agents on it now").
@@ -402,10 +452,11 @@ export function spendSeries(store: Store, viewer: string, range: SpendRange, opt
   let plan = 0, all = 0, unpricedTokens = 0;
   const byModel = new Map<string, number>(), perAgent = new Map<string, number>(), unpricedModels = new Set<string>();
   for (const a of mine) {
-    const src = store.getAIProfile(a.aiProfileId);
-    const local = src?.vendor === 'local';
+    // Each hour by the source it ran on (HB-1180).
+    const sources = sourceTimeline(store, a);
     const into = onSource(a) && (!picked || picked.has(a.id));
-    const put = (model: string, at: number, mix: TokenMix) => {
+    const put = (model: string, at: number, mix: TokenMix, src = sources.at(at)) => {
+      const local = src?.vendor === 'local';
       const b = out[slice(at)]!;
       const pp = priceParts(model, mix);
       if (local && !pp) return;
@@ -435,7 +486,7 @@ export function spendSeries(store: Store, viewer: string, range: SpendRange, opt
         put(model, at, mix);
       }
     }
-    for (const r of practice.get(a.id) ?? []) put(r.model, r.at, r.mix);
+    for (const r of practice.get(a.id) ?? []) put(r.model, r.at, r.mix, r.profileId ? sources.of(r.profileId) : sources.at(r.at));
   }
   // The calls refused (rate-limited) in each slice. A source's chart: everyone's who draws on it, since they
   // share its limit (counts only); it replaced the separate requests chart in Settings → AI (2026-10-07).

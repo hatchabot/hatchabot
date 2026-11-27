@@ -1,7 +1,8 @@
+import { createHash } from 'node:crypto';
 import type { Agent } from '../../domain/types.js';
 import { SecretNotFoundError } from '../../secrets/secretStore.js';
-import type { ConnectionCleanup } from '../../store/store.js';
-import { materializeConnection, offAgainIfDetached, removeQueuedNow, revokeGoogleToken, sameGoogleGrant, withConnectionLock, withGoogleGrantTurn, withVaultTurn } from './googleConnections.js';
+import { REMOVED_OWNER, type ConnectionCleanup } from '../../store/store.js';
+import { COPY_NOT_DELETED, materializeConnection, offAgainIfDetached, removeQueuedNow, revokeGoogleToken, sameGoogleGrant, withConnectionLock, withGoogleGrantTurn, withVaultTurn } from './googleConnections.js';
 import type { GoogleDeps, GoogleHelpers } from './connectionsAndAccess.js';
 
 /**
@@ -20,15 +21,26 @@ import type { GoogleDeps, GoogleHelpers } from './connectionsAndAccess.js';
  * takes the caller's account id.
  */
 export interface ConnectionVault {
-  /** The caller's connections, with where each one reaches and who still holds the old client secret. */
-  list(ownerId: string): Promise<{ connections: Array<Record<string, unknown>> }>;
+  /**
+   * The caller's connections, with where each one reaches and who still
+   * holds the old client secret; and the access of their deleted ones still
+   * being ended at Google, or given up for them to remove by hand (`ending`,
+   * HB-1336).
+   */
+  list(ownerId: string): Promise<{ connections: Array<Record<string, unknown>>; ending: EndingAccess[] }>;
   /**
    * A connection of the caller's deleted: off every agent first, then revoked
    * at Google, then out of the vault. Undefined: not the caller's.
    * `connectedAgain`: the account was connected again while this ran; it is
    * off its agents, and the newer consent stays in the vault.
+   * `stillEnding`: Google did not confirm ending its token (or it was not
+   * asked, its token unreadable); the pass tries again, and the Connections
+   * page lists it (HB-1336). Not when Google's part is done and only the
+   * secret store kept Hatchabot's copy: the page lists that as such.
    */
-  remove(connectionId: string, ownerId: string): Promise<{ removed: true; pendingOn: number } | { removed: false; connectedAgain: true; pendingOn: number } | undefined>;
+  remove(connectionId: string, ownerId: string): Promise<{ removed: true; pendingOn: number; stillEnding?: true } | { removed: false; connectedAgain: true; pendingOn: number } | undefined>;
+  /** A notice of access given up (`ending`, its `id`) marked done by its owner. False: no such notice of theirs. */
+  dismissEnding(ownerId: string, id: string): boolean;
   /**
    * Attach one of the caller's connections to their agent: live now when it
    * runs. Null: no such connection (or it went meanwhile). `agentGone`: the
@@ -59,6 +71,24 @@ export interface ConnectionVault {
   stop(): void;
 }
 
+/**
+ * A deleted connection's access still being ended at Google, as the
+ * Connections page lists it (HB-1336): never its token or its secret ref.
+ * `givenUpAt`: the pass stopped asking, deleted the token, and its owner is
+ * to remove the access by hand; listed until they mark it done (`id`).
+ */
+export interface EndingAccess {
+  id: string; email: string; since: string; tries: number; lastTriedAt: string | null; lastAnswer: string | null; givenUpAt: string | null;
+  /** Not a deleted connection's: the token a reconnect with another Google Cloud project's client replaced (HB-1396). */
+  replaced?: true;
+  /** Google's part is done (revoked, gone already, or kept for another connection's grant); only Hatchabot's copy is left, which the secret store kept. */
+  copyLeft?: true;
+}
+/** The id the page names a cleanup by: not its secret ref. */
+const endingId = (secretRef: string) => createHash('sha256').update(secretRef).digest('hex').slice(0, 16);
+/** A cleanup of the token a reconnect replaced (googleClient.ts, link: `<ref>/replaced/<n>`), not of a deleted connection's. */
+const replacedToken = (secretRef: string) => secretRef.includes('/replaced/');
+
 /** How long the pass asks Google to revoke a deleted connection's token before it stops, deletes it, and tells its owner (HB-1203). */
 export const REVOKE_TRIED_FOR_DAYS = 7;
 const DAY_MS = 24 * 60 * 60_000;
@@ -82,14 +112,24 @@ export function createConnectionVault(deps: GoogleDeps, helpers: GoogleHelpers):
    * why, for the pass: the connection's row is gone, so nothing else
    * names the token any more (HB-0901). True: it is gone.
    */
-  const dropToken = async (c: ConnectionCleanup): Promise<boolean> => {
+  const dropToken = async (c: ConnectionCleanup, gaveUp?: string): Promise<boolean> => {
     try {
       await secrets.delete(c.secretRef);
     } catch (err) {
-      store.connectionCleanupFailed(c.secretRef, `the secret store did not delete it: ${String((err as Error)?.message ?? err)}`);
+      const why = String((err as Error)?.message ?? err);
+      // COPY_NOT_DELETED leads only where Google's part is done: on the way to
+      // giving up, Google never confirmed it, and the page must not say it did
+      // (HB-1336 review). The pass tries it again either way.
+      store.connectionCleanupFailed(c.secretRef, gaveUp !== undefined
+        ? `Google did not revoke it: ${gaveUp}; the secret store did not delete its copy: ${why}`
+        : `${COPY_NOT_DELETED}: ${why}`);
       return false;
     }
-    store.settleConnectionCleanup(c.secretRef);
+    // Given up: the record stays, as its owner's notice to remove the access
+    // by hand, shown on the Connections page until they mark it done (HB-1336);
+    // not when their account was removed, as nobody is left to read it.
+    if (gaveUp !== undefined && c.ownerId !== REMOVED_OWNER) store.giveUpConnectionCleanup(c.secretRef, `Google did not revoke it: ${gaveUp}`);
+    else store.settleConnectionCleanup(c.secretRef);
     return true;
   };
 
@@ -129,7 +169,7 @@ export function createConnectionVault(deps: GoogleDeps, helpers: GoogleHelpers):
     if (r) {
       if (!r.ended) {
         if (opts.mayGiveUp && Date.now() - Date.parse(c.createdAt) >= REVOKE_TRIED_FOR_MS && c.tries + 1 >= REVOKE_TRIES_AT_LEAST) {
-          return { done: await dropToken(c), revoked: false, gaveUp: r.error, shared };
+          return { done: await dropToken(c, r.error), revoked: false, gaveUp: r.error, shared };
         }
         store.connectionCleanupFailed(c.secretRef, `Google did not revoke it: ${r.error}`);
         return { done: false, revoked: false, shared };
@@ -151,7 +191,7 @@ export function createConnectionVault(deps: GoogleDeps, helpers: GoogleHelpers):
         const out = await withVaultTurn(listed.ownerId, async () => {
           const c = store.connectionCleanup(listed.secretRef);
           // Its tries as they are now: a delete's own try may have counted one since the listing.
-          return c ? { ...(await endToken(c, { mayGiveUp: true })), tries: c.tries + 1 } : undefined;
+          return c ? { ...(await endToken(c, { mayGiveUp: true })), tries: c.tries + 1, ownerRemoved: c.ownerId === REMOVED_OWNER } : undefined;
         });
         if (out?.done && out.gaveUp !== undefined) {
           ended++;
@@ -159,13 +199,19 @@ export function createConnectionVault(deps: GoogleDeps, helpers: GoogleHelpers):
           // a message may take a while to send (HB-1203).
           // What was done, as it was: how many times, over how long.
           const days = Math.floor((Date.now() - Date.parse(listed.createdAt)) / DAY_MS);
-          const told = await Promise.resolve()
-            .then(() => deps.tellOwner(listed.ownerId, `Hatchabot asked Google ${out.tries} times over ${days} days to end its access to ${listed.email}, and Google never confirmed it. It has stopped asking and deleted its copy of the token. To be sure the access is gone, remove it by hand: in that Google Account, Security → Your connections to third-party apps & services.`))
+          const replaced = replacedToken(listed.secretRef);
+          const access = replaced
+            ? `the access ${listed.email} gave the OAuth client Hatchabot used before it was connected again`
+            : `its access to ${listed.email}`;
+          const where = replaced ? ' (the app of that earlier client, not the one connected now)' : '';
+          // An account removed since has nobody to tell.
+          const told = out.ownerRemoved ? false : await Promise.resolve()
+            .then(() => deps.tellOwner(listed.ownerId, `Hatchabot asked Google ${out.tries} times over ${days} days to end ${access}, and Google never confirmed it. It has stopped asking and deleted its copy of the token. To be sure the access is gone, remove it by hand: in that Google Account, Security → Your connections to third-party apps & services${where}. It is listed in Hatchabot under ⚙ Settings → Connections until you mark it done.`))
             .catch(() => false);
-          trace()('connection.revoke_given_up', { email: listed.email, since: listed.createdAt, tries: out.tries, days, error: out.gaveUp, told });
+          trace()('connection.revoke_given_up', { email: listed.email, since: listed.createdAt, tries: out.tries, days, error: out.gaveUp, told, ...(replaced ? { replaced } : {}), ...(out.ownerRemoved ? { ownerRemoved: true } : {}) });
         } else if (out?.done) {
           ended++;
-          trace()('connection.token_ended', { email: listed.email, revoked: out.revoked, ...(out.alreadyGone ? { alreadyGone: true } : {}), keptForOtherAccount: out.shared, tries: out.tries });
+          trace()('connection.token_ended', { email: listed.email, revoked: out.revoked, ...(out.alreadyGone ? { alreadyGone: true } : {}), keptForOtherAccount: out.shared, tries: out.tries, ...(replacedToken(listed.secretRef) ? { replaced: true } : {}) });
         }
       }
     } finally { cleanupPassRunning = false; }
@@ -295,7 +341,19 @@ export function createConnectionVault(deps: GoogleDeps, helpers: GoogleHelpers):
         const needsReconnect = !!client && !!clientId && clientId !== client.clientId;
         return { ...c, attachedTo, staleCount: attachedTo.filter((x) => x.stale).length, secretPendingCount: needsReconnect ? 0 : attachedTo.filter((x) => x.secretPending).length, needsReconnect };
       }),
+      // Deleted ones whose access is still being ended, or was given up: shown
+      // nowhere but the server log and a chat message before (HB-1336).
+      ending: store.connectionCleanupsOf(ownerId).map((c) => ({
+        id: endingId(c.secretRef), email: c.email, since: c.createdAt, tries: c.tries, lastTriedAt: c.triedAt, lastAnswer: c.error, givenUpAt: c.givenUpAt,
+        ...(replacedToken(c.secretRef) ? { replaced: true as const } : {}),
+        ...(!c.givenUpAt && c.error?.startsWith(COPY_NOT_DELETED) ? { copyLeft: true as const } : {}),
+      })),
     };
+  };
+
+  const dismissEnding: ConnectionVault['dismissEnding'] = (ownerId, id) => {
+    const c = store.connectionCleanupsOf(ownerId).find((x) => endingId(x.secretRef) === id);
+    return !!c && store.dismissGivenUpCleanup(ownerId, c.secretRef);
   };
 
   /** Connections whose DELETE is under way: an attach refuses them. */
@@ -319,7 +377,7 @@ export function createConnectionVault(deps: GoogleDeps, helpers: GoogleHelpers):
     let alreadyGone = false;
     let shared = false;
     let connectedAgain = false;
-    let tokenLeft = false;
+    let tokenLeft = false, stillEnding = false;
     try {
       const holders = store.listAgentsForConnection(conn.id)
         .map((aid) => store.getAgent(aid))
@@ -367,6 +425,8 @@ export function createConnectionVault(deps: GoogleDeps, helpers: GoogleHelpers):
           alreadyGone = !!out.alreadyGone;
           shared = out.shared;
           tokenLeft = !out.done;
+          // Google's part done, only the copy kept: not "not confirmed at Google" (HB-1336 review).
+          stillEnding = tokenLeft && !out.revoked && !out.alreadyGone && !out.shared;
         }
         return false;
       });
@@ -374,7 +434,7 @@ export function createConnectionVault(deps: GoogleDeps, helpers: GoogleHelpers):
       connectionsDeleting.delete(conn.id);
     }
     trace()('connection.unlinked', { email: conn.email, revoked, ...(alreadyGone ? { alreadyGone } : {}), keptForOtherAccount: shared, pendingOn, ...(connectedAgain ? { connectedAgain } : {}), ...(tokenLeft ? { tokenLeft } : {}) });
-    return connectedAgain ? { removed: false, connectedAgain: true, pendingOn } : { removed: true, pendingOn };
+    return connectedAgain ? { removed: false, connectedAgain: true, pendingOn } : { removed: true, pendingOn, ...(stillEnding ? { stillEnding: true as const } : {}) };
   };
 
   /** Attach a vault connection to an agent — live immediately when RUNNING,
@@ -437,7 +497,7 @@ export function createConnectionVault(deps: GoogleDeps, helpers: GoogleHelpers):
   };
 
   return {
-    list, remove, attach, detach, disconnect, accountsIn, retryCleanups,
+    list, remove, dismissEnding, attach, detach, disconnect, accountsIn, retryCleanups,
     stop: () => { if (cleanupTimer) clearInterval(cleanupTimer); cleanupTimer = undefined; },
   };
 }

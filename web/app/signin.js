@@ -806,12 +806,19 @@ async function loadAccounts() {
   // own password and recovery code: told apart by whether it answers (HB-1138).
   const withGoogle = appConfig.authMode === 'identity' && appConfig.localAccounts;
   if (appConfig.authMode !== 'accounts' && !withGoogle) return;
-  let me;
-  if (withGoogle) { try { me = await api('/v1/local-accounts/me'); } catch { me = undefined; } }
-  const googleOwner = withGoogle && !me;
-  if (!googleOwner) {
+  let me, meErr;
+  const readMe = async () => { try { me = await api('/v1/local-accounts/me'); } catch (e) { meErr = e; } };
+  if (withGoogle) await readMe();
+  // Only "no such account" (404) is the Google owner: a read that failed (the network, a 5xx) took a password
+  // member for them, who then saw neither section (HB-1281).
+  const googleOwner = withGoogle && !me && meErr?.status === 404;
+  // The Google owner: no section of a password account's, nor what a read that failed said in it before (HB-1281 review).
+  if (googleOwner) { $('acctSelf').hidden = true; $('recoveryStatus').textContent = ''; }
+  else {
     $('acctSelf').hidden = false;
-    if (!me) { try { me = await api('/v1/local-accounts/me'); } catch { return; } }
+    if (!me && !withGoogle) await readMe();
+    // Not read: their own section says so, and nobody else's accounts are listed for them.
+    if (!me) { $('recoveryStatus').textContent = `Your account could not be read just now: ${meErr?.message ?? 'no answer'}. Open this again in a moment.`; $('acctAdmin').hidden = true; return; }
     renderRecoveryStatus(me.recoveryCodeCreatedAt);
     if (!me.hostOwner) { $('acctAdmin').hidden = true; return; }
     $('acctAdmin').hidden = false;
@@ -1224,6 +1231,11 @@ function pageClearLast(next = '') {
     if (el.closest('#loginDlg, #sfDlg') || /^(checkbox|radio|hidden|button|submit|reset|file|range|color)$/i.test(el.type)) continue;
     el.value = el.type === 'password' ? '' : el.defaultValue;
   }
+  // The setup guide's menus too, back to what it drew, and what it said to the last person (its error lines), which a
+  // redraw with the same steps kept until the reload (HB-1305): drawn fresh at its next paint, with nothing of theirs carried.
+  for (const el of $('setup').querySelectorAll('select')) el.value = ([...el.options].find((o) => o.defaultSelected) ?? el.options[0])?.value ?? '';
+  for (const el of $('setup').querySelectorAll('.err')) el.textContent = '';
+  setupDrawn = null;
 }
 /**
  * A sign-in landed. Who it is comes first, so nothing of another account's is drawn for them, and what the path shows next is not closed.

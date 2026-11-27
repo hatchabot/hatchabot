@@ -740,6 +740,27 @@ describe('the start an adopt owes is on its record until it has run, so a restar
     w.routes!.stop();
   });
 
+  it('started some other way after a restart left its start owed, then its machine drained: the boot pass leaves it stopped, and a cut-off download\'s start too (HB-1517 review)', async () => {
+    const r = await world();
+    const op = await held(r);
+    setStepHookForTests((_op, k) => { if (k === '#start-owed') throw new SimulatedCrash(); });
+    await recover(r.w, op.id, 'adopt-again').catch(() => undefined);
+    const w = await servingBeforeItsPass(r.w, r.id);
+    await w.provider.start(r.ref);
+    w.store.setAgentState(r.id, 'RUNNING');
+    // A download a restart cut off would start it again too (HB-1479).
+    w.store.setAgentHold(r.id, 'download-stop', 'a-download');
+    // Was: the drain stopped it and settled nothing, so the boot pass started it again.
+    expect((await w.f.inject({ method: 'POST', url: '/v1/hosts/h1/drain', headers: as() })).json()).toMatchObject({ stopped: 1 });
+    expect(owes(w, r.id)).toBe(false);
+    expect(w.store.agentHold(r.id, 'download-stop')).toBeUndefined();
+    await w.routes!.resumeOperations();
+    expect(w.store.getAgent(r.id)!.state).toBe('STOPPED');
+    expect(await r.phase()).toBe('stopped');
+    expect(adoptOp(w, r.id).outcome).toMatch(/Its machine has been drained since, so it stays stopped\.$/);
+    w.routes!.stop();
+  });
+
   it('its owner stops it just as the boot pass comes to its start (the pass had read it as owed): not started', async () => {
     const r = await world();
     const op = await held(r);

@@ -89,11 +89,18 @@ then explicitly replaces and rolls back the file to its exact original bytes.
 One ordinary-language request under forced Code Mode must
 invoke a local fixture described only in the skill and use the fresh receipt it
 returns. A second AI run exercises the isolated practice API and must report both
-skill and sample reads. Its tokens must then be in the agent's usage exactly once:
-the agent's total rises by what Practice recorded from the practice's own
-folder, which the usage sampler never reads, not by nothing and not by twice
-that (HB-0933). A call of the agent's own meanwhile (a heartbeat, say) may add
-to the rise, so it must be at least the practice's tokens and under twice them.
+skill and sample reads. Its tokens must then be in the agent's usage exactly once
+(HB-0933): Practice recorded it as one run, with its calls, from its transcript
+in the practice's own folder, which the usage sampler never reads (a record of
+only what the run reported holds no calls, and fails); the agent's total is its
+own models' tokens plus its practice's, once; and on each model the practice ran
+on, the agent's own calls rose by fewer than the practice made there, as a copy
+of the run in its own transcripts would bring all of them. Each part is read
+apart in the usage answer, so a call of the agent's own meanwhile (a heartbeat,
+say) on another model, or fewer calls on the practice's model than it made
+there, is told from a copy whatever its tokens (HB-1249). As many calls of its
+own on that model as the practice made (one heartbeat beside a one-call
+practice) read as a copy: the failure says so and asks for another run.
 The runner
 checks actual invocation evidence and removes only its own agent, including on
 failure. Requests, commands and cleanup have time limits.

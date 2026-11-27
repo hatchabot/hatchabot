@@ -20,8 +20,9 @@ export type ImageCopy = {
  *
  * Its state, sorted (HB-0809):
  *  - `imageCopies`: the copy under way or last made per runner (a cache: the
- *    bytes copied so far). The copy is an operation on disk, so a restart in
- *    the middle reads "interrupted: Install again". No timer.
+ *    bytes copied so far, and the stop of the one under way). The copy is an
+ *    operation on disk, so a restart in the middle reads "interrupted:
+ *    Install again". No timer.
  *
  * Nothing here knows about HTTP: a route checks who is asking (the machine's
  * owner), asks this, and words the answer.
@@ -31,8 +32,14 @@ export interface ImageInstalls {
   status(hostId: string): Record<string, unknown>;
   /** Start a copy to this runner, or the one under way: one per runner. `finished` never rejects. */
   start(host: Host, dockerHost: string, requestedBy: string): { job: ImageCopy; finished: Promise<ImageCopy> };
-  /** A copy to this runner is under way in this process: its removal waits for it (HB-1025). */
+  /** A copy to this runner is under way in this process: its removal waits for it (HB-1025), or stops it (`stop`). */
   underWay(hostId: string): boolean;
+  /**
+   * Stop the copy under way to this runner (Remove anyway, HB-1254): its docker
+   * is killed and its operation fails "Stopped: <why>". Resolves once it has
+   * ended; at once when none is under way.
+   */
+  stop(hostId: string, why: string): Promise<void>;
 }
 
 /** What the copies need from the process they run in. Functions only, so a test hands them fakes. */
@@ -53,7 +60,7 @@ export function createImageInstalls(deps: ImageInstallsDeps): ImageInstalls {
 
   // The Retry a copy that failed offers (operations.ts).
   const INSTALL_AGAIN = { actions: [{ action: 'install-again', label: 'Install again' }], recommended: 'install-again' };
-  const imageCopies = new Map<string, { job: ImageCopy; finished: Promise<ImageCopy> }>();
+  const imageCopies = new Map<string, { job: ImageCopy; finished: Promise<ImageCopy>; stopper: AbortController }>();
 
   const status: ImageInstalls['status'] = (hostId) => {
     const live = imageCopies.get(hostId)?.job;
@@ -68,6 +75,8 @@ export function createImageInstalls(deps: ImageInstallsDeps): ImageInstalls {
       ...(op.status === 'succeeded' ? {} : { error: op.outcome ?? 'The image copy was interrupted by a restart.' }),
       // How the image installed differs, kept whole in the record (the outcome is cut at 600; HB-1189 review).
       ...(op.status === 'succeeded' && typeof op.params?.differs === 'string' ? { differs: op.params.differs } : {}),
+      // The published image a runner on another CPU pulled, as the copy in memory says it (HB-1451).
+      ...(op.status === 'succeeded' && typeof op.params?.pulled === 'string' ? { pulled: op.params.pulled } : {}),
       ...(op.finishedAt ? { finishedAt: op.finishedAt } : {}),
       interrupted: op.status === 'interrupted' || (op.status === 'running' && op.bootId !== currentBootId()) || /interrupted by a restart/.test(op.outcome ?? '') || undefined,
       operation: op.id,
@@ -80,6 +89,10 @@ export function createImageInstalls(deps: ImageInstallsDeps): ImageInstalls {
       const image = process.env.HATCHABOT_IMAGE ?? 'hatchabot-runtime:latest';
       const local = store.localHostId();
       const job: ImageCopy = { startedAt: new Date().toISOString(), bytes: 0, done: false };
+      // Its stop (Remove anyway): the install's docker killed, wherever it is (HB-1254).
+      const stopper = new AbortController();
+      const { signal } = stopper;
+      const stoppedWith = () => `Stopped: ${String(signal.reason)}`;
       // The copy is this runner's from here, before anything is awaited: two
       // requests at once (a double click, two tabs) both found none and started
       // two multi-GB copies (audit, 2026-10-22).
@@ -117,11 +130,20 @@ export function createImageInstalls(deps: ImageInstallsDeps): ImageInstalls {
         const found = version && /^\d{4}\.\d+\.\d+(?:-\d+)?$/.test(version) ? await publishedRuntimeImage(version) : undefined;
         const published = found && !('problem' in found) ? found : undefined;
         const unpublished = found && 'problem' in found ? found.problem : undefined;
-        const r = await installRuntimeImage(dockerHost, { image, total: job.total, published, unpublished, extraPackages, extrasUnread, buildInputs: row?.buildInputs, onProgress: (p) => { job.bytes = p.bytes; } });
+        const r = signal.aborted ? { ok: false, stopped: true as const, error: stoppedWith() }
+          : await installRuntimeImage(dockerHost, { image, total: job.total, published, unpublished, extraPackages, extrasUnread, buildInputs: row?.buildInputs, signal, onProgress: (p) => { job.bytes = p.bytes; } });
+        if (!r.ok && (r.stopped || signal.aborted)) {
+          // Stopped, not failed: no "Install again" (the runner is going).
+          const error = stoppedWith();
+          Object.assign(job, { done: true, ok: false, error, finishedAt: new Date().toISOString() });
+          trace()('host.image_copy_failed', { host: host.id, bytes: job.bytes, stopped: true, error });
+          op.fail(error);
+          return job;
+        }
         const differs = r.ok && r.differs ? installedDiffers(r.differs) : undefined;
         Object.assign(job, { done: true, ok: r.ok, error: r.ok ? undefined : `Image install failed: ${r.error}`, finishedAt: new Date().toISOString(), ...(r.pulled ? { pulled: r.pulled } : {}), ...(differs ? { differs } : {}) });
         trace()(r.ok ? 'host.image_copied' : 'host.image_copy_failed', { host: host.id, bytes: job.bytes, ...(r.pulled ? { pulled: r.pulled } : {}), ...(r.differs ? { differs: r.differs } : {}), ...(r.ok ? {} : { error: r.error }) });
-        if (differs) store.updateOperation(op.id, { params: { ...op.get().params, differs } });
+        if (differs || r.pulled) store.updateOperation(op.id, { params: { ...op.get().params, ...(differs ? { differs } : {}), ...(r.pulled ? { pulled: r.pulled } : {}) } });
         if (r.ok) op.done(r.pulled ? `${host.name} pulled the published image ${r.pulled}${extraPackages.length ? `, with this machine's extra packages (${extraPackages.join(', ')}) built onto it` : ''}.${differs ? ` ${differs}` : ''}` : `The runtime image was copied to ${host.name} (${(job.bytes / 1e9).toFixed(1)} GB).`);
         else op.fail(job.error ?? 'Image install failed.', INSTALL_AGAIN);
         return job;
@@ -130,7 +152,7 @@ export function createImageInstalls(deps: ImageInstallsDeps): ImageInstalls {
         Object.assign(job, { done: true, ok: false, error: `Image install failed: ${e instanceof Error ? e.message : String(e)}`, finishedAt: new Date().toISOString() });
         return job;
       });
-      copy = { job, finished };
+      copy = { job, finished, stopper };
       imageCopies.set(host.id, copy);
     }
     return copy;
@@ -141,5 +163,12 @@ export function createImageInstalls(deps: ImageInstallsDeps): ImageInstalls {
     return !!copy && !copy.job.done;
   };
 
-  return { status, start, underWay };
+  const stop: ImageInstalls['stop'] = async (hostId, why) => {
+    const copy = imageCopies.get(hostId);
+    if (!copy || copy.job.done) return;
+    copy.stopper.abort(why);
+    await copy.finished;
+  };
+
+  return { status, start, underWay, stop };
 }

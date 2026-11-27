@@ -72,6 +72,8 @@ export const HOLDS_AFTER_ROLLBACK: Record<AgentHoldKind, { fate: 'drop' | 'keep'
   'first-contact': { fate: 'keep', why: 'a watch for a first message, bounded by the time it had left' },
   'embed-reindex': { fate: 'keep', why: 'a memory index to rebuild: late, harmless, and memory search stays paused without it' },
   'docs-sync': { fate: 'keep', why: 'the managed AGENTS.md sections to write again: late, harmless (it writes what the record says now), and needed' },
+  'download-stop': { fate: 'drop', why: 'served, it starts the agent: days late, a Stop by hand since would be undone' },
+  'knock-door': { fate: 'drop', why: 'served, it writes the agent\'s door open on its runtime: after a rollback it is left to the next build, which writes the door from the setting' },
 };
 /** The kinds a rollback lets go of (HOLDS_AFTER_ROLLBACK). */
 export const ROLLBACK_DROPS: readonly AgentHoldKind[] = (Object.keys(HOLDS_AFTER_ROLLBACK) as AgentHoldKind[]).filter((k) => HOLDS_AFTER_ROLLBACK[k].fate === 'drop');

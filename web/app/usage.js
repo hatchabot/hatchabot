@@ -65,6 +65,10 @@ const vendorLabel = v => v === 'local' ? 'Local' : v === 'google' ? 'Gemini' : '
 const sourceOptionLabel = p =>
   `${p.defaultSource ? '⭐ ' : ''}${esc(p.name)} — ${vendorLabel(p.vendor)}${p.mine === false ? ' (shared)' : ''}`;
 
+/** An Ollama model's name with its tag: one with none is its `:latest` (as localModelListed has it). */
+const ollamaTagged = (m) => (/:[^/]*$/.test(String(m)) ? String(m) : `${m}:latest`);
+/** Two Ollama model names for one model: a name with no tag is its `:latest`. */
+const sameOllamaModel = (a, b) => ollamaTagged(a) === ollamaTagged(b);
 // The default model: a dropdown when we know what the source offers, a text
 // box as a graceful fallback (models not loaded yet, or a source that can't
 // list them). The current default is always an option even if it's not in the
@@ -73,7 +77,10 @@ function defaultModelControl(p) {
   const avail = availableModels[p.id];
   const box = 'flex:1;min-width:0;padding:5px 8px;border:1px solid var(--line);border-radius:8px;background:var(--panel-2);color:var(--text);font-size:13px';
   if (Array.isArray(avail) && avail.length) {
-    const opts = [p.model, ...avail].filter((m, i, a) => m && a.indexOf(m) === i).sort(byModelName);
+    // A local source's model named with no tag is Ollama's `:latest` of it (localModelListed on the server): the list
+    // showed `llama3` and `llama3:latest` as two models (HB-1423). The one the source has set is the one kept.
+    const same = (m) => p.vendor === 'local' && p.model && m !== p.model && sameOllamaModel(m, p.model);
+    const opts = [p.model, ...avail].filter((m, i, a) => m && a.indexOf(m) === i && !same(m)).sort(byModelName);
     return `<select id="aiModel-${p.id}" ${onAction('change', 'renderExtras', [`${p.id}`])} style="${box}">
       ${opts.map(m => `<option value="${esc(m)}" ${m === p.model ? 'selected' : ''}>${esc(m)}</option>`).join('')}
     </select>`;
@@ -105,7 +112,7 @@ function sourceUsage(p) {
 function byModelName(a, b) { return String(a).localeCompare(String(b), 'en', { numeric: true }); }
 /** A model's own id, as the server's modelKey has it: no `anthropic/`, no date (claude-haiku-4-5-20251001 is claude-haiku-4-5). */
 function modelKeyOf(m) { return String(m).replace(/^[a-z-]+\//, '').replace(/-\d{8}$/, ''); }
-/** The most models a source lists, its default among them (the server's limit on PATCH /v1/ai-profiles/:id). */
+/** The most models a source lists, its default among them: the server's SOURCE_MODELS_MAX, which test/driftGuards.test.ts holds it to (HB-1341). */
 const MAX_SOURCE_MODELS = 16;
 // The fallback for a new source: covers the server's CURATED_ANTHROPIC_MODELS and never
 // claude-opus-5 (test/driftGuards.test.ts). A saved source lists what its runtime really serves.
@@ -473,9 +480,13 @@ function renderExtras(id) {
         style="border:none;background:none;cursor:pointer;color:var(--dim);font-size:16px;line-height:1;padding:0 3px">×</button>
     </span>`).join('');
 
-  // By the model, not its spelling: a dated id of a model already here is the same model (HB-0669).
-  const taken = new Set([dflt, ...chosen].map(modelKeyOf));
-  const opts = avail.filter(m => !taken.has(modelKeyOf(m))).sort(byModelName);
+  // By the model, not its spelling: a dated id of a model already here is the same model (HB-0669), and on a local
+  // source a name with no tag is its `:latest`, as the default-model list has it (sameOllamaModel, HB-1423): llama3:latest
+  // was offered beside a default of llama3 (HB-1526).
+  const local = profiles.find(x => x.id === id)?.vendor === 'local';
+  const keyOf = (m) => (local ? ollamaTagged(m) : modelKeyOf(m));
+  const taken = new Set([dflt, ...chosen].map(keyOf));
+  const opts = avail.filter((m, i) => !taken.has(keyOf(m)) && (!local || avail.findIndex(x => keyOf(x) === keyOf(m)) === i)).sort(byModelName);
   const ctrlStyle = 'font-size:12px;padding:4px 7px;border:1px solid var(--line);border-radius:8px;background:var(--panel-2);color:var(--text)';
   let adder;
   if (1 + chosen.length >= MAX_SOURCE_MODELS) {
@@ -779,11 +790,23 @@ async function applyModelToSelected() {
     // A class that set another model comes off, as the bulk source switch says (faApply).
     if (r.classDetached) bits.push(`${r.classDetached} detached from a class`);
     if (r.classDetachPending) bits.push(`${r.classDetachPending} may leave a class once the class change under way is done`);
-    // Ticked, but its runtime is too old for the model on a Claude plan: kept on its own (HB-0232).
+    // Not switched, each for its own reason (HB-1342): ticked, but its runtime is too old for the
+    // model on a Claude plan (HB-0232); its model changed while this applied; or it joined the
+    // source while this applied, too late to be checked. Kept on its own model, all of them.
     const notSw = r.notSwitched || [];
-    if (notSw.length) bits.push(`not switched: ${notSw.map(x => x.name).join(', ')} (${notSw.length > 1 ? 'their runtimes are' : 'its runtime is'} too old for ${model} on a Claude plan — give ${notSw.length > 1 ? 'them' : 'it'} a newer runtime image first)`);
-    // Other accounts' agents that follow this shared source, held for the same reason: a count, never names (HB-0245).
-    const others = r.othersHeld ? ` ${r.othersHeld} agent${r.othersHeld > 1 ? 's' : ''} of other accounts that follow this source ${r.othersHeld > 1 ? 'were' : 'was'} kept on ${r.othersHeld > 1 ? 'their' : 'its'} model: ${r.othersHeld > 1 ? 'their runtimes are' : 'its runtime is'} too old for ${model} on a Claude plan.` : '';
+    const why = (w) => notSw.filter(x => (x.why === 'changed' || x.why === 'late' ? x.why : 'runtime') === w);
+    const names = (xs) => xs.map(x => x.name).join(', ');
+    const tooOld = why('runtime'), changed = why('changed'), late = why('late');
+    if (tooOld.length) bits.push(`not switched: ${names(tooOld)} (${tooOld.length > 1 ? 'their runtimes are' : 'its runtime is'} too old for ${model} on a Claude plan — give ${tooOld.length > 1 ? 'them' : 'it'} a newer runtime image first)`);
+    if (changed.length) bits.push(`not switched: ${names(changed)} (${changed.length > 1 ? 'their models were' : 'its model was'} changed while this applied, and that choice stands)`);
+    if (late.length) bits.push(`not switched: ${names(late)} (moved onto this source while this applied, too late to be checked: kept on what ${late.length > 1 ? 'they run' : 'it runs'})`);
+    // Other accounts' agents that follow this shared source, held: a count, never names (HB-0245);
+    // too old for the new default, or on it only since the last round of checks, never checked (HB-1342).
+    const oHeld = r.othersHeld || 0, oLate = Math.min(r.othersUnchecked || 0, oHeld), oOld = oHeld - oLate;
+    const oWhy = !oLate ? `${oHeld > 1 ? 'their runtimes are' : 'its runtime is'} too old for ${model} on a Claude plan`
+      : !oOld ? `${oHeld > 1 ? 'they' : 'it'} moved onto this source while this applied, too late to be checked`
+      : `${oOld} with a runtime too old for ${model} on a Claude plan, ${oLate} moved onto this source while this applied, too late to be checked`;
+    const others = oHeld ? ` ${oHeld} agent${oHeld > 1 ? 's' : ''} of other accounts that follow this source ${oHeld > 1 ? 'were' : 'was'} kept on ${oHeld > 1 ? 'their' : 'its'} model: ${oWhy}.` : '';
     const kept = keptLimitsList(r);
     toast((apply.length
       ? `Default is now ${model}${bits.length ? ' — ' + bits.join(', ') : ''}.`

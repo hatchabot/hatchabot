@@ -232,6 +232,31 @@ describe('a pairing store that is there but cannot be read (HB-1050)', () => {
     } finally { v.done(); }
   });
 
+  it('HB-1369: no store found (the table gone for a moment, a migration between its steps; or no knock yet) is said, and fails only a read that needs a store', async () => {
+    const v = volume();
+    const on2 = (dir: string, opts: { strict?: boolean; needsStore?: boolean }) => listPairingRequests(on(dir), 'ref', 'fambot', 'telegram', opts);
+    try {
+      // The table there, its rows gone, no file: nobody knocking, a store found.
+      v.exec('delete from channel_pairing_requests');
+      expect(JSON.parse(v.run(pairingListShell('telegram')))).toEqual({ version: 1, requests: [] });
+      expect(await on2(v.dir, { strict: true, needsStore: true })).toEqual([]);
+      // The table gone, no file: none found.
+      v.exec('drop table channel_pairing_requests');
+      expect(JSON.parse(v.run(pairingListShell('telegram')))).toEqual({ version: 1, requests: [], none: true });
+      await expect(on2(v.dir, { strict: true, needsStore: true })).rejects.toThrow(/could not be read \(no store of them was found\)/);
+      // Was: the same as nobody knocking for every read. Every other read still takes it so.
+      expect(await on2(v.dir, { strict: true })).toEqual([]);
+      expect(await on2(v.dir, {})).toEqual([]);
+      // A file read is a store found, though the table is gone.
+      fileOf(v.dir, []);
+      expect(JSON.parse(v.run(pairingListShell('telegram')))).toEqual({ version: 1, requests: [] });
+      // No database and no file: none found.
+      rmSync(join(v.dir, 'credentials', 'telegram-pairing.json'));
+      rmSync(join(v.dir, 'state', 'openclaw.sqlite'));
+      expect(JSON.parse(v.run(pairingListShell('telegram')))).toEqual({ version: 1, requests: [], none: true });
+    } finally { v.done(); }
+  });
+
   it('a file that cannot be read fails a strict read on 2026.7, and not beside the database\'s rows on 2026.9 (HB-0033)', async () => {
     const v = volume();
     try {

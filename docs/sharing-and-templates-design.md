@@ -50,7 +50,16 @@ already `chmod 600`.
   share. If the email isn't a known account yet, hold it keyed by email and bind
   `to_owner` on their first sign-in (same latch pattern as
   `adoptLocalOwnerData`).
-- `GET /v1/inbox` → shares addressed to me, `pending`.
+- `GET /v1/inbox` → shares addressed to me, `pending`, newest first, 50 a page
+  (HB-1167): `{ shares, total, next? }`; `?after=<next>` is the page after,
+  which starts at the last share's place (its `created_at` and `id`), not a
+  count, so shares sent or settled meanwhile neither repeat one nor skip one.
+  A place is a position, not a share: one made up in the right shape lists the
+  caller's own shares from it on, never another's (one that is not that shape
+  is a 400). Shares sent since the first page are above it, so the page, once
+  its last page is read with more still waiting, reads again from the top.
+  Both the page and the count are found on `shares_to_owner` and
+  `shares_to_email_nocase`, never by a scan (`INBOX_ROWS`).
 - `POST /v1/inbox/:id/accept` → run `importTemplate` on the blob (I become the
   owner, pick my bot the normal way), mark `accepted`.
 - `POST /v1/inbox/:id/dismiss`.

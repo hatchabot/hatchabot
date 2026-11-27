@@ -29,6 +29,10 @@ describe('which OpenClaw versions need the shared memory search service', () => 
     expect(needsSharedEmbedder('2026.7.33')).toBe(false);
     expect(needsSharedEmbedder('2026.8.0')).toBe(true);
     expect(needsSharedEmbedder('2026.9.4')).toBe(true);
-    expect(needsSharedEmbedder(undefined)).toBe(false);
+  });
+  it('no version known gives no answer: the caller decides, by the version the build will use (HB-1185)', () => {
+    expect(needsSharedEmbedder(undefined)).toBeUndefined();
+    expect(needsSharedEmbedder('')).toBeUndefined();
+    expect(needsSharedEmbedder('main')).toBeUndefined();
   });
 });

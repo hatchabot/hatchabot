@@ -79,7 +79,7 @@ const LIST = JSON.stringify({
 });
 const cli = (w: World, verb: string) => w.provider.execLog.filter((a) => a[0] === 'cron' && a[1] === verb);
 
-afterEach(() => { vi.useRealTimers(); clearBusy('a1'); });
+afterEach(() => { vi.useRealTimers(); });
 
 describe('a task added', () => {
   it('is added under the agent, quiet until the owner can be reached, and told on the phone when asked', async () => {

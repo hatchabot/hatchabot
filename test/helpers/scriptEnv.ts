@@ -1,4 +1,4 @@
-import { mkdirSync, readdirSync, symlinkSync } from 'node:fs';
+import { mkdirSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
@@ -58,4 +58,22 @@ export function systemPathWithout(dir: string, names: string[]): string {
     }
   }
   return dir;
+}
+
+/**
+ * One calendar day for every run of a script in a test: a `date` in `bin`
+ * that answers `+%F` with `day` (today's when not given), and passes every
+ * other call to the system's. backup-volumes.sh names its set by `date +%F`,
+ * and a test that ran it twice either side of midnight had its two runs
+ * write two sets, the second missing the first's archives (HB-1334).
+ */
+export function pinDay(bin: string, day?: string): string {
+  const d = day ?? (() => { const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-${String(n.getDate()).padStart(2, '0')}`; })();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) throw new Error(`pinDay: ${d} is not a day`);
+  writeFileSync(join(bin, 'date'), `#!/usr/bin/env bash
+[ "$*" = "+%F" ] && { echo ${d}; exit 0; }
+for d in /usr/bin/date /bin/date; do [ -x "$d" ] && exec "$d" "$@"; done
+exit 127
+`, { mode: 0o755 });
+  return d;
 }

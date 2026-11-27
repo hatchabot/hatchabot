@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -658,7 +658,16 @@ describe('scripts/uninstall.sh and the backups (review, 2026-10-09)', () => {
       // What a purge would do then, truly: no agent removed (it reads no database), not "remove its agents" (review of HB-1236).
       expect(bare.stdout).toContain('--purge would not read it: it would remove the service but none of its agents. Their containers and volumes would stay');
       expect(bare.stdout).not.toContain('would remove its agents');
+      // And what it would remove all the same: the data folder at its default path, the command's sign-in, the channel pin (HB-1383).
+      expect(bare.stdout).toContain(`  It would still remove ${w.repo}/data (unless a database is in it), ~/.config/hatchabot/env (the hatchabot command's sign-in), the channel pin.`);
       expect(existsSync(db), p).toBe(true);
+      // The shell's database in that folder keeps it (other_databases): the folder is not said to go (review of HB-1383).
+      const inData = join(w.repo, 'data', 'by-hand.sqlite');
+      renameSync(db, inData);
+      const kept = run(w, ['--purge', '--yes'], { [`${p}DB`]: inData });
+      expect(kept.status, p + kept.stdout + kept.stderr).toBe(2);
+      expect(kept.stdout).toContain("  It would still remove ~/.config/hatchabot/env (the hatchabot command's sign-in), the channel pin.");
+      renameSync(inData, db);
       renameSync(join(dirname(w.repo), 'env.kept'), join(w.repo, '.env'));
       // A shell naming no database that is there: the purge goes on as before.
       const gone = run(w, ['--purge', '--yes'], { [`${p}DB`]: join(elsewhere, 'not-there.sqlite') });
@@ -678,15 +687,40 @@ describe('scripts/uninstall.sh and the backups (review, 2026-10-09)', () => {
     expect(r.status, r.stdout + r.stderr).toBe(0);
     expect(r.stdout).toContain(`There was no database at ${w.repo}/data/hatchabot.sqlite, so none of this install's agents were found, and none were removed.`);
     expect(r.stdout).not.toContain('Its agents, volumes and database are gone');
+    // Nor did it say first that their volumes and the database would be deleted (HB-1383).
+    // Nor that the images and the network go, which their containers keep (review of HB-1383).
+    expect(r.stdout).toContain(`  MODE: --purge — there is no database at ${w.repo}/data/hatchabot.sqlite, so no agent of this install's is known, and\n        none of their volumes will be removed.\n        The runtime images and the docker network are KEPT: 1 container of another Hatchabot install on this machine may use them (with no database, this install's own agents count as another's).`);
+    expect(r.stdout).not.toContain('will be DELETED');
+    expect(r.stdout).not.toContain('agent volumes, the database');
     const calls = readFileSync(w.log, 'utf8');
     expect(calls).not.toMatch(/docker (rm|volume rm|rmi) /);
     expect(calls).not.toMatch(/docker network rm hatchabot-agents/);
     expect(r.stdout).toContain('kept the hatchabot-agents network');
+    // No database and no container here: the images and the network do go, and it says so.
+    const bare = purgeWorld();
+    rmSync(join(bare.repo, 'data', 'hatchabot.sqlite'));
+    dockerShim(bare, `${VOLS}
+  "image inspect --format {{.Id}} hatchabot-runtime:latest") echo sha256:dddd ;;`);
+    const gone = run(bare, ['--purge', '--yes']);
+    expect(gone.status, gone.stdout + gone.stderr).toBe(0);
+    expect(gone.stdout).toContain(`  MODE: --purge — there is no database at ${bare.repo}/data/hatchabot.sqlite, so no agent of this install's is known, and\n        none of their volumes will be removed. The runtime images and the docker network will be DELETED.`);
+    expect(readFileSync(bare.log, 'utf8')).toMatch(/docker rmi -f hatchabot-runtime:latest/);
+    expect(readFileSync(bare.log, 'utf8')).toMatch(/docker network rm hatchabot-agents/);
     // With a database that names them, the purge's own words, as before.
     const named = purgeWorld();
     dockerShim(named, VOLS);
     const ok = run(named, ['--purge', '--yes']);
     expect(ok.stdout).not.toContain('There was no database');
+    expect(ok.stdout).toContain('  MODE: --purge — agent volumes, the database, the runtime images\n        and the docker network will be DELETED. Agents cannot be recovered.');
+    // And with another install's container here too: the images and the network are said to stay, as they do.
+    const shared = purgeWorld();
+    dockerShim(shared, `${VOLS}
+  "ps -aq --filter label=hatchabot.gen") echo beef00000009 ;;
+  "image inspect --format {{.Id}} hatchabot-runtime:latest") echo sha256:dddd ;;`);
+    const both = run(shared, ['--purge', '--yes']);
+    expect(both.status, both.stdout + both.stderr).toBe(0);
+    expect(both.stdout).toContain('  MODE: --purge — agent volumes and the database will be DELETED. Agents cannot be recovered.\n        The runtime images and the docker network are KEPT: 1 container of another Hatchabot install on this machine may use them.');
+    expect(readFileSync(shared.log, 'utf8')).not.toMatch(/docker (rmi|network rm hatchabot-agents)/);
   });
 
   it('--backups reads the key as the backup does, not as shell: a passphrase with a $ or a quote still knows its own sets, and .env runs nothing (HB-0376)', () => {
@@ -1114,6 +1148,32 @@ describe('scripts/uninstall.sh --purge and a data folder another database shares
     expect(existsSync(own), r.stdout).toBe(false);
   });
 
+  it('a big tree of other files is read for an SQLite header without a process per file, and one header in it still keeps the folder (HB-1153)', () => {
+    const own = folder('hatchabot-data');
+    const { w } = sharedWith(own, 'hatchabot.sqlite');
+    const tree = join(own, 'imports', 'photos');
+    mkdirSync(tree, { recursive: true });
+    for (let i = 0; i < 40; i++) writeFileSync(join(tree, `p${i}.jpg`), Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, i, 0xc3, 0xa9, 0x00, 0x01]));
+    writeFileSync(join(tree, 'notes.txt'), 'made-up notes, é and all\n');
+    // head and tr as the system has them, each call noted.
+    const calls = join(w.bin, '..', 'readers.log');
+    for (const t of ['head', 'tr']) writeFileSync(join(w.bin, t), `#!/usr/bin/env bash\necho "${t} $*" >> ${JSON.stringify(calls)}\nfor d in /usr/bin /bin; do [ -x "$d/${t}" ] && exec "$d/${t}" "$@"; done\nexit 127\n`, { mode: 0o755 });
+    const r = run(w, ['--purge', '--yes']);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(existsSync(own), r.stdout).toBe(false); // none of them a database: the folder goes whole, as before
+    const read = existsSync(calls) ? readFileSync(calls, 'utf8').split('\n').filter((l) => /^head -c|^tr -d .?\\000/.test(l)) : [];
+    expect(read, read.join('\n')).toEqual([]);
+    // A file under any name that begins as an SQLite file does is still found.
+    const again = folder('hatchabot-data');
+    const two = sharedWith(again, 'hatchabot.sqlite');
+    mkdirSync(join(again, 'imports'), { recursive: true });
+    otherDb(join(again, 'imports', 'registry'));
+    const r2 = run(two.w, ['--purge', '--yes']);
+    expect(r2.status, r2.stdout + r2.stderr).toBe(0);
+    expect(r2.stdout).toContain(`kept ${join(again, 'imports', 'registry')}: another database`);
+    expect(rowOf(join(again, 'imports', 'registry'))).toEqual({ v: 'the other made-up one' });
+  });
+
   it('with this install\'s database already gone, the other one is still not taken with the folder', () => {
     const shared = folder('hatchabot-data');
     const { w, db } = sharedWith(shared);
@@ -1450,5 +1510,75 @@ describe('scripts/uninstall.sh finds, stops and reports every runtime of its age
     expect(h.status, h.stdout + h.stderr).toBe(2);
     expect(h.stdout).toContain('Chore Chart (on Garage box: ssh://garage-box.example.test)');
     expect(existsSync(join(held.repo, 'data', 'hatchabot.sqlite'))).toBe(true);
+  });
+});
+
+describe('scripts/uninstall.sh --purge and a database reached through a link (HB-1443)', () => {
+  /**
+   * This install's HATCHABOT_DB a link, in `linkDir`, to its real database in
+   * a folder of its own; every command it may reach a shim. `stuck`: the
+   * stuck agent's volume cannot be removed (purgeWorld's docker). `runner`:
+   * one of its agents runs on a runner.
+   */
+  function linkedWorld(linkDir: (w: ReturnType<typeof world>) => string, opts: { stuck?: boolean; runner?: boolean } = {}) {
+    const w = purgeWorld();
+    if (!opts.stuck) dockerShim(w, VOLS);
+    if (opts.runner) {
+      const d = new Database(join(w.repo, 'data', 'hatchabot.sqlite'));
+      d.exec('DROP TABLE agents; CREATE TABLE hosts (id TEXT, kind TEXT, name TEXT, settings TEXT); CREATE TABLE agents (id TEXT, name TEXT, host_id TEXT, runtime_ref TEXT, image TEXT)');
+      d.prepare('INSERT INTO hosts VALUES (?, ?, ?, ?)').run('h-local', 'local', 'This machine', '{}');
+      d.prepare('INSERT INTO hosts VALUES (?, ?, ?, ?)').run('h-runner', 'cloud', 'Garage box', JSON.stringify({ dockerHost: 'ssh://garage-box.example.test' }));
+      d.prepare('INSERT INTO agents VALUES (?, ?, ?, ?, NULL)').run('11111111-aaaa', 'Meal Planner', 'h-local', 'docker://hatchabot-meal-planner-11111111');
+      d.prepare('INSERT INTO agents VALUES (?, ?, ?, ?, NULL)').run('22222222-bbbb', 'Garden Notes', 'h-runner', 'docker://hatchabot-garden-notes-22222222');
+      d.close();
+    }
+    for (const tool of ['podman', 'ssh', 'openclaw']) {
+      writeFileSync(join(w.bin, tool), `#!/usr/bin/env bash\necho "${tool} $*" >> ${JSON.stringify(w.log)}\nexit 0\n`, { mode: 0o755 });
+    }
+    const real = join(dirname(w.repo), 'moved-data');
+    mkdirSync(real);
+    const db = join(real, 'hatchabot.sqlite');
+    renameSync(join(w.repo, 'data', 'hatchabot.sqlite'), db);
+    // What SQLite and the server keep beside the file the link leads to.
+    writeFileSync(`${db}-wal`, 'made-up wal'); writeFileSync(`${db}-shm`, 'made-up shm'); writeFileSync(`${db}.lock`, '');
+    const dir = linkDir(w);
+    mkdirSync(dir, { recursive: true });
+    const link = join(dir, 'hatchabot.sqlite');
+    symlinkSync(db, link);
+    writeFileSync(join(w.repo, '.env'), `HATCHABOT_SECRET_KEY=x\nHATCHABOT_DB=${link}\n`);
+    return { w, db: join(realpathSync(real), 'hatchabot.sqlite'), link };
+  }
+
+  it('the link goes and the database it leads to is named as kept, never said to be removed, in a folder of Hatchabot\'s or not', () => {
+    for (const [where, linkDir] of [
+      ['the install\'s data/', (w: ReturnType<typeof world>) => join(w.repo, 'data')],
+      ['a folder not Hatchabot\'s', (w: ReturnType<typeof world>) => join(dirname(w.repo), 'household-files')],
+    ] as const) {
+      const { w, db, link } = linkedWorld(linkDir);
+      const r = run(w, ['--purge', '--yes']);
+      expect(r.status, where + r.stdout + r.stderr).toBe(0);
+      expect((() => { try { lstatSync(link); return true; } catch { return false; } })(), `${where}: the link`).toBe(false);
+      for (const f of [db, `${db}-wal`, `${db}-shm`, `${db}.lock`]) expect(existsSync(f), `${where}: ${f}`).toBe(true);
+      expect(r.stdout, where).toContain(`kept ${db}, the database ${link} was a link to, and whichever of its -wal, -shm and .lock are beside it: only the link was removed.`);
+      expect(r.stdout, where).not.toContain('removed the database');
+      expect(r.stdout, where).not.toContain('database are gone');
+      expect(r.stdout, where).toContain(`the database it led to is kept, at ${db}.`);
+      expect(readFileSync(w.log, 'utf8'), where).not.toMatch(/^(podman|ssh|openclaw) /m);
+    }
+  });
+
+  it('with a volume left, or an agent left on a runner, the summary still says the database is kept, not gone (review)', () => {
+    for (const [what, opts, args, status, says] of [
+      ['a volume left', { stuck: true }, ['--purge', '--yes'], 1, 'Its agents and the link to its database are gone (the database it led to is kept, at DB), but these agent volumes are NOT'],
+      ['a runner', { runner: true }, ['--purge', '--forget-runners', '--yes'], 0, 'Its agents on this machine, their volumes and the link to its database are gone (the database it led to is kept, at DB). These still run on their runners'],
+    ] as const) {
+      const { w, db } = linkedWorld((x) => join(x.repo, 'data'), opts);
+      const r = run(w, [...args]);
+      expect(r.status, what + r.stdout + r.stderr).toBe(status);
+      for (const f of [db, `${db}-wal`, `${db}-shm`, `${db}.lock`]) expect(existsSync(f), `${what}: ${f}`).toBe(true);
+      expect(r.stdout, what).toContain(says.replace('DB', db));
+      expect(r.stdout, what).not.toMatch(/and (the )?database are gone/);
+      expect(readFileSync(w.log, 'utf8'), what).not.toMatch(/^(podman|ssh|openclaw) /m);
+    }
   });
 });

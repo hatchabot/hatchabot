@@ -2,9 +2,9 @@ import type { Agent } from '../../domain/types.js';
 import { rebuildPolicy } from '../../domain/rebuildPolicy.js';
 import type { RuntimeProvider } from '../../providers/provider.js';
 import type { Store } from '../../store/store.js';
-import { AgentBusyError, isBusy, whileBusy } from './busy.js';
+import { AgentBusyError, freedWithin, heldFor, isBusy, whileBusy, type Purpose } from './busy.js';
 import { hibernateAfterMs, hibernateAgent, hibernateBlocker, wakeAgent, type HibernateDeps } from './hibernate.js';
-import { operationRefusal } from './operations.js';
+import { operationRefusal, settleStartsOwedOn } from './operations.js';
 import { renderRefusedRecently } from './provision.js';
 import type { AutoRebuilds } from './autoRebuilds.js';
 
@@ -20,12 +20,18 @@ import type { AutoRebuilds } from './autoRebuilds.js';
 export interface Power {
   /** Why this agent may not be started now, or undefined when it may. `holdingLock`: the caller holds its busy flag. */
   startRefusal(a: Agent | undefined, holdingLock?: boolean): string | undefined;
-  /** Start a STOPPED agent, or rebuild it when a rebuild is owed or required; `ownerAsked`: the Start button. */
-  startStopped(agent: Agent, opts?: { ownerAsked?: boolean }): Promise<{ ok: boolean; rebuilding?: boolean; agent?: Agent; error?: string }>;
   /**
-   * Stop a running agent under its lifecycle lock. `answer` is made from the
-   * stopped agent while the lock is still held. Throws AgentBusyError when
-   * another holder has the agent.
+   * Start a STOPPED agent, or rebuild it when a rebuild is owed or required; `ownerAsked`: the Start button.
+   * `stillOwed`: a start an operation owes (operationsResume.ts), judged again once its checks are done, under
+   * the agent's lock, and when it is refused, once a Start, Stop or budget pause that held the agent lets go;
+   * one no longer owed is not made (`notOwed`), and nothing is said of it.
+   */
+  startStopped(agent: Agent, opts?: { ownerAsked?: boolean; stillOwed?: () => boolean }): Promise<StartResult>;
+  /**
+   * A person's Stop of a running agent, under its lifecycle lock. `answer` is
+   * made from the stopped agent while the lock is still held, and the starts
+   * a restart left owed on it are settled before it is let go
+   * (settleStartsOwedOn). Throws AgentBusyError when another holder has the agent.
    */
   stopRunning<T>(agentId: string, answer: (stopped: Agent) => T): Promise<{ ok: true; value: T } | { ok: false; error: string }>;
   /** Put it to sleep (hibernate.ts): throws AgentBusyError, or NoLongerSleepy with the reason it may not sleep. */
@@ -34,7 +40,26 @@ export interface Power {
   wake(agent: Agent, why: string): Promise<Agent>;
   /** What the idle rule would do with this agent now: the app's "Asleep" explanations. */
   sleepView(agent: Agent): Promise<{ afterMs: number; asleep: boolean; policy: Agent['hibernate'] | null; blocker: string | undefined }>;
+  /** Ends the waits of owed starts held off by another holder (agentLifecycle.ts stop): each is left owed, for the next boot. */
+  stop(): void;
 }
+
+/**
+ * How long a start an operation owes, refused because its owner's Start or
+ * Stop or a budget's pause held the agent, waits for that to let go, to see
+ * whether it took the start over (HB-1252 review). Each of them settles the
+ * owed start when it is done (settleStartsOwedOn).
+ */
+const TAKEN_OVER_WAIT_MS = 2 * 60_000;
+const TAKES_OVER: ReadonlySet<Purpose> = new Set<Purpose>(['start', 'stop', 'budget-pause']);
+
+/**
+ * What came of a start: `notOwed`, a start an operation owed that nobody owes
+ * any more (its owner started or stopped the agent meanwhile); `leftOwed`, one
+ * whose wait for another holder the process's stop ended: not made, and still
+ * owed, for the next boot, as a death leaves it.
+ */
+export interface StartResult { ok: boolean; rebuilding?: boolean; agent?: Agent; error?: string; notOwed?: true; leftOwed?: true }
 
 /** What it needs from the process it runs in. Functions only, so a test hands it fakes. */
 export interface PowerDeps {
@@ -67,6 +92,8 @@ export interface PowerDeps {
 
 export function createPower(deps: PowerDeps): Power {
   const { store, providerFor, trace, kickRebuild, isInFlight, rebuildNeedOf, isArchiving, peersNotInstalled, inLimitsTurn, applyCurrentLimits, tellMemoryBudget, clearPinsWhenUp, disownPauseOnStop } = deps;
+  /** Ends the waits of owed starts for another holder to let go, at stop(). */
+  const waits = new AbortController();
 
   /**
    * Start a STOPPED agent: the Start button, and a budget pause ending
@@ -109,8 +136,31 @@ export function createPower(deps: PowerDeps): Power {
     store.getAgent(agentId)?.rebuildOnStart ? 'a change made while it was down'
       : ownerAsked && !renderRefusedRecently(agentId) && peersNotInstalled(agentId) ? 'its peers changed while it was down'
       : undefined;
-  const startStopped = async (agent: Agent, opts: { ownerAsked?: boolean } = {}): Promise<{ ok: boolean; rebuilding?: boolean; agent?: Agent; error?: string }> => {
-    { const why = startRefusal(agent); if (why) return { ok: false, error: why }; }
+  const startStopped = async (agent: Agent, opts: { ownerAsked?: boolean; stillOwed?: () => boolean } = {}): Promise<StartResult> => {
+    // Owed by an operation, and taken over since (its owner's Start or Stop,
+    // a budget's pause, settleStartsOwedOn) during the checks below, which ask
+    // the machine and may take a while: not made, and nothing said (HB-1252).
+    const notOwed = (): boolean => !!opts.stillOwed && !opts.stillOwed();
+    // Refused (`holder`: what holds the agent, when that is why). An owed
+    // start taken over says nothing, whatever refused it: whoever took it over
+    // wrote its words. One its owner's Start or Stop, or a budget's pause, held
+    // off is judged again once that lets go (each settles the owed start
+    // before it does, or just after: the setImmediate), which may be before
+    // the checks below or once they are done (HB-1252 review); still owed
+    // then, the refusal as before.
+    const refused = async (why: string, holder: Purpose | undefined): Promise<StartResult> => {
+      if (notOwed()) return { ok: false, notOwed: true };
+      if (opts.stillOwed && holder && TAKES_OVER.has(holder)) {
+        const freed = await freedWithin(agent.id, TAKEN_OVER_WAIT_MS, waits.signal);
+        if (waits.signal.aborted) return { ok: false, leftOwed: true };
+        if (freed) {
+          await new Promise((r) => setImmediate(r));
+          if (notOwed()) return { ok: false, notOwed: true };
+        }
+      }
+      return { ok: false, error: why };
+    };
+    { const why = startRefusal(agent); if (why) return refused(why, why === BUSY_MSG ? heldFor(agent.id) : undefined); }
     // A stopped agent is never rebuilt on the machine's own initiative (a
     // rebuild starts it). Starting it is the moment: one that needs a
     // REQUIRED rebuild comes up rebuilt instead of as it was, and so does one
@@ -128,11 +178,13 @@ export function createPower(deps: PowerDeps): Power {
       if (need?.level === 'required') reasons.push(...need.reasons);
     }
     if (reasons.length) {
+      if (notOwed()) return { ok: false, notOwed: true };
       // Judged again after that wait: an Archive or a Delete may have begun.
       const why = startRefusal(store.getAgent(agent.id));
-      if (why) return { ok: false, error: why };
+      if (why) return refused(why, why === BUSY_MSG ? heldFor(agent.id) : undefined);
       if (kickRebuild(agent.id)) {
         trace(agent.id)('rebuild.on_start', { reasons });
+        if (opts.ownerAsked && !opts.stillOwed) settleStartsOwedOn(store, agent.id, 'owner-start');
         return { ok: true, rebuilding: true, agent: store.getAgent(agent.id)! };
       }
       // Never its old container in place of a rebuild that was owed: that may
@@ -144,9 +196,10 @@ export function createPower(deps: PowerDeps): Power {
     // during the docker start, stop the container, give the bot back and mark
     // it ARCHIVED — and then this start brought the runtime up, still holding
     // the token of a bot another agent might lease next (#10).
-    let r: { ok: boolean; agent?: Agent; error?: string };
+    let r: StartResult;
     try {
-      r = await whileBusy(agent.id, 'start', async () => {
+      r = await whileBusy(agent.id, 'start', async (): Promise<StartResult> => {
+        if (notOwed()) return { ok: false, notOwed: true };
         const now = store.getAgent(agent.id);
         const why = startRefusal(now, true);
         if (why) return { ok: false, error: why };
@@ -157,10 +210,18 @@ export function createPower(deps: PowerDeps): Power {
         await inLimitsTurn(agent.id, () => applyCurrentLimits(agent.id));
         await provider.start(now!.runtimeRef!);
         store.setHibernated(agent.id, null);
-        return { ok: true, agent: store.setAgentState(agent.id, 'RUNNING') };
+        const started = store.setAgentState(agent.id, 'RUNNING');
+        // The Start button's start is the one a restart left owed (HB-0980),
+        // settled before its lock is let go, as its route does after: an owed
+        // start this lock held off then finds it taken over (HB-1252 review).
+        if (opts.ownerAsked && !opts.stillOwed) settleStartsOwedOn(store, agent.id, 'owner-start');
+        return { ok: true, agent: started };
       });
     } catch (err) {
-      if (err instanceof AgentBusyError) return { ok: false, error: err.userMessage };
+      // Held by another since the checks: was "Another operation is already
+      // running", as a failed start, for one its owner's Start, or the
+      // rebuild that Start began, had taken over (HB-1252 review).
+      if (err instanceof AgentBusyError) return refused(err.userMessage, err.heldFor);
       throw err;
     }
     // After the store says RUNNING and the lock is let go, as a wake does:
@@ -185,13 +246,24 @@ export function createPower(deps: PowerDeps): Power {
       if (!now?.runtimeRef || now.state !== 'RUNNING') {
         return { ok: false, error: `Cannot stop while ${now?.state ?? 'DELETED'}` };
       }
-      await providerFor(now.hostId).stop(now.runtimeRef);
+      // The stop is its owner's, in the store before the docker stop: a
+      // restart during that stop left the budget's pause the budget's, the
+      // container stopped (reconcile records it at the start), and the next
+      // pass started the agent at the pause's end (HB-1480). One that does
+      // not stop it leaves it running, which a pass judges as before.
       disownPauseOnStop(now.id);
-      return { ok: true, value: answer(store.setAgentState(now.id, 'STOPPED')) };
+      await providerFor(now.hostId).stop(now.runtimeRef);
+      const stopped = store.setAgentState(now.id, 'STOPPED');
+      // Stopped on purpose: a start a restart left owed is not to undo it
+      // (HB-0980). Settled before the lock is let go, as a Start's is: an owed
+      // start this lock held off then finds it taken over (HB-1252 review).
+      settleStartsOwedOn(store, now.id, 'owner-stop');
+      return { ok: true, value: answer(stopped) };
     });
 
   return {
     startRefusal, startStopped, stopRunning,
+    stop: () => waits.abort(),
     hibernate: (agent, why) => hibernateAgent(deps.hibernateDeps(), agent, why),
     wake: (agent, why) => wakeAgent(deps.hibernateDeps(), agent, why),
     sleepView: async (agent) => {

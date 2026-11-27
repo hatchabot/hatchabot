@@ -490,6 +490,170 @@ describe('the in-container reader on 2026.7: what was missing or merged', () => 
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
+  it('one event far out of place does not end a source: the messages behind it still show (HB-1358)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'hb-webchat-outlier-'));
+    try {
+      const sd = join(root, 'kitchen', 'sessions'); mkdirSync(sd, { recursive: true });
+      const key = webChatStoreKey('kitchen', SAM);
+      writeFileSync(join(sd, 'sessions.json'), JSON.stringify({ [key]: { sessionId: 'now' } }));
+      const t0 = Date.UTC(2026, 8, 1), min = 60_000;
+      const ev = (id: string, role: string, content: string, ms: number) => JSON.stringify({ type: 'message', id, timestamp: new Date(t0 + ms).toISOString(), message: { role, content } });
+      const old = Array.from({ length: 400 }, (_, k) => ev(`e${k}`, k % 2 ? 'assistant' : 'user', k % 2 ? `answer ${k}` : `[Sam via the web app]\nq ${k}`, k * 15_000));
+      const newest = [ev('y1', 'user', '[Sam via the web app]\nis the shed locked?', 200 * min), ev('y2', 'assistant', 'Yes, since nine.', 200 * min + 2000)];
+      // The clock steps back forty minutes, and then: z1–z3.
+      const after = [ev('z1', 'user', '[Sam via the web app]\nand the gate?', 161 * min), ev('z2', 'assistant', 'Open.', 161 * min + 2000), ev('z3', 'assistant', 'Closing it now.', 162 * min)];
+      const read = (script: string, cap: number) => JSON.parse(execFileSync(process.execPath, ['-e', script], { env: { ...process.env, AGENTS_DIR: root, SLUG: 'kitchen', SKEY: key, CAP: String(cap) }, encoding: 'utf8' })).messages;
+      const allOfIt = HISTORY_SCRIPT.replace('let fwd = false, stop = false;', 'let fwd = true, stop = false;');
+      expect(allOfIt).not.toBe(HISTORY_SCRIPT);
+      const outliers = {
+        // A tool's output stamped five hours back.
+        tool: JSON.stringify({ type: 'message', id: 'x1', timestamp: new Date(t0 - 300 * min).toISOString(), message: { role: 'toolResult', content: 'ok' } }),
+        // Any other event stamped so.
+        other: JSON.stringify({ type: 'custom', id: 'x2', timestamp: new Date(t0 - 300 * min).toISOString() }),
+        // A message recorded again, with the time it first had.
+        again: ev('e8', 'user', '[Sam via the web app]\nq 8', 8 * 15_000),
+        // Two of them.
+        twice: [ev('e8', 'user', '[Sam via the web app]\nq 8', 8 * 15_000), ev('e9', 'assistant', 'answer 9', 9 * 15_000)].join('\n'),
+      };
+      for (const [what, x] of Object.entries(outliers)) {
+        writeFileSync(join(sd, 'now.jsonl'), [...old, ...newest, x, ...after].join('\n'));
+        for (const cap of [3, 5, 100]) {
+          const got = read(HISTORY_SCRIPT, cap);
+          expect(got, `${what}, ${cap}`).toEqual(read(allOfIt, cap));
+          expect(got.slice(-2).map((m: { text: string }) => m.text), `${what}, ${cap}`).toEqual(['is the shed locked?', 'Yes, since nine.'].map((t, i) => i ? t : `[Sam via the web app]\n${t}`));
+        }
+      }
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('a source still ends a few messages past where nothing older can show, tool output and all, and tool calls with no time (HB-1358)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'hb-webchat-ends-'));
+    try {
+      const sd = join(root, 'kitchen', 'sessions'); mkdirSync(sd, { recursive: true });
+      const key = webChatStoreKey('kitchen', SAM);
+      writeFileSync(join(sd, 'sessions.json'), JSON.stringify({ [key]: { sessionId: 'now' } }));
+      const t0 = Date.UTC(2026, 8, 1), min = 60_000;
+      const counted = HISTORY_SCRIPT.replace('const take = (e, r, p) => {', 'let TAKES = 0; process.on("exit", () => process.stderr.write("TAKES=" + TAKES)); const take = (e, r, p) => { TAKES++;');
+      expect(counted).not.toBe(HISTORY_SCRIPT);
+      // The agent's tool calls with a time, and written with none.
+      for (const callsTimed of [true, false]) {
+        const rows: string[] = [];
+        for (let k = 0; k < 3000; k++) {
+          const ms = k * 10 * min;
+          rows.push(JSON.stringify({ type: 'message', id: `u${k}`, timestamp: new Date(t0 + ms).toISOString(), message: { role: 'user', content: `[Sam via the web app]\nq ${k}` } }));
+          for (let t = 0; t < 4; t++) {
+            rows.push(JSON.stringify({ type: 'message', id: `c${k}-${t}`, ...(callsTimed ? { timestamp: new Date(t0 + ms + 1000).toISOString() } : {}), message: { role: 'assistant', content: [{ type: 'toolCall', name: 'read' }] } }));
+            rows.push(JSON.stringify({ type: 'message', id: `t${k}-${t}`, timestamp: new Date(t0 + ms + 2000).toISOString(), message: { role: 'toolResult', content: 'x'.repeat(200) } }));
+          }
+          rows.push(JSON.stringify({ type: 'message', id: `a${k}`, timestamp: new Date(t0 + ms + 3000).toISOString(), message: { role: 'assistant', content: `answer ${k}` } }));
+        }
+        writeFileSync(join(sd, 'now.jsonl'), rows.join('\n'));
+        // How many events it reads: the newest 20 are the last ten turns, of
+        // ten events each; an hour further back is six turns more; then three
+        // messages of the turns before, and what is between them (with no
+        // time, a tool call does not count: the turn's question does).
+        const r = spawnSync(process.execPath, ['-e', counted], { env: { ...process.env, AGENTS_DIR: root, SLUG: 'kitchen', SKEY: key, CAP: '20' }, encoding: 'utf8' });
+        expect(JSON.parse(r.stdout).messages).toHaveLength(20);
+        const takes = Number(/TAKES=(\d+)/.exec(r.stderr)?.[1]);
+        expect(takes, `tool calls ${callsTimed ? 'with' : 'with no'} time`).toBeGreaterThan(10 * 16);
+        expect(takes, `tool calls ${callsTimed ? 'with' : 'with no'} time`).toBeLessThanOrEqual(10 * 16 + (callsTimed ? 5 : 11));
+      }
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('a later copy of an event, with a later time, shows only where its first copy did, once that is read (HB-1367)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'hb-webchat-later-'));
+    const pending = '33445566-7788-4999-aaaa-bbccddeeff00';
+    try {
+      const sd = join(root, 'kitchen', 'sessions'); mkdirSync(sd, { recursive: true });
+      const key = webChatStoreKey('kitchen', SAM);
+      writeFileSync(join(sd, 'sessions.json'), JSON.stringify({ [key]: { sessionId: 'now' } }));
+      const t0 = Date.UTC(2026, 8, 1), min = 60_000;
+      const ev = (id: string, role: string, content: string, ms: number) => JSON.stringify({ type: 'message', id, timestamp: new Date(t0 + ms).toISOString(), message: { role, content } });
+      const rows = Array.from({ length: 300 }, (_, k) => ev(`e${k}`, k % 2 ? 'assistant' : 'user', k % 2 ? `answer ${k}` : `[Sam via the web app${k === 2 ? `; message ${pending}` : ''}]\nq ${k}`, k * min));
+      // e4 recorded again near the end, stamped then.
+      rows.splice(298, 0, ev('e4', 'user', '[Sam via the web app]\nq 4', 298 * min));
+      writeFileSync(join(sd, 'now.jsonl'), rows.join('\n'));
+      const read = (script: string, cap: number, wanted = '') => JSON.parse(execFileSync(process.execPath, ['-e', script], { env: { ...process.env, AGENTS_DIR: root, SLUG: 'kitchen', SKEY: key, CAP: String(cap), PENDING: wanted }, encoding: 'utf8' }));
+      const allOfIt = HISTORY_SCRIPT.replace('let fwd = false, stop = false;', 'let fwd = true, stop = false;');
+      expect(allOfIt).not.toBe(HISTORY_SCRIPT);
+      // A delivery looked for reads to its first copy: shown as reading all of it shows it.
+      const looked = read(HISTORY_SCRIPT, 5, pending);
+      expect(looked).toEqual(read(allOfIt, 5, pending));
+      expect(looked.messages.map((m: { text: string }) => m.text)).not.toContain('[Sam via the web app]\nq 4');
+      expect(looked.delivery.received).toEqual([pending]);
+      // So does a first copy among the messages read past where nothing older can show.
+      rows.splice(298, 1, ev('e236', 'user', '[Sam via the web app]\nq 236', 298 * min));
+      writeFileSync(join(sd, 'now.jsonl'), rows.join('\n'));
+      for (const cap of [3, 5]) expect(read(HISTORY_SCRIPT, cap)).toEqual(read(allOfIt, cap));
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('a time out of range is shown as no time, not a read that failed (HB-1367)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'hb-webchat-range-'));
+    try {
+      const sd = join(root, 'kitchen', 'sessions'); mkdirSync(sd, { recursive: true });
+      const key = webChatStoreKey('kitchen', SAM);
+      writeFileSync(join(sd, 'sessions.json'), JSON.stringify({ [key]: { sessionId: 'now' } }));
+      writeFileSync(join(sd, 'now.jsonl'), [
+        JSON.stringify({ type: 'message', id: 'u1', timestamp: '2026-09-29T10:00:00Z', message: { role: 'user', content: '[Sam via the web app]\nwhat is on today?' } }),
+        JSON.stringify({ type: 'message', id: 'a1', timestamp: 1e20, message: { role: 'assistant', content: 'The bins go out.' } }),
+        JSON.stringify({ type: 'message', id: 'a2', message: { role: 'assistant', content: 'And the shed is locked.', timestamp: -9e15 } }),
+      ].join('\n'));
+      const r = spawnSync(process.execPath, ['-e', HISTORY_SCRIPT], { env: { ...process.env, AGENTS_DIR: root, SLUG: 'kitchen', SKEY: key, CAP: '100' }, encoding: 'utf8' });
+      expect(r.status, r.stderr).toBe(0);
+      const out = JSON.parse(r.stdout).messages;
+      expect(out).toEqual([
+        { role: 'assistant', text: 'The bins go out.', at: '' },
+        { role: 'assistant', text: 'And the shed is locked.', at: '' },
+        { role: 'user', text: '[Sam via the web app]\nwhat is on today?', at: '2026-09-29T10:00:00Z' },
+      ]);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('a long run of the agent\'s own replies is read only as far back as the newest need, not to the person\'s last message (HB-1359)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'hb-webchat-agent-only-'));
+    try {
+      const sd = join(root, 'kitchen', 'sessions'); mkdirSync(sd, { recursive: true });
+      const key = webChatStoreKey('kitchen', SAM);
+      writeFileSync(join(sd, 'sessions.json'), JSON.stringify({ [key]: { sessionId: 'now' } }));
+      const t0 = Date.UTC(2026, 8, 1), min = 60_000;
+      const ev = (id: string, role: string, content: string, ms: number, extra: object = {}) => JSON.stringify({ type: 'message', id, timestamp: new Date(t0 + ms).toISOString(), message: { role, content, ...extra } });
+      const counted = HISTORY_SCRIPT.replace('const take = (e, r, p) => {', 'let TAKES = 0; process.on("exit", () => process.stderr.write("TAKES=" + TAKES)); const take = (e, r, p) => { TAKES++;');
+      const allOfIt = HISTORY_SCRIPT.replace('let fwd = false, stop = false;', 'let fwd = true, stop = false;');
+      expect(counted).not.toBe(HISTORY_SCRIPT);
+      expect(allOfIt).not.toBe(HISTORY_SCRIPT);
+      const read = (script: string, cap: number) => spawnSync(process.execPath, ['-e', script], { env: { ...process.env, AGENTS_DIR: root, SLUG: 'kitchen', SKEY: key, CAP: String(cap) }, encoding: 'utf8' });
+      // The person asked once; then a scheduled task's notice every fifteen
+      // minutes for three weeks: in other words, and in the same words.
+      for (const same of [false, true]) {
+        const rows = [ev('u0', 'user', '[Sam via the web app]\nremind me about the bins', 0)];
+        for (let k = 1; k <= 2000; k++) {
+          rows.push(ev(`a${k}`, 'assistant', same ? 'The bins go out tonight.' : `Reminder ${k}: the bins go out tonight.`, k * 15 * min));
+          // Now and then delivered twice: the copy is still one reply.
+          if (k % 9 === 0) rows.push(ev(`m${k}`, 'assistant', same ? 'The bins go out tonight.' : `Reminder ${k}: the bins go out tonight.`, k * 15 * min, { model: 'delivery-mirror' }));
+        }
+        writeFileSync(join(sd, 'now.jsonl'), rows.join('\n'));
+        for (const cap of [5, 100]) {
+          const r = read(counted, cap);
+          expect(r.status, r.stderr).toBe(0);
+          expect(JSON.parse(r.stdout)).toEqual(JSON.parse(read(allOfIt, cap).stdout));
+          // The newest CAP, the hour before them, and three more.
+          const takes = Number(/TAKES=(\d+)/.exec(r.stderr)?.[1]);
+          expect(takes, `${same ? 'same words' : 'other words'}, ${cap}`).toBeLessThan(cap * 1.2 + 4 + 6);
+        }
+      }
+      // The same words a few seconds to a few minutes apart, stepping back
+      // now and then: which are one reply is as reading all of it says.
+      const gaps = [30_000, 59_000, 61_000, 119_000, 121_000, -50_000, 0, 1000];
+      let ms = 0;
+      const rows = [ev('u0', 'user', '[Sam via the web app]\nremind me about the bins', 0)];
+      for (let k = 1; k <= 600; k++) { ms += gaps[(k * 5) % gaps.length]! + (k % 13 === 0 ? 2 * 60 * min : 0); rows.push(ev(`a${k}`, 'assistant', k % 50 < 45 ? 'The bins go out tonight.' : 'Done.', ms, k % 7 ? {} : { model: 'delivery-mirror' })); }
+      writeFileSync(join(sd, 'now.jsonl'), rows.join('\n'));
+      for (const cap of [1, 5, 40, 100]) expect(JSON.parse(read(HISTORY_SCRIPT, cap).stdout), `gaps, ${cap}`).toEqual(JSON.parse(read(allOfIt, cap).stdout));
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
   it('an event recorded twice keeps the place of its first copy, as reading oldest first did (HB-1172)', () => {
     const root = mkdtempSync(join(tmpdir(), 'hb-webchat-copy-'));
     try {

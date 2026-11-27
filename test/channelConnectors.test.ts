@@ -81,20 +81,22 @@ describe('Slack', () => {
     expect(await refusal(slackConnector(f as never).verify({ botToken: BOT, appToken: APP }))).toMatch(/Couldn't reach Slack/);
   });
 
+  /** Slack not answering: a limit, an outage, its outage words, a page not its own (made up). */
+  const html = (status: number) => () => new Response('<html>made-up proxy page</html>', { status, headers: { 'content-type': 'text/html' } });
+  const json = (body: unknown, status = 200, headers: Record<string, string> = {}) => () => new Response(JSON.stringify(body), { status, headers });
+  const answers: Array<[string, () => Response, RegExp]> = [
+    ['429 ratelimited', json({ ok: false, error: 'ratelimited' }, 429, { 'retry-after': '30' }), /too many requests/],
+    ['503 with no JSON', html(503), /HTTP 503/],
+    ['200 with no JSON', html(200), /HTTP 200/],
+    ['500 fatal_error', json({ ok: false, error: 'fatal_error' }, 500), /HTTP 500/],
+    ['200 service_unavailable', json({ ok: false, error: 'service_unavailable' }), /service_unavailable/],
+    ['200 request_timeout', json({ ok: false, error: 'request_timeout' }), /request_timeout/],
+  ];
+
   // HB-1262: only Slack's own "no" (ok:false with its error) is a refused token. A rate limit,
   // a 5xx, Slack's own outage words or a page that is not Slack's JSON says nothing of the
   // token: busy, as Discord's and Telegram's checks read theirs, so it is not counted.
   it('a rate limit, an outage or a page that is not Slack\'s is busy, not a refused token, for either token', async () => {
-    const html = (status: number) => () => new Response('<html>made-up proxy page</html>', { status, headers: { 'content-type': 'text/html' } });
-    const json = (body: unknown, status = 200, headers: Record<string, string> = {}) => () => new Response(JSON.stringify(body), { status, headers });
-    const answers: Array<[string, () => Response, RegExp]> = [
-      ['429 ratelimited', json({ ok: false, error: 'ratelimited' }, 429, { 'retry-after': '30' }), /too many requests/],
-      ['503 with no JSON', html(503), /HTTP 503/],
-      ['200 with no JSON', html(200), /HTTP 200/],
-      ['500 fatal_error', json({ ok: false, error: 'fatal_error' }, 500), /HTTP 500/],
-      ['200 service_unavailable', json({ ok: false, error: 'service_unavailable' }), /service_unavailable/],
-      ['200 request_timeout', json({ ok: false, error: 'request_timeout' }), /request_timeout/],
-    ];
     for (const [what, answer, said] of answers) {
       for (const method of ['/auth.test', '/apps.connections.open']) {
         const ok = fakeFetch(slackOk).f;
@@ -113,6 +115,24 @@ describe('Slack', () => {
       const err = await slackConnector(f as never).verify({ botToken: BOT, appToken: APP }).then(() => undefined, (e: unknown) => e) as ConnectorError;
       expect(err.busy, `${error} at ${method}`).toBe(false);
       expect(err.userMessage, `${error} at ${method}`).toMatch(/refused/);
+    }
+  });
+
+  it('the bot lookup limited or down is said as Slack not answering, not as a missing users:read (HB-1420)', async () => {
+    for (const [what, answer, said] of answers) {
+      const ok = fakeFetch(slackOk).f;
+      const f = async (url: string, init?: RequestInit) => (url.includes('/bots.info') ? answer() : ok(url, init));
+      const v = await slackConnector(f as never).verify({ botToken: BOT, appToken: APP });
+      expect(v.warnings, what).toHaveLength(1);
+      expect(v.warnings[0], what).toMatch(/^Slack did not answer which app the bot token belongs to just now \(.+\), so Hatchabot could not check both tokens are from the same app\. Re-check in a minute, or make sure they are\.$/);
+      expect(v.warnings[0], what).toMatch(said);
+      expect(v.warnings[0], what).not.toMatch(/users:read/);
+    }
+    // Slack's own answer that it will not say (the scope is missing) still names users:read.
+    {
+      const { f } = fakeFetch((u, i) => (u.includes('/bots.info') ? { body: { ok: false, error: 'missing_scope', needed: 'users:read' } } : slackOk(u, i)));
+      const v = await slackConnector(f as never).verify({ botToken: BOT, appToken: APP });
+      expect(v.warnings).toEqual([expect.stringMatching(/lacks users:read/)]);
     }
   });
 });

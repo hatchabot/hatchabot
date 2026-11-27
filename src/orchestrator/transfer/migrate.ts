@@ -427,7 +427,7 @@ const REFUSAL_STATUSES = new Set([400, 401, 403, 404, 409, 413, 415, 422, 429]);
 export function isDefiniteRefusal(
   status: number,
   body: unknown,
-): body is { error: string; code?: string; problem?: string } {
+): body is { error: string; code?: string; problem?: string; has?: unknown } {
   return (
     REFUSAL_STATUSES.has(status) &&
     typeof body === 'object' &&
@@ -751,10 +751,19 @@ async function migrateSteps(
     // A real answer from the destination: it refused and rolled back.
     op.step('answered');
     const undone = await undo(`import rejected: ${body.error}`);
+    // What the destination has of that name, as it says (HB-1515 review):
+    // "doesn't have the image" was said of one it has. A server from before
+    // it says nothing, which is taken as none, as before.
+    const head = body.has === 'same' ? `${peer.name} has the image ${agent.image} but won't pin this agent to it for this move`
+      : body.has === 'other' ? `${peer.name} has another image named ${agent.image} and won't build this one over it for this move`
+        : `${peer.name} doesn't have the image ${agent.image} and won't build it for this move`;
+    // Its own image there is refused for one reason, said in that server's
+    // words ("only this machine's owner…"), which read as this one's here.
+    const why = body.has === 'same' ? "only that server's owner can pin an agent to a particular image" : body.problem;
     const e = body.code === 'image_decision'
       ? new MigrateError(
-        `${peer.name} doesn't have the image ${agent.image} and won't build it for this move` +
-          `${body.problem ? ` (${body.problem})` : " (only that server's owner may build images there)"}. ` +
+        head +
+          `${why ? ` (${why})` : " (only that server's owner may build images there)"}. ` +
           `${undone.said}. Move it on that server's default image (CLI: --drop-pin), or Download a copy and import it there as its owner.`,
       )
       : new MigrateError(`${peer.name} couldn't import it: ${body.error}. ${undone.said}.`);

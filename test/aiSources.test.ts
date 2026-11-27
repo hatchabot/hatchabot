@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
-import { clearBusy, markBusy } from '../src/orchestrator/lifecycle/busy.js';
+import { markBusy } from '../src/orchestrator/lifecycle/busy.js';
 import { createSourceHolds, type SourceHolds } from '../src/orchestrator/lifecycle/sourceHolds.js';
 import {
   checkLocalServer, createAiSources, CURATED_ANTHROPIC_MODELS, keptLine, limitsSaid, usesSource,
@@ -39,9 +39,7 @@ interface World {
   agent(id: string, opts?: { name?: string; owner?: string; profile?: string; state?: 'RUNNING' | 'STOPPED'; model?: string; ops?: boolean }): Agent;
 }
 
-const busyIds: string[] = [];
 afterEach(() => {
-  for (const id of busyIds.splice(0)) clearBusy(id);
   vi.unstubAllGlobals();
 });
 
@@ -51,7 +49,7 @@ function world(): World {
   store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
   store.insertAIProfile({ id: 'p1', ownerId: OWNER, name: 'Claude', vendor: 'anthropic', kind: 'api_key', model: DEFAULT, models: [OTHER], secretRef: 'ai/p1', createdAt: 'now' });
   store.insertAIProfile({ id: 'p2', ownerId: OWNER, name: 'Other key', vendor: 'anthropic', kind: 'api_key', model: DEFAULT, secretRef: 'ai/p2', createdAt: 'now' });
-  const holds = createSourceHolds({ holdMs: 600_000, warn: () => {} });
+  const holds = createSourceHolds();
   const w = { store, provider, holds, asked: [] as string[], runtime: {} as World['runtime'], tooOld: new Map<string, string>(), rebuildQueued: true } as World;
   w.sources = createAiSources({
     store,
@@ -116,7 +114,7 @@ describe('switchAgentToSource', () => {
   it('skips a busy agent, a deleted one, and one the runtime check refuses, and says why', async () => {
     const w = world();
     const busy = w.agent('a1', { name: 'Busy' });
-    markBusy('a1'); busyIds.push('a1');
+    markBusy('a1');
     const gone = w.agent('a2', { name: 'Gone' });
     w.store.setAgentState('a2', 'DELETING');
     const t = tally();
@@ -352,7 +350,7 @@ describe('applyDefaultModel', () => {
     }
   });
 
-  it("another account's agent whose pin is cleared, or that joins the source, while the checks wait is held unless its check let it follow (HB-0907)", async () => {
+  it("another account's agent whose pin is cleared, or that joins the source, while the checks wait is held unless its check let it follow (HB-0907, HB-1342)", async () => {
     const w = world();
     w.store.setAIProfileShared('p1', true);
     w.agent('a1', { name: 'Mine' });
@@ -370,11 +368,82 @@ describe('applyDefaultModel', () => {
     w.store.setAgentAIProfile('n3', 'p1');
     go();
     const out = await applying;
-    // Too old for the new default: held on what it runs. Checked and current: it follows. Never checked: held.
+    // Too old for the new default: held on what it runs. Checked and current: it follows.
+    // Joined meanwhile: checked as well, and it follows (HB-1342; was held unchecked, a pin its owner did not choose).
     expect(w.store.getAgent('n1')!.model).toBe(DEFAULT);
     expect(w.store.getAgent('n2')!.model).toBeUndefined();
-    expect(w.store.getAgent('n3')!.model).toBe(DEFAULT);
-    expect(out).toMatchObject({ applied: 1, othersHeld: 2 });
+    expect(w.store.getAgent('n3')!.model).toBeUndefined();
+    expect(out).toMatchObject({ applied: 1, othersHeld: 1 });
+  });
+
+  it("an agent that joins the source while the checks wait is checked before it follows the new default, the caller's own and another account's (HB-1342)", async () => {
+    const w = world();
+    w.store.setAIProfileShared('p1', true);
+    w.agent('a1', { name: 'Ticked' });
+    w.agent('m2', { name: 'Joins', profile: 'p2' });
+    w.agent('m3', { name: 'Joins old', profile: 'p2' });
+    w.agent('m4', { name: 'Joins pinned', profile: 'p2' });
+    w.agent('n4', { name: 'Theirs joins', owner: NEIGHBOUR, profile: 'p2' });
+    w.agent('n5', { name: 'Theirs joins old', owner: NEIGHBOUR, profile: 'p2' });
+    w.tooOld.set('m3', 'needs OpenClaw 2026.9 or later');
+    w.tooOld.set('n5', 'too old');
+    let go!: () => void;
+    w.tooOldWait = new Promise((resolve) => { go = resolve; });
+    const ledger: Array<[string, string[]]> = [];
+    const applying = w.sources.applyDefaultModel(w.store.getAIProfile('p1')!, OWNER, { model: 'claude-sonnet-5', apply: ['a1'] }, (source, before) => { ledger.push([source, [...before.keys()].sort()]); });
+    await Promise.resolve();
+    // Moved onto this source while the checks wait.
+    for (const id of ['m2', 'm3', 'm4', 'n4', 'n5']) w.store.setAgentAIProfile(id, 'p1');
+    w.store.setAgentModel('m4', OTHER);
+    go();
+    const out = await applying;
+    // Checked and able: it follows the new default. Too old: held on what it runs, and the caller is told why.
+    expect(w.store.getAgent('m2')!.model).toBeUndefined();
+    expect(w.store.getAgent('m3')!.model).toBe(DEFAULT);
+    expect(w.store.getAgent('m4')!.model).toBe(OTHER);
+    expect(w.store.getAgent('n4')!.model).toBeUndefined();
+    expect(w.store.getAgent('n5')!.model).toBe(DEFAULT);
+    expect(out).toMatchObject({ applied: 1, held: 1, othersHeld: 1, notSwitched: [{ id: 'm3', name: 'Joins old', reason: 'needs OpenClaw 2026.9 or later', why: 'runtime' }] });
+    expect(out).not.toHaveProperty('othersUnchecked');
+    // Their moves to the new default go in the ledger.
+    expect(ledger).toEqual([['default-model', ['a1', 'm2', 'm3', 'm4']], ['source-default', ['n4', 'n5']]]);
+    // The models the held ones stay on stay on the list.
+    expect(w.store.getAIProfile('p1')!.models).toEqual(expect.arrayContaining(['claude-sonnet-5', OTHER, DEFAULT]));
+  });
+
+  it('one of the caller\'s that joins during the last round of checks, too late to be checked, is held on what it runs and named (HB-1342)', async () => {
+    const w = world();
+    w.agent('a1', { name: 'Ticked' });
+    const queue = ['j1', 'j2', 'j3', 'j4', 'j5', 'j6'];
+    for (const id of queue) w.agent(id, { name: `Joins ${id}`, profile: 'p2' });
+    // Each check lets the next one move onto the source.
+    const checked = new Set<string>();
+    w.tooOld = new (class extends Map<string, string> { override get(k: string) { checked.add(k); return super.get(k); } })();
+    w.tooOldWait = { then: (done: () => void) => { const next = queue.shift(); if (next) w.store.setAgentAIProfile(next, 'p1'); done(); } } as never;
+    const out = await w.sources.applyDefaultModel(w.store.getAIProfile('p1')!, OWNER, { model: 'claude-sonnet-5', apply: ['a1'] }, () => {});
+    const onIt = ['j1', 'j2', 'j3', 'j4', 'j5', 'j6'].filter((id) => w.store.getAgent(id)!.aiProfileId === 'p1');
+    const late = onIt.filter((id) => !checked.has(id));
+    expect(late.length).toBeGreaterThan(0);
+    // Checked: it follows the new default. Not checked: held on what it runs, never following unchecked.
+    for (const id of onIt) expect([id, w.store.getAgent(id)!.model]).toEqual([id, checked.has(id) ? undefined : DEFAULT]);
+    expect(out).toMatchObject({ notSwitched: late.map((id) => ({ id, name: `Joins ${id}`, reason: 'it joined this source while the new default was applied, too late to be checked, so it stays on what it runs', why: 'late' })) });
+  });
+
+  it("another account's agent that joins during the last round is kept on its model and counted as never checked, apart from one too old (HB-1342 review)", async () => {
+    const w = world();
+    w.store.setAIProfileShared('p1', true);
+    w.agent('a1', { name: 'Ticked' });
+    w.agent('n8', { name: 'Theirs old', owner: NEIGHBOUR });
+    w.tooOld.set('n8', 'too old');
+    // Two checks a round (and two before them): n9 moves onto it during the last round's.
+    const queue = ['j1', 'j2', 'j3', 'j4', 'j5', 'j6', 'j7', 'n9'];
+    for (const id of queue) w.agent(id, { name: `Joins ${id}`, profile: 'p2', ...(id.startsWith('n') ? { owner: NEIGHBOUR } : {}) });
+    w.tooOldWait = { then: (done: () => void) => { const next = queue.shift(); if (next) w.store.setAgentAIProfile(next, 'p1'); done(); } } as never;
+    const out = await w.sources.applyDefaultModel(w.store.getAIProfile('p1')!, OWNER, { model: 'claude-sonnet-5', apply: ['a1'] }, () => {});
+    expect(w.store.getAgent('n9')!.aiProfileId).toBe('p1');
+    expect(w.store.getAgent('n9')!.model).toBe(DEFAULT);
+    // Was: counted with the one too old, and the app said both were too old.
+    expect(out).toMatchObject({ othersHeld: 2, othersUnchecked: 1 });
   });
 
   it('an agent being deleted is neither pinned nor switched, whoever it belongs to (HB-0907)', async () => {
@@ -411,6 +480,63 @@ describe('applyDefaultModel', () => {
     expect(out).not.toHaveProperty('othersHeld');
     expect(w.store.getAgent('n1')!.model).toBe(FIRST);
     expect(w.store.getAIProfile('p1')!.models).toEqual(['claude-new-1', ...FIFTEEN]);
+  });
+  it('a list sent with the apply, as the app sends one, keeps a model added or taken off while the checks wait (HB-1340 review)', async () => {
+    const w = world();
+    w.store.setAIProfileModels('p1', [OTHER, 'claude-extra-03', 'claude-extra-04']);
+    w.agent('a1', { name: 'Ticked' });
+    let go!: () => void;
+    w.tooOldWait = new Promise((resolve) => { go = resolve; });
+    // The list as the editor showed it when Save was pressed, the new default first, one model taken off it there.
+    const applying = w.sources.applyDefaultModel(w.store.getAIProfile('p1')!, OWNER,
+      { model: 'claude-sonnet-5', models: ['claude-sonnet-5', OTHER, 'claude-extra-03'], apply: ['a1'] }, () => {});
+    await Promise.resolve();
+    // Meanwhile another edit adds a model and takes one off.
+    w.store.setAIProfileModels('p1', [OTHER, 'claude-extra-04', 'claude-extra-01']);
+    go();
+    expect(await applying).toMatchObject({ applied: 1 });
+    // Was: the list sent, written over the edit: claude-extra-01 lost and claude-extra-03 back.
+    expect([...w.store.getAIProfile('p1')!.models!].sort()).toEqual(['claude-extra-01', 'claude-haiku-4-5', 'claude-sonnet-5']);
+  });
+
+  it('a source deleted while the checks wait is answered as gone, with nothing written (HB-1340 review)', async () => {
+    const w = world();
+    w.agent('a1', { name: 'Ticked' });
+    let go!: () => void;
+    w.tooOldWait = new Promise((resolve) => { go = resolve; });
+    const applying = w.sources.applyDefaultModel(w.store.getAIProfile('p1')!, OWNER, { model: 'claude-sonnet-5', models: ['claude-sonnet-5', OTHER], apply: ['a1'] }, () => {});
+    await Promise.resolve();
+    w.store.setAgentAIProfile('a1', 'p2');
+    w.store.deleteAIProfile('p1');
+    go();
+    // Was: a TypeError after the writes (a 500).
+    expect(await applying).toEqual({ refused: 'gone', error: 'This AI source was deleted while its new default was being applied: nothing was changed.' });
+    expect(w.store.getAgent('a1')!.model).toBeUndefined();
+  });
+
+  it("an edit of the source while the checks wait is what the new default's list starts from, not the record it was given (HB-1340)", async () => {
+    const w = world();
+    w.store.setAIProfileShared('p1', true);
+    w.agent('a1', { name: 'Ticked' });
+    w.agent('a2', { name: 'Held' });
+    w.agent('n1', { name: 'Theirs', owner: NEIGHBOUR, model: 'claude-extra-01' });
+    let go!: () => void;
+    w.tooOldWait = new Promise((resolve) => { go = resolve; });
+    const applying = w.sources.applyDefaultModel(w.store.getAIProfile('p1')!, OWNER, { model: 'claude-sonnet-5', apply: ['a1'] }, () => {});
+    await Promise.resolve();
+    // The source is edited while the checks wait: another model added, and its default changed.
+    w.store.setAIProfileModels('p1', [OTHER, 'claude-extra-01']);
+    w.store.setAIProfileModel('p1', 'claude-extra-02');
+    go();
+    const out = await applying;
+    expect(out).toMatchObject({ applied: 1, held: 1 });
+    const p = w.store.getAIProfile('p1')!;
+    // Was: the list it was given ([haiku]) written over the edit, and the held agent pinned to the default before it.
+    expect(p.models).toEqual(expect.arrayContaining(['claude-sonnet-5', OTHER, 'claude-extra-01', 'claude-extra-02']));
+    expect(w.store.getAgent('a2')!.model).toBe('claude-extra-02');
+    // Another account's pin the edit put on the list is valid, so it stays theirs.
+    expect(w.store.getAgent('n1')!.model).toBe('claude-extra-01');
+    expect(out).not.toHaveProperty('othersHeld');
   });
 });
 

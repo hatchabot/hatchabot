@@ -244,8 +244,11 @@ export function parseSshEndpoint(
 ): { user?: string; host: string; port?: string } | undefined {
   // Exclude whitespace from user/host so the parser is safe standalone — a
   // caller that skips the route's zod validation still can't smuggle a newline
-  // + ssh_config directive into ~/.ssh/config.
-  const m = /^ssh:\/\/(?:([A-Za-z0-9._-]+)@)?([A-Za-z0-9._-]+)(?::(\d+))?\/?$/.exec(endpoint.trim()); // hostname/IPv4 chars only — no ssh_config globs
+  // + ssh_config directive into ~/.ssh/config. What the console tunnel takes
+  // (sshTarget), no more: a user or host starting with "-", which ssh reads as
+  // an option and refuses, or a port of six digits, was added, and no console
+  // on it ever opened (HB-1258).
+  const m = /^ssh:\/\/(?:([A-Za-z0-9._][A-Za-z0-9._-]*)@)?([A-Za-z0-9._][A-Za-z0-9._-]*)(?::(\d{1,5}))?\/?$/.exec(endpoint.trim()); // hostname/IPv4 chars only — no ssh_config globs
   if (!m || !m[2]) return undefined;
   return { user: m[1], host: m[2], port: m[3] };
 }
@@ -399,6 +402,18 @@ export function runnerSetupSnippet(pubKey: string): string {
 export interface ImageCopyProgress { bytes: number; total?: number }
 
 /**
+ * The longest a runner on another CPU may take to pull the published image
+ * (HB-1254). A pull says nothing while it runs (`--quiet`), so no stall can be
+ * told from a slow link; it had the save/load copy's 3 hours, and only a
+ * restart ended one that hung. A ceiling: `timeoutMs` is the whole copy's
+ * (the save and load, a build of the extra packages), and a longer one is
+ * no reason to wait longer on a pull that may be stuck; a shorter one
+ * shortens the pull too. A link too slow for it pulls by hand on the runner,
+ * which the message says, and the next Install image finds the layers there.
+ */
+export const PULL_CEILING_MS = 3600_000;
+
+/**
  * Copy the control plane's runtime image to a runner:
  * `docker save … | gzip | docker -H <endpoint> load` (load reads gzip as
  * is). Big (2 GB or more before compression) and slow: over a tailnet that
@@ -407,6 +422,8 @@ export interface ImageCopyProgress { bytes: number; total?: number }
  * while still moving. Now a copy is stopped only when nothing has moved for
  * `stallMs` (default 3 minutes), or after `timeoutMs` (default 3 hours) at
  * worst; `onProgress` follows it. Requires the ssh-config block in place.
+ * `signal` stops it whatever it is doing (Remove anyway, HB-1254): its docker
+ * is killed, and it ends `stopped`, its error "Stopped: <the signal's reason>".
  */
 export async function installRuntimeImage(
   endpoint: string,
@@ -444,22 +461,41 @@ export async function installRuntimeImage(
      * `differs`, the install going ahead (HB-1189).
      */
     buildInputs?: string;
+    signal?: AbortSignal;
   } = {},
-): Promise<{ ok: boolean; error?: string; pulled?: string; differs?: string }> {
+): Promise<{ ok: boolean; error?: string; pulled?: string; differs?: string; stopped?: true }> {
   const docker = opts.docker ?? 'docker';
   const image = opts.image ?? 'hatchabot-runtime:latest';
-  // This machine's image runs on this machine's CPU only: copied to a runner
-  // of another kind (an arm64 box to an Intel laptop) it loads, and every
-  // agent built there dies with "exec format error" (2026-10-09). The two
-  // daemons say what they run on; when they differ the runner pulls the
-  // published image of the same OpenClaw (multi-arch) instead.
-  const [here, there] = await Promise.all([dockerArch(docker, []), dockerArch(docker, dockerConnArgs(endpoint))]);
+  const { signal } = opts;
+  // Asked after each step: a stop ends the install there, whatever came back.
+  const stopped = () => ({ ok: false, stopped: true as const, error: `Stopped: ${String(signal?.reason ?? 'the install was stopped.')}` });
+  if (signal?.aborted) return stopped();
+  // This machine's image runs on the CPU it was built for only: copied to a
+  // runner of another kind (an arm64 box to an Intel laptop) it loads, and
+  // every agent built there dies with "exec format error" (2026-10-09). The
+  // image says what it was built for, the runner's daemon what it runs on;
+  // when they differ the runner pulls the published image of the same
+  // OpenClaw (multi-arch) instead. This machine's daemon was asked, and an
+  // image built for another CPU here (under emulation) was copied to a
+  // runner of this machine's kind as matching (HB-1188).
+  const [built, there] = await Promise.all([imageArch(docker, image, signal), dockerArch(docker, dockerConnArgs(endpoint), signal)]);
+  if (signal?.aborted) return stopped();
+  // No such image here is no passing glitch: said by its name, as the copy
+  // (docker save) said it before (review of HB-1188).
+  if (built === 'missing') return { ok: false, error: `There is no image ${image} on this machine, so nothing was copied: build or pull it here first.` };
+  // An image that does not say what it was built for is judged by this
+  // machine's CPU, as before: docker records it for every image it builds or
+  // pulls, so one built here for another CPU says so.
+  const byMachine = built === 'unsaid';
+  const here = typeof built === 'object' ? built.cpu : byMachine ? await dockerArch(docker, [], signal) : undefined;
+  if (signal?.aborted) return stopped();
   // Both must be known. One that could not be read (a `docker info` that
   // failed just then, or said nothing usable) fell through to the copy, and a
   // runner of another kind got an image none of its agents could run (HB-0976).
   if (!here || !there) {
-    const who = !here && !there ? 'this machine or that runner runs' : !here ? 'this machine runs' : 'that runner runs';
-    return { ok: false, error: `Could not tell which CPU ${who} on (docker info did not say), so nothing was copied: an image for another kind of CPU would not run there. Try again in a moment.` };
+    const what = [!here && (byMachine ? 'this machine runs on' : "this machine's image is built for"), !there && 'that runner runs on'].filter(Boolean).join(' or ');
+    const said = !here && !there ? 'docker did not say' : !here && !byMachine ? 'docker image inspect did not say' : 'docker info did not say';
+    return { ok: false, error: `Could not tell which CPU ${what} (${said}), so nothing was copied: an image for another kind of CPU would not run there. Try again in a moment.` };
   }
   if (here !== there) {
     if (!opts.published) {
@@ -467,18 +503,26 @@ export async function installRuntimeImage(
     }
     const { ref, openclawVersion } = opts.published;
     if (opts.extrasUnread) {
-      return { ok: false, error: `That runner is ${there} and this machine ${here}, so it gets the published image with this machine's extra packages built onto it, and which extra packages this machine's image has could not be read just now (${opts.extrasUnread}). Nothing was installed: try again in a moment.` };
+      return { ok: false, error: `That runner is ${there} and this machine's image ${here}, so it gets the published image with this machine's extra packages built onto it, and which extra packages this machine's image has could not be read just now (${opts.extrasUnread}). Nothing was installed: try again in a moment.` };
     }
     const extras = opts.extraPackages ?? [];
     // Names only (they go into a RUN line), checked as a recipe checks them.
     const bad = extras.find((p) => p.length > 64 || !APT_PACKAGE_NAME.test(p));
-    if (bad) return { ok: false, error: `This machine's image records an extra package "${bad.slice(0, 40)}" that is not a package name, so it cannot be made again on that runner (${there}; this machine is ${here}).` };
-    const pulled = await dockerRun(docker, [...dockerConnArgs(endpoint), 'pull', '--quiet', ref], opts.timeoutMs ?? 3 * 3600_000);
+    if (bad) return { ok: false, error: `This machine's image records an extra package "${bad.slice(0, 40)}" that is not a package name, so it cannot be made again on that runner (${there}; this machine's image is ${here}).` };
+    const pullMs = Math.min(opts.timeoutMs ?? PULL_CEILING_MS, PULL_CEILING_MS);
+    const pulled = await dockerRun(docker, [...dockerConnArgs(endpoint), 'pull', '--quiet', ref], pullMs, signal);
+    if (signal?.aborted) return stopped();
+    if (pulled.timedOut) {
+      const count = (n: number, unit: string) => `${n} ${unit}${n === 1 ? '' : 's'}`;
+      const within = pullMs === PULL_CEILING_MS ? 'an hour' : pullMs >= 60_000 ? count(Math.round(pullMs / 60_000), 'minute') : count(Math.ceil(pullMs / 1000), 'second');
+      return { ok: false, error: `That runner is ${there} and this machine's image ${here}, so it needs the published image ${ref}, and pulling it there did not finish within ${within}, so it was stopped: is that runner's link slow, or the pull stuck? Try Install image again, or pull it on that runner by hand (docker pull ${ref}), then Install image again.` };
+    }
     if (pulled.code !== 0) {
-      return { ok: false, error: `That runner is ${there} and this machine ${here}, so it needs the published image ${ref}, and pulling it there failed: ${pulled.stderr.slice(-300) || `exit ${pulled.code}`}` };
+      return { ok: false, error: `That runner is ${there} and this machine's image ${here}, so it needs the published image ${ref}, and pulling it there failed: ${pulled.stderr.slice(-300) || `exit ${pulled.code}`}` };
     }
     // The tag must hold the OpenClaw asked for (build-runtime-image.sh's rule: a pulled image proves its version by its label).
-    const [has = '', theirs = ''] = (await dockerRun(docker, [...dockerConnArgs(endpoint), 'image', 'inspect', '--format', `{{ index .Config.Labels "org.agentclaw.openclaw-version" }}|{{ index .Config.Labels "${BUILD_INPUTS_LABEL}" }}`, ref], 60_000)).stdout.trim().split('|');
+    const [has = '', theirs = ''] = (await dockerRun(docker, [...dockerConnArgs(endpoint), 'image', 'inspect', '--format', `{{ index .Config.Labels "org.agentclaw.openclaw-version" }}|{{ index .Config.Labels "${BUILD_INPUTS_LABEL}" }}`, ref], 60_000, signal)).stdout.trim().split('|');
+    if (signal?.aborted) return stopped();
     if (has !== openclawVersion) return { ok: false, error: `The published image ${ref} carries OpenClaw ${has || 'unknown'}, not ${openclawVersion}; not using it.` };
     // Built from what this machine's was, but for its packages, which are laid
     // on below: compared when both say (an image from before the label does not).
@@ -491,11 +535,13 @@ export async function installRuntimeImage(
       const built = await buildOn(docker, dockerConnArgs(endpoint), image, recipeDockerfile({ tag: image, base: ref, packages: extras, channels: [] }), {
         'org.hatchabot.extra-packages': extras.join(' '),
         'org.hatchabot.rebuilt-from-recipe': '1',
-      }, opts.timeoutMs ?? 3 * 3600_000);
-      if (built.code !== 0) return { ok: false, error: `That runner is ${there} and this machine ${here}, so it pulled the published image ${ref}; adding this machine's extra packages (${extras.join(', ')}) to it there failed, and the runner keeps the image it had: ${(built.stderr || built.stdout).slice(-300) || `exit ${built.code}`}` };
+      }, opts.timeoutMs ?? 3 * 3600_000, signal);
+      if (signal?.aborted) return stopped();
+      if (built.code !== 0) return { ok: false, error: `That runner is ${there} and this machine's image ${here}, so it pulled the published image ${ref}; adding this machine's extra packages (${extras.join(', ')}) to it there failed, and the runner keeps the image it had: ${(built.stderr || built.stdout).slice(-300) || `exit ${built.code}`}` };
       return { ok: true, pulled: ref, ...said };
     }
-    const tagged = await dockerRun(docker, [...dockerConnArgs(endpoint), 'tag', ref, image], 60_000);
+    const tagged = await dockerRun(docker, [...dockerConnArgs(endpoint), 'tag', ref, image], 60_000, signal);
+    if (signal?.aborted) return stopped();
     if (tagged.code !== 0) return { ok: false, error: `Tagging ${ref} as ${image} on the runner failed: ${tagged.stderr.slice(-300)}` };
     return { ok: true, pulled: ref, ...said };
   }
@@ -515,14 +561,17 @@ export async function installRuntimeImage(
     save.stderr.on('data', (d) => (stderr += d));
     load.stderr.on('data', (d) => (stderr += d));
     let settled = false;
-    const finish = (r: { ok: boolean; error?: string }) => {
+    const onStop = () => { save.kill('SIGKILL'); load.kill('SIGKILL'); finish(stopped()); };
+    const finish = (r: { ok: boolean; error?: string; stopped?: true }) => {
       if (settled) return;
       settled = true;
       clearTimeout(overall);
       clearTimeout(stall);
+      signal?.removeEventListener('abort', onStop);
       resolve(r);
     };
     const kill = (error: string) => { save.kill('SIGKILL'); load.kill('SIGKILL'); finish({ ok: false, error }); };
+    signal?.addEventListener('abort', onStop, { once: true });
     const stallMs = opts.stallMs ?? 3 * 60_000;
     let stall = setTimeout(() => kill('The copy stopped moving (nothing for 3 minutes): is the runner still reachable?'), stallMs);
     const overall = setTimeout(() => kill('Timed out copying the image to the runner.'), opts.timeoutMs ?? 3 * 3600_000);
@@ -569,35 +618,74 @@ export async function installRuntimeImage(
   });
 }
 
-/** What CPU a Docker daemon runs on (`docker info`'s Architecture: x86_64, aarch64), or undefined when it does not say. */
-async function dockerArch(docker: string, conn: string[]): Promise<string | undefined> {
-  const r = await dockerRun(docker, [...conn, 'info', '--format', '{{.Architecture}}'], 30_000);
+/** What CPU a Docker daemon runs on (`docker info`'s Architecture: x86_64, aarch64), in an image platform's words (cpuName), or undefined when it does not say. */
+async function dockerArch(docker: string, conn: string[], signal?: AbortSignal): Promise<string | undefined> {
+  const r = await dockerRun(docker, [...conn, 'info', '--format', '{{.Architecture}}'], 30_000, signal);
   const a = r.stdout.trim();
-  return r.code === 0 && /^[A-Za-z0-9_-]{1,32}$/.test(a) ? a : undefined;
+  return r.code === 0 && /^[A-Za-z0-9_-]{1,32}$/.test(a) ? cpuName(a) : undefined;
+}
+
+/**
+ * What CPU an image here was built for (its platform's Architecture: amd64,
+ * arm64) (HB-1188); 'missing' when there is no such image here, 'unsaid' when
+ * it is here and says none, undefined when docker could not be asked.
+ */
+async function imageArch(docker: string, image: string, signal?: AbortSignal): Promise<{ cpu: string } | 'missing' | 'unsaid' | undefined> {
+  const r = await dockerRun(docker, ['image', 'inspect', '--format', '{{.Architecture}}', image], 30_000, signal);
+  const a = r.stdout.trim();
+  if (r.code !== 0) return /No such (image|object)|image not known/i.test(r.stderr) ? 'missing' : undefined;
+  if (a === '' || a === '<no value>') return 'unsaid';
+  return /^[A-Za-z0-9_-]{1,32}$/.test(a) ? { cpu: cpuName(a) } : undefined;
+}
+
+/**
+ * A CPU in the words of Docker's platforms (amd64, arm64, arm, 386): `docker
+ * info` gives the kernel's (x86_64, aarch64), an image its platform's, and the
+ * two are compared.
+ */
+function cpuName(arch: string): string {
+  const a = arch.toLowerCase();
+  if (a === 'x86_64' || a === 'x86-64' || a === 'x64') return 'amd64';
+  if (a === 'aarch64' || a === 'armv8' || a === 'armv8l') return 'arm64';
+  if (/^armv[5-7]/.test(a) || a === 'armhf' || a === 'armel') return 'arm';
+  if (/^i[3-6]86$/.test(a) || a === 'x86') return '386';
+  return a;
 }
 
 /** `docker build` of one Dockerfile (the whole context, so it streams to a remote daemon as easily), tagged and labelled. */
-async function buildOn(docker: string, conn: string[], tag: string, dockerfile: string, labels: Record<string, string>, timeoutMs: number): Promise<{ code: number; stdout: string; stderr: string }> {
+async function buildOn(docker: string, conn: string[], tag: string, dockerfile: string, labels: Record<string, string>, timeoutMs: number, signal?: AbortSignal): Promise<DockerRan> {
   const dir = await mkdtemp(join(tmpdir(), 'hatchabot-install-'));
   try {
     await writeFile(join(dir, 'Dockerfile'), dockerfile, 'utf8');
-    return await dockerRun(docker, [...conn, 'build', '-t', tag, ...Object.entries(labels).flatMap(([k, v]) => ['--label', `${k}=${v}`]), dir], timeoutMs);
+    return await dockerRun(docker, [...conn, 'build', '-t', tag, ...Object.entries(labels).flatMap(([k, v]) => ['--label', `${k}=${v}`]), dir], timeoutMs, signal);
   } finally {
     await rm(dir, { recursive: true, force: true }).catch(() => {});
   }
 }
 
-/** One docker call with no input, its output, and a time limit. */
-function dockerRun(docker: string, args: string[], timeoutMs: number): Promise<{ code: number; stdout: string; stderr: string }> {
+/** What one docker call said; `timedOut` when its time limit killed it, `stopped` when its signal did. */
+type DockerRan = { code: number; stdout: string; stderr: string; timedOut?: true; stopped?: true };
+
+/** One docker call with no input, its output, and a time limit; `signal` kills it (HB-1254), and an aborted one never starts. */
+function dockerRun(docker: string, args: string[], timeoutMs: number, signal?: AbortSignal): Promise<DockerRan> {
   return new Promise((resolve) => {
+    if (signal?.aborted) return resolve({ code: 1, stdout: '', stderr: 'stopped', stopped: true });
     const child = spawn(docker, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
+    let why: 'timedOut' | 'stopped' | undefined;
     child.stdout.on('data', (d) => (stdout += d));
     child.stderr.on('data', (d) => (stderr += d));
-    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
+    const timer = setTimeout(() => { why ??= 'timedOut'; child.kill('SIGKILL'); }, timeoutMs);
     timer.unref();
-    child.on('error', (err) => { clearTimeout(timer); resolve({ code: 1, stdout, stderr: String(err.message) }); });
-    child.on('close', (code) => { clearTimeout(timer); resolve({ code: code ?? 1, stdout, stderr }); });
+    const onStop = () => { why ??= 'stopped'; child.kill('SIGKILL'); };
+    signal?.addEventListener('abort', onStop, { once: true });
+    const done = (r: DockerRan) => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onStop);
+      resolve(why ? { ...r, [why]: true } : r);
+    };
+    child.on('error', (err) => done({ code: 1, stdout, stderr: String(err.message) }));
+    child.on('close', (code) => done({ code: code ?? 1, stdout, stderr }));
   });
 }

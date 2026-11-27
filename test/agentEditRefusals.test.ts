@@ -51,7 +51,6 @@ const worlds: PatchWorld[] = [];
 const busy: string[] = [];
 const dirs: string[] = [];
 afterEach(async () => {
-  for (const id of busy.splice(0)) clearBusy(id);
   for (const w of worlds.splice(0)) { w.routes?.stop(); await w.f.close(); }
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
   vi.unstubAllGlobals();
@@ -384,6 +383,26 @@ describe('PATCH /v1/agents/:id refuses inside its holds (the source, the limits 
     g.open();
     expect((await r).statusCode).toBe(200);
     expect(w.store.getAgent(id)!.aiProfileId).toBe('p2');
+  });
+
+  it('the source is held however long the switch takes, until it ends (HB-1413)', async () => {
+    const w = await world();
+    const id = await runningAgent(w);
+    addSource(w, 'p2');
+    const g = holdDockerUpdate(w.provider);
+    const r = Promise.resolve(w.patch(id, { aiProfileId: 'p2', memoryCap: '4g' }));
+    await g.reached;
+    // Its docker call is slow: eleven minutes go by.
+    const later = Date.now() + 11 * 60_000;
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(later);
+    // Was: the hold had lapsed at ten minutes, and the source was deleted under the switch.
+    expect(said(await w.f.inject({ method: 'DELETE', url: '/v1/ai-profiles/p2', headers: as() }))).toEqual({ status: 409, error: 'An agent is switching to it; try again in a moment.' });
+    clock.mockRestore();
+    g.open();
+    expect((await r).statusCode).toBe(200);
+    expect(w.store.getAgent(id)!.aiProfileId).toBe('p2');
+    // Over, it holds nothing.
+    expect((await w.f.inject({ method: 'DELETE', url: '/v1/ai-profiles/p2', headers: as() })).statusCode).toBe(400); // in use by the agent now
   });
 
   it('the agent deleted during the cap\'s docker call, with a swap allowance to set: 404, and no swap update', async () => {

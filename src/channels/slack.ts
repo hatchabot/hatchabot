@@ -69,10 +69,15 @@ const SLACK_BUSY = new Set(['ratelimited', 'request_timeout', 'service_unavailab
  * "Slack refused the bot token (503)", and counted (HB-1262).
  */
 function slackUnanswered(r: { status: number; body: any }, which: 'bot' | 'app-level'): ConnectorError | undefined {
+  const why = slackBusyWhy(r);
+  return why ? new ConnectorError(`Slack did not answer properly just now (${why}), so the ${which} token was not checked. Try again in a minute.`, true) : undefined;
+}
+
+/** Why an answer is Slack not answering (a limit, an outage, a page not its own), in words; undefined for an answer of Slack's own. */
+function slackBusyWhy(r: { status: number; body: any }): string | undefined {
   const error = typeof r.body?.error === 'string' ? r.body.error : undefined;
   if (!(r.status === 429 || r.status >= 500 || typeof r.body?.ok !== 'boolean' || (error && SLACK_BUSY.has(error)))) return undefined;
-  const why = r.status === 429 || error === 'ratelimited' ? 'too many requests' : r.status >= 500 || !error ? `HTTP ${r.status}` : error;
-  return new ConnectorError(`Slack did not answer properly just now (${why}), so the ${which} token was not checked. Try again in a minute.`, true);
+  return r.status === 429 || error === 'ratelimited' ? 'too many requests' : r.status >= 500 || !error ? `HTTP ${r.status}` : error;
 }
 
 export function slackConnector(f: FetchLike = fetch): ChannelConnector {
@@ -125,8 +130,10 @@ export function slackConnector(f: FetchLike = fetch): ChannelConnector {
         throw new ConnectorError('The two tokens are from different Slack apps. Take both from the same app.');
       }
       // Unanswered (no users:read), the check could not be made: said, not
-      // silently passed (night review, 2026-09-28).
+      // silently passed (night review, 2026-09-28). A rate limit or an
+      // outage is Slack not answering, not a scope the app lacks (HB-1420).
       const unchecked = !botApp;
+      const lookupBusy = unchecked ? slackBusyWhy(bot) : undefined;
 
       const conn = await api('apps.connections.open', appToken);
       const connBusy = conn.body?.ok === true ? undefined : slackUnanswered(conn, 'app-level');
@@ -140,7 +147,8 @@ export function slackConnector(f: FetchLike = fetch): ChannelConnector {
       }
 
       const warnings: string[] = [];
-      if (unchecked) warnings.push("Slack would not say which app the bot token belongs to (the app lacks users:read), so Hatchabot could not check both tokens are from the same app. Make sure they are.");
+      if (lookupBusy) warnings.push(`Slack did not answer which app the bot token belongs to just now (${lookupBusy}), so Hatchabot could not check both tokens are from the same app. Re-check in a minute, or make sure they are.`);
+      else if (unchecked) warnings.push("Slack would not say which app the bot token belongs to (the app lacks users:read), so Hatchabot could not check both tokens are from the same app. Make sure they are.");
       const scopes = (auth.headers.get('x-oauth-scopes') ?? '').split(',').map((x) => x.trim()).filter(Boolean);
       if (scopes.length) {
         const missing = NEEDED_SCOPES.filter((sc) => !scopes.includes(sc));

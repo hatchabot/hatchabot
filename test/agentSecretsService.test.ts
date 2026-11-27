@@ -50,7 +50,7 @@ interface World {
   telegram(username: string | undefined): void;
 }
 
-function world(): World {
+function world(opts: { telegramFetch?: typeof fetch } = {}): World {
   const store = new Store(new Database(':memory:'));
   store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
   store.insertAIProfile({ id: 'p1', ownerId: OWNER, name: 'AI', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p1', createdAt: 'now' });
@@ -66,6 +66,7 @@ function world(): World {
       pool: { owns: (u: string) => w.pool.has(u) } as never,
     },
     provisionWhenFree: (id) => { w.asked.push(`provision ${id}`); },
+    ...(opts.telegramFetch ? { telegramFetch: opts.telegramFetch } : {}),
   });
   w.agent = (id, o = {}) => {
     store.insertAgent({
@@ -171,6 +172,17 @@ describe('the bot token a parked setup waits for', () => {
     expect(await w.s.botToken.answer(a, { token: fakeToken(2) }, callerOf(w))).toEqual({ ok: false, status: 409, error: 'A bot token came in already, and setup is taking it.' });
   });
 
+  it('checks the token with the Telegram it is handed, not the global fetch (HB-1447)', async () => {
+    const getMes: string[] = [];
+    const w = world({ telegramFetch: (async (u: string | URL | Request) => { getMes.push(String(u)); return new Response(JSON.stringify({ ok: true, result: { username: 'kitchen_helper_bot' } }), { headers: { 'content-type': 'application/json' } }); }) as typeof fetch });
+    const global = vi.fn();
+    vi.stubGlobal('fetch', global);
+    const a = w.agent('a', { waiting: true });
+    expect(await w.s.botToken.answer(a, { token: fakeToken(1) }, callerOf(w))).toEqual({ ok: true, body: { username: 'kitchen_helper_bot', stepAnswered: true } });
+    expect(getMes).toEqual([expect.stringMatching(/^https:\/\/api\.telegram\.org\/bot.+\/getMe$/)]);
+    expect(global).not.toHaveBeenCalled();
+  });
+
   it('counts a wrong token against the caller, and refuses a throttled caller before asking Telegram', async () => {
     const w = world();
     const a = w.agent('a', { waiting: true });
@@ -267,12 +279,39 @@ describe('the bot token a parked setup waits for', () => {
         ok: false, status: 409,
         error: 'Telegram is switched off in your hand-built instance\'s config, but its account "porch_bot" for "helper" is still on: '
           + 'switched back on there, Telegram would poll this bot in both copies. '
-          + 'Switch that account off too (enabled: false under channels.telegram.accounts.porch_bot), then try again.',
+          + 'Switch that account off too (in its openclaw.json, under channels.telegram.accounts, set "enabled": false on the account "porch_bot"), then try again.',
       });
       expect(w.asked).toEqual([]);
       // Its account off as well: taken over, as before.
       write({ enabled: false });
       expect(await w.s.botToken.answer(a, { fromWorkspace: join(dir, 'workspace') }, callerOf(w))).toEqual({ ok: true, body: { username: 'porch_bot', stepAnswered: true } });
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('a takeover refusal names the account by its key in the config, not as an @handle, and its place for any key (HB-1300)', async () => {
+    const w = world();
+    const a = w.agent('a', { waiting: true });
+    const dir = mkdtempSync(join(tmpdir(), 'hb-workspace-'));
+    try {
+      const config = join(dir, 'openclaw.json');
+      // A key with a dot: "channels.telegram.accounts.made.up" read as a deeper path.
+      const write = (telegram: Record<string, unknown>) => writeFileSync(config, JSON.stringify({
+        agents: { list: [{ id: 'helper', workspace: join(dir, 'workspace') }] },
+        bindings: [{ agentId: 'helper', match: { channel: 'telegram', accountId: 'made.up' } }],
+        channels: { telegram: { ...telegram, accounts: { 'made.up': { botToken: fakeToken(5) } } } },
+      }));
+      vi.stubEnv('OPENCLAW_CONFIG', config);
+      write({});
+      expect(await w.s.botToken.answer(a, { fromWorkspace: join(dir, 'workspace') }, callerOf(w))).toEqual({
+        ok: false, status: 409,
+        error: 'Its bot (Telegram account "made.up") is still enabled for "helper" in your hand-built instance. '
+          + 'Turn it off there first, or both copies will fight over every message.',
+      });
+      write({ enabled: false });
+      const off = await w.s.botToken.answer(a, { fromWorkspace: join(dir, 'workspace') }, callerOf(w)) as { error: string };
+      expect(off.error).toContain('under channels.telegram.accounts, set "enabled": false on the account "made.up"');
+      expect(off.error).not.toMatch(/@made\.up|accounts\.made\.up/);
+      expect(w.asked).toEqual([]);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 

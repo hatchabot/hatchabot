@@ -199,3 +199,14 @@ export function waitersFor(agentId: string): number {
 export function forgetReservation(agentId: string): void {
   letGo(agentId);
 }
+
+/**
+ * Forget every reservation and let every waiter go, as a new process starts
+ * with none. For the tests' setup only (test/support/freshReservations.ts),
+ * which runs it after every test: a test world shares the process with the
+ * one before it, and an agent of the same id held there was still held in
+ * the next (HB-0873). src never calls it (test/reservations.test.ts).
+ */
+export function forgetAllReservationsForTests(): void {
+  for (const agentId of new Set([...reservations.keys(), ...freed.keys()])) letGo(agentId);
+}

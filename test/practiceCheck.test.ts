@@ -38,9 +38,11 @@ type Keeps = 'state' | 'both' | 'own' | 'part' | 'part-new-id' | 'no-ids' | 'no-
 /**
  * `ends`: how the run ends, answered (ok) or cut off at its limit (timeout). `slowRead`: the first usage
  * read takes 2 s. `seen`: whether the agent's own transcripts hold a call from before ('before'), and
- * whether the gate's ask adds one where the usage reader reads ('ask'), or neither ('none').
+ * whether the gate's ask adds one where the usage reader reads ('ask'), or neither ('none'). `repeats`:
+ * the call from before has the id of the run's first. `many`: 100000 more calls from before, more than
+ * the usage reader lists by id. `date`: the container's `date` knows no %N, and prints seconds alone.
  */
-function sandbox({ keeps = 'state', runs = '2026.10.1', harness = false, heartbeat = '"0m"', ends = 'ok', slowRead = false, seen = 'ask', later }: { keeps?: Keeps; runs?: string; harness?: boolean; heartbeat?: string; ends?: 'ok' | 'timeout'; slowRead?: boolean; seen?: 'ask' | 'before' | 'none'; later?: 'copy' | 'other' } = {}) {
+function sandbox({ keeps = 'state', runs = '2026.10.1', harness = false, heartbeat = '"0m"', ends = 'ok', slowRead = false, seen = 'ask', later, repeats = false, many = false, date }: { keeps?: Keeps; runs?: string; harness?: boolean; heartbeat?: string; ends?: 'ok' | 'timeout'; slowRead?: boolean; seen?: 'ask' | 'before' | 'none'; later?: 'copy' | 'other' | 'drop' | 'rename'; repeats?: boolean; many?: boolean; date?: 'seconds' } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'hb-practice-check-')); dirs.push(root);
   const bin = join(root, 'bin'), home = join(root, 'home'), state = join(home, '.openclaw'), inside = join(root, 'container-tmp');
   const agentDir = join(state, 'agents', SLUG, 'agent');
@@ -59,15 +61,22 @@ function sandbox({ keeps = 'state', runs = '2026.10.1', harness = false, heartbe
   const own = new Database(join(agentDir, 'openclaw-agent.sqlite'));
   own.exec('CREATE TABLE transcript_events (session_id TEXT, seq INTEGER, created_at INTEGER, event_json TEXT, event_zstd BLOB)');
   if (seen !== 'none') own.prepare('INSERT INTO transcript_events VALUES (?, ?, ?, ?, NULL)').run('main', 1, Date.now() - 60_000,
-    JSON.stringify({ type: 'message', id: 'm1', timestamp: new Date().toISOString(), message: { role: 'assistant', model: 'claude-opus-4-8', usage: { input: 5000, output: 0, cacheRead: 0, cacheWrite: 0 } } }));
+    JSON.stringify({ type: 'message', id: repeats ? 'e1' : 'm1', timestamp: new Date().toISOString(), message: { role: 'assistant', model: 'claude-opus-4-8', usage: { input: 5000, output: 0, cacheRead: 0, cacheWrite: 0 } } }));
+  if (many) {
+    const put = own.prepare('INSERT INTO transcript_events VALUES (?, ?, ?, ?, NULL)'), at = new Date(Date.now() - 120_000).toISOString();
+    own.transaction(() => { for (let i = 0; i < 100_000; i++) put.run('old', i + 1, Date.now() - 120_000, `{"type":"message","id":"h${i}","timestamp":"${at}","message":{"role":"assistant","model":"claude-opus-4-8","usage":{"input":1,"output":0,"cacheRead":0,"cacheWrite":0}}}`); })();
+  }
   own.close();
   // The gate's ask, answered: its call in the agent's own transcripts, as a real turn leaves one.
   const askLands = join(root, 'ask-lands.js');
   writeFileSync(askLands, `const db=new (require('node:sqlite').DatabaseSync)(${JSON.stringify(join(agentDir, 'openclaw-agent.sqlite'))});
 db.prepare('INSERT INTO transcript_events VALUES (?, ?, ?, ?, NULL)').run('main',2,Date.now(),JSON.stringify({type:'message',id:'a1',timestamp:new Date().toISOString(),message:{role:'assistant',model:'claude-opus-4-8',usage:{input:300,output:5,cacheRead:0,cacheWrite:0}}}));db.close();`);
-  // later: a writer, left running as the run ends, puts a copy of it (its ids, or other ones) in the agent's own store 1 s on.
+  // later: a writer, left running as the run ends, puts a copy of it (its ids, or other ones) in the agent's own store 1 s on,
+  // or takes the agent's call from before out of it ('drop'), or gives that call another id ('rename').
   const laterJs = join(root, 'later.js');
   writeFileSync(laterJs, `const [file,rows]=process.argv.slice(2);setTimeout(()=>{const db=new (require('node:sqlite').DatabaseSync)(file);
+if(rows==='drop'){db.exec("DELETE FROM transcript_events WHERE session_id='main' AND seq=1");db.close();return;}
+if(rows==='rename'){db.exec("UPDATE transcript_events SET event_json=replace(event_json,'\\"id\\":\\"m1\\"','\\"id\\":\\"m1-moved\\"') WHERE session_id='main' AND seq=1");db.close();return;}
 const put=db.prepare('INSERT INTO transcript_events VALUES (?, ?, ?, ?, NULL)');
 JSON.parse(rows).forEach(([id,u],i)=>put.run('p1-later',i+1,Date.now(),JSON.stringify({type:'message',id,timestamp:new Date().toISOString(),message:{role:'assistant',model:'claude-opus-4-8',usage:u}})));db.close();},1000);`);
   const log = join(root, 'docker.log'), timing = join(root, 'timing.log');
@@ -80,6 +89,7 @@ const sub=s=>s.replaceAll('/home/node/.openclaw',${JSON.stringify(state)});
 if(a[0]==='exec'){
   let i=1;const stdin=a[i]==='-i';if(stdin)i++;
   if(a[i]!==${JSON.stringify(CONTAINER)}){process.stderr.write('Error: No such container: '+a[i]+'\\n');process.exit(1);}
+  if(a[i+1]==='date'&&${JSON.stringify(date === 'seconds')}){process.stdout.write(Math.floor(Date.now()/1000)+'\\n');process.exit(0);}
   // A login shell would read the machine's profile: plain bash here.
   const cmd=a.slice(i+1).map(sub).map(x=>x==='-lc'?'-c':x);
   const reader=cmd[0]==='node'&&cmd[1]==='-e',input=stdin?fs.readFileSync(0,'utf8'):'';
@@ -89,7 +99,8 @@ if(a[0]==='exec'){
   if(payload)fs.appendFileSync(${JSON.stringify(timing)},JSON.stringify({practiceExpiresAt:JSON.parse(Buffer.from(payload[1],'base64').toString()).expiresAt})+'\\n');
   const r=cp.spawnSync(cmd[0],cmd.slice(1),{input:sub(input),env:{HOME:${JSON.stringify(home)},PATH:${JSON.stringify(bin)},TMPDIR:${JSON.stringify(inside)}},encoding:'utf8',maxBuffer:16*1024*1024});
   if(reader)fs.appendFileSync(${JSON.stringify(timing)},JSON.stringify({readEnded:Date.now()})+'\\n');
-  process.stdout.write(r.stdout||'');process.stderr.write(r.stderr||'');process.exit(r.status??1);
+  // Written whole before the exit: a write to a pipe left pending is cut off by it (a usage read is near 1 MB with many calls).
+  fs.writeSync(1,r.stdout||'');fs.writeSync(2,r.stderr||'');process.exit(r.status??1);
 }
 if(a[0]==='image'&&a[1]==='inspect'){process.stdout.write(a.join(' ').includes('openclaw-version')?${JSON.stringify(runs)}+'\\n':'\\n');process.exit(0);}
 if(a[0]==='ps'){process.stdout.write(${JSON.stringify(CONTAINER)}+'\\n');process.exit(0);}
@@ -129,7 +140,7 @@ if(keeps!=='own')keep(path.join(argv[argv.indexOf('--state-dir')+1],'agents',${J
 const ownCopy={own:RUN,both:RUN,'no-ids-both':RUN,part:[RUN[1]],'part-new-id':[['e2-copy',RUN[1][1]]]}[keeps];
 if(ownCopy)keep(path.join(config.agents.entries[${JSON.stringify(SLUG)}].agentDir,'openclaw-agent.sqlite'),ownCopy);
 const later=${JSON.stringify(later ?? null)};
-if(later)require('node:child_process').spawn(process.execPath,[${JSON.stringify(laterJs)},path.join(config.agents.entries[${JSON.stringify(SLUG)}].agentDir,'openclaw-agent.sqlite'),JSON.stringify(later==='copy'?RUN:[['e9-later',RUN[1][1]]])],{detached:true,stdio:'ignore'}).unref();
+if(later)require('node:child_process').spawn(process.execPath,[${JSON.stringify(laterJs)},path.join(config.agents.entries[${JSON.stringify(SLUG)}].agentDir,'openclaw-agent.sqlite'),later==='drop'||later==='rename'?later:JSON.stringify(later==='copy'?RUN:[['e9-later',RUN[1][1]]])],{detached:true,stdio:'ignore'}).unref();
 if(${JSON.stringify(ends)}==='timeout'){process.stdout.write(JSON.stringify({ok:false,status:'timeout',usage:{input:150,output:50,total:200}}));process.exit(2);}
 const skill=/\\[skill-check:[a-f0-9]+\\]/.exec(fs.readFileSync(path.join(workspace,'skills','hatchabot-writing','SKILL.md'),'utf8'))[0];
 const sample=/\\[sample-check:[a-f0-9]+\\]/.exec(fs.readFileSync(path.join(workspace,'sample.md'),'utf8'))[0];
@@ -167,8 +178,9 @@ esac
       copyFileSync(join(ROOT, 'scripts', 'candidate-gate.sh'), join(from, 'scripts', 'candidate-gate.sh'));
       copyFileSync(join(ROOT, 'src', 'orchestrator', 'skills', 'skillTrials.ts'), join(from, 'src', 'orchestrator', 'skills', 'skillTrials.ts'));
       if (o.crashes) {
+        // As Node ends on a throw: exit 1, as a verdict that does not hold, its version the last line (HB-1453).
         mkdirSync(join(from, 'node_modules', '.bin'), { recursive: true });
-        writeFileSync(join(from, 'node_modules', '.bin', 'tsx'), '#!/bin/bash\necho "    at made-up frame (practice-check.ts:1:1)" >&2\necho "TypeError: a made-up crash" >&2\nexit 7\n', { mode: 0o755 });
+        writeFileSync(join(from, 'node_modules', '.bin', 'tsx'), '#!/bin/bash\ncat >&2 <<\'EOF\'\n/w/scripts/practice-check.ts:1\nconst made = up();\n             ^\n\nTypeError: a made-up crash\n    at made-up frame (practice-check.ts:1:1)\n\nNode.js v22.0.0\nEOF\nexit 1\n', { mode: 0o755 });
       }
     }
     const r = spawnSync('bash', [join(from, 'scripts', 'candidate-gate.sh'), `hatchabot-runtime:${runs}`], { cwd: root, env, encoding: 'utf8', timeout: 120_000 });
@@ -244,6 +256,37 @@ describe('the candidate gate checks that Practice may run on its OpenClaw (HB-14
     expect(other).toMatchObject({ code: 3, last: `Practice stays on OpenClaw ${P}: could not check: the agent's own usage changed after the run ended (by 2160 tokens in 1 call within 3 s): this release may keep a copy of the run there a moment later, or another turn ran. Run the gate again` });
   });
 
+  // HB-1453: an id a call of the agent's own had before the run is no copy of it, but was read as one.
+  it('holds when one of the run\'s ids is also that of a call the agent had made before, which the reader counts once, and says so', () => {
+    const r = sandbox({ repeats: true }).check();
+    expect(r.code, r.stderr).toBe(0);
+    expect(r.last).toBe(`Practice may move to OpenClaw 2026.10.1: the run's 2 calls (4600 tokens) are in its own state folder, where Practice reads them, and none of them is in the agent's own usage (by their ids; 1 of them also the id of a call the agent had made before, which the reader counts once), which did not rise, then or in the 0.1 s after the run ended: counted once. A Hatchabot release may now move PRACTICE_OPENCLAW (src/orchestrator/skills/skillTrials.ts) from ${P} to 2026.10.1`);
+  });
+
+  // HB-1453: past the ids the reader lists, a copy under the run's ids read as "another turn ran, or other ids".
+  it('could not check when the agent has more calls than the usage reader lists by id, and says that is why', () => {
+    const r = sandbox({ many: true, keeps: 'both' }).check();
+    expect(r).toMatchObject({ code: 3, last: `Practice stays on OpenClaw ${P}: could not check: the agent's own usage rose by 4600 tokens in 2 calls while the practice ran, and the agent has more calls than the usage reader lists by id (100000), too many for its ids to tell them apart. Run the gate again` });
+  }, 60_000);
+
+  // HB-1453: a fall read "by -5000 tokens in -1 calls".
+  it('says the agent\'s own usage fell, in plain numbers, when it falls in the moment after the run ends', () => {
+    const r = sandbox({ later: 'drop' }).check('2026.10.1', ['--settle-ms', '3000']);
+    expect(r).toMatchObject({ code: 3, last: `Practice stays on OpenClaw ${P}: could not check: the agent's own usage changed after the run ended (it fell by 5000 tokens and 1 call within 3 s): this release may keep a copy of the run there a moment later, or another turn ran. Run the gate again` });
+    // Its calls' ids alone, in words that read (review: "(in its calls' ids, not their totals within 3 s)").
+    const ids = sandbox({ later: 'rename' }).check('2026.10.1', ['--settle-ms', '3000']);
+    expect(ids).toMatchObject({ code: 3, last: `Practice stays on OpenClaw ${P}: could not check: the agent's own usage changed after the run ended (its calls' ids changed within 3 s, not their totals): this release may keep a copy of the run there a moment later, or another turn ran. Run the gate again` });
+  });
+
+  // HB-1453: a settle of any length was waited out, with nothing to end it.
+  it('refuses a settle longer than a minute before anything is asked of the container', () => {
+    const s = sandbox();
+    const r = s.check('2026.10.1', ['--settle-ms', '60001']);
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('[--settle-ms <ms, at most 60000>]');
+    expect(existsSync(join(s.root, 'docker.log'))).toBe(false);
+  }, 90_000);
+
   // Review (L1): a run cut off at its limit, its calls in its state folder, passed as "counted once".
   it('could not check when the practice did not finish, wherever its calls were', () => {
     const r = sandbox({ ends: 'timeout' }).check();
@@ -316,6 +359,8 @@ describe('the candidate gate checks that Practice may run on its OpenClaw (HB-14
   it.each([
     ['would be counted twice', { keeps: 'both' as const }, `Practice stays on OpenClaw ${P}: ${TWICE}`],
     ['could not be checked (the usage reader does not see its ask)', { seen: 'before' as const }, `Practice stays on OpenClaw ${P}: could not check: the usage reader does not see this agent's last turn, the gate's ask, on OpenClaw 2026.10.1`],
+    // HB-1453: a container date that prints seconds alone gave an ask time 1000 times too early, which every turn was after.
+    ['could not be checked (the usage reader does not see its ask, by a container clock in seconds)', { seen: 'before' as const, date: 'seconds' as const }, `Practice stays on OpenClaw ${P}: could not check: the usage reader does not see this agent's last turn, the gate's ask, on OpenClaw 2026.10.1`],
     ['could not be checked (a CLI harness)', { harness: true }, `Practice stays on OpenClaw ${P}: could not check: Practice cannot run on this agent's model (it has none, or a CLI harness runs it rather than OpenClaw itself): nothing was run. Run the gate again with --profile and an AI source OpenClaw runs itself`],
     // Review: the closing line names the release Practice stays on here too.
     ['could not be checked (no tsx where the gate runs)', { noTsx: true }, `Practice stays on OpenClaw ${P}: could not check: no node_modules/.bin/tsx in <repo>: run npm ci there first`],

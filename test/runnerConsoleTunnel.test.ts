@@ -47,6 +47,16 @@ describe("a runner agent's console, through the runner's SSH (2026-09-23)", () =
     expect(sshTarget('ssh://user@-oProxyCommand=x')).toBeUndefined();
   });
 
+  it('Add and the console tunnel take the same ssh addresses: a name starting with "." opens, one starting with "-" is never added (HB-1258)', () => {
+    for (const a of [
+      'ssh://runner@fixture-box', 'ssh://.box', 'ssh://runner@.box', 'ssh://.runner@fixture-box:2222/', 'ssh://_x@_y',
+      'ssh://-oProxyCommand=touch', 'ssh://runner@-box', 'ssh://-l@fixture-box', 'ssh://runner@fixture-box:222222', 'ssh://runner@fixture-box:',
+    ]) expect(!!parseSshEndpoint(a), a).toBe(!!sshTarget(a));
+    expect(sshTarget('ssh://runner@.box')).toEqual({ dest: 'runner@.box', port: undefined });
+    expect(sshTarget('ssh://.runner@fixture-box:2222/')).toEqual({ dest: '.runner@fixture-box', port: '2222' });
+    expect(parseSshEndpoint('ssh://runner@-box')).toBeUndefined();
+  });
+
   it('an ssh alias with an underscore, which Add takes, opens its tunnel by that name (HB-1115)', async () => {
     for (const a of ['ssh://runner@fixture_host', 'ssh://runner@fixture_host:2222/', 'ssh://build_user@fixture-box', 'ssh://box_1']) {
       expect(parseSshEndpoint(a), a).toBeDefined();

@@ -32,6 +32,23 @@
 #   it, so a second in the same tick adds on (it wrote over the first, from
 #   the counts read at the start: HB-0637).
 # forget_tries: the release was upgraded to, or set aside.
+#
+# The repair's own clock (HB-1431). A deploy or upgrade that failed in its
+# repair of one cut off part-way, before the release was touched (exit 7, said
+# to a timer that passes HATCHABOT_FOLLOW_KNOWS_7=1), is no try of the
+# release: counted as one (3), a repair that kept failing (a lock in the way)
+# set the release aside after eight, and a repair that worked later never
+# gave it back. It waits on a clock of its own instead, doubling as the
+# disk's does to an hour at most (5, 15, 35, then 55 minutes), and never sets
+# a release aside. FILE.repair: "<failures> <epoch of the last>", beside the
+# record, whatever the release; gone once no cut is left to repair, which
+# follow-latest.sh and follow-channel.sh see to by that name on every tick,
+# before one that has nothing to do ends without opening the record.
+# repair_open: read it into R_COUNT and R_LAST (0 for none), after tries_open
+#   (or with TRIES set to FILE).
+# repair_waiting: 0 while the wait after the last failed repair lasts.
+# note_repair: one more failed repair in a row.
+# forget_repair: a repair went through, or none is owed.
 MAX_TRIES=8
 tries_open() {
   TRIES="$1"; TRIES_FOR="$3"; HELD=""
@@ -110,4 +127,24 @@ note_try() {
 forget_tries() {
   rm -f "$TRIES" "$TRIES.disk" 2>/dev/null || true
   [ -z "$HELD" ] || rm -f "$HELD" "$HELD.disk" 2>/dev/null || true
+}
+repair_open() {
+  local more=""
+  R_COUNT=0; R_LAST=0
+  [ -L "$TRIES.repair" ] || { read -r R_COUNT R_LAST more < "$TRIES.repair"; } 2>/dev/null || true
+  case "${R_COUNT:-}${R_LAST:-}" in ''|*[!0-9]*) R_COUNT=0; R_LAST=0 ;; esac
+}
+# The disk's doubling, to an hour at most: tries_waiting with the repair's
+# failures as the disk's alone, from the repair's last failure.
+repair_waiting() { [ "${R_COUNT:-0}" -gt 0 ] && ( T_COUNT="$R_COUNT"; T_DISK="$R_COUNT"; T_LAST="$R_LAST"; tries_waiting ); }
+note_repair() {
+  local now; now="$(date +%s)"
+  R_COUNT=$((${R_COUNT:-0} + 1)); R_LAST="$now"
+  if [ ! -L "$TRIES.repair" ] && { printf '%s %s\n' "$R_COUNT" "$now" > "$TRIES.repair.tmp" && mv -f "$TRIES.repair.tmp" "$TRIES.repair"; } 2>/dev/null; then return 0; fi
+  rm -f "$TRIES.repair.tmp" 2>/dev/null || true
+  echo "Could not record this failed repair in $TRIES.repair (a full disk?), so the next tick tries it again. Free some space."
+}
+forget_repair() {
+  R_COUNT=0; R_LAST=0
+  rm -f "$TRIES.repair" 2>/dev/null || true
 }

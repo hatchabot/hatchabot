@@ -3,7 +3,7 @@ import type { Agent } from '../../domain/types.js';
 import type { PracticeUsageRow, Store } from '../../store/store.js';
 import type { PracticeSpent } from '../skills/skillTrials.js';
 import { LOCAL_MODEL, priceMix, type TokenMix } from '../sources/modelOptions.js';
-import { dayKey, machineTz, monthKey, monthName, nextMonth, ownPauseDue } from './budgets.js';
+import { dayKey, MACHINE, machineTz, monthKey, monthName, nextMonth, pauseDue } from './budgets.js';
 
 /**
  * What skill Practice spent (HB-0933), counted once. A practice run calls the
@@ -20,10 +20,12 @@ import { dayKey, machineTz, monthKey, monthName, nextMonth, ownPauseDue } from '
  * agent's own reading and says how much was practice (practiceSummary,
  * foldPractice). So do the fleet's reading (GET /v1/usage), the cost badges,
  * the "At API prices" chart and its window pricing (practiceMixes), and the
- * usage periods' request counts (HB-1246).
+ * usage periods' request counts (HB-1246); a source's request counts in
+ * Settings → AI (summarizeSourceUsage) and the model scorecard's calls,
+ * tokens and month (buildScorecard, HB-1270).
  */
 
-/** Write one run's spend; the tokens it came to. */
+/** Write one run's spend, and the calls its source refused (HB-1497); the tokens it came to. */
 export function recordPracticeUsage(store: Store, agent: Agent, skill: string, status: string, spent: PracticeSpent[] | undefined,
   now = Date.now(), opts: { tz?: string } = {}): number {
   const tz = opts.tz ?? machineTz();
@@ -36,12 +38,15 @@ export function recordPracticeUsage(store: Store, agent: Agent, skill: string, s
   let total = 0;
   for (const s of spent) {
     const tokens = s.input + s.output + s.cacheRead + s.cacheWrite;
-    if (!(tokens > 0)) continue;
+    // A model whose calls were all refused spent nothing, and is kept for the refusals (HB-1497).
+    const refused = s.refused ?? 0;
+    if (!(tokens > 0) && !(refused > 0)) continue;
     total += tokens;
-    const usd = priceMix(s.model, s);
+    const usd = tokens > 0 ? priceMix(s.model, s) : 0;
     rows.push({
       agentId: agent.id, run, model: s.model, ...(profileId ? { profileId } : {}), at, day, skill, status,
       calls: s.calls, input: s.input, output: s.output, cacheRead: s.cacheRead, cacheWrite: s.cacheWrite,
+      ...(refused > 0 ? { refused } : {}),
       usd: usd ?? 0,
       // No price known is not $0: kept apart, as a cost day's are (budgets.ts dailyCosts).
       unpricedTokens: usd === undefined && !local && !LOCAL_MODEL.test(s.model) ? tokens : 0,
@@ -130,14 +135,16 @@ export function foldPractice<U extends { totalTokens: number; calls: number; inp
 
 /**
  * Why Practice waits: the agent is paused by a budget this month, its own or
- * the machine's, or its own pause budget is reached and the pause is on its
- * way (ownPauseDue) ("" when not).
+ * the machine's, or one of them is reached and the pause is on its way
+ * (pauseDue) ("" when not). Said as the budget reached, which is true of both
+ * (HB-1248).
  */
 export function practicePausedLine(store: Store, agentId: string, now = Date.now(), tz = machineTz()): string {
   const month = monthKey(now, tz);
   const p = store.getBudgetPause(agentId, month);
-  const paused = !!p && !p.resumedAt && p.kind === 'pause';
-  const agent = paused ? undefined : store.getAgent(agentId);
-  if (!paused && !(agent && ownPauseDue(store, agent, month))) return '';
-  return `This agent is paused by its budget for ${monthName(month)}, and Practice spends from the same budget. It can practise again once the budget is raised or the pause ends on ${monthName(nextMonth(month))} 1.`;
+  const open = p && !p.resumedAt && p.kind === 'pause' ? p : undefined;
+  const agent = open ? undefined : store.getAgent(agentId);
+  const scope = open ? open.scope : agent ? pauseDue(store, agent, month) : undefined;
+  if (!scope) return '';
+  return `${scope === MACHINE ? 'This Hatchabot has' : 'This agent has'} reached its budget for ${monthName(month)}, and Practice spends from the same budget. It can practise again once the budget is raised or the pause ends on ${monthName(nextMonth(month))} 1.`;
 }

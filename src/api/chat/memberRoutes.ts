@@ -11,9 +11,15 @@ import { LOCAL_OWNER, ownerIdOf, principalOf } from '../principal.js';
 import { OPS_ALONE, zodMessage, type RouteContext } from '../routeContext.js';
 import { requestIsHttps } from '../signIn/sessionCookie.js';
 import { isPublic } from '../trust.js';
+import { HANDLE_MAX, handleText } from '../../store/store.js';
 
-/** POST /v1/agents/:id/invites: who it is for (a Telegram @handle), and whether it is to chat on the web. */
-const NewInvite = z.object({ for: z.string().trim().max(64).optional(), webChat: z.boolean().optional() });
+/**
+ * POST /v1/agents/:id/invites: who it is for (a Telegram @handle), and whether
+ * it is to chat on the web. A `for` that is no handle is refused, as Reopen's
+ * (typedHandle): it was kept as none, and the invite was anyone's (HB-1439
+ * review). Its 64 is the name's, not a link's (HANDLE_MAX).
+ */
+const NewInvite = z.object({ for: z.string().max(256).nullish(), webChat: z.boolean().optional() });
 
 /**
  * PUT /v1/agents/:id/members/:userId/web-chat (HB-0814): on or off. Anything
@@ -40,10 +46,24 @@ const JoinBody = z.object({
 
 /**
  * POST /v1/agents/:id/members/:userId/reopen (HB-0814): the @handle the owner
- * typed, if any. One that is not text, or longer than 64, is no handle, as it
- * was: this body never refused anything.
+ * typed, if any. Empty or left out: no handle, as it always was. Anything
+ * else that is no handle is refused (HB-1439 review): it was taken as none,
+ * and the door the owner meant for one person opened to whoever wrote first.
  */
-const ReopenBody = z.object({ handle: z.string().trim().max(64).optional() });
+const ReopenBody = z.object({ handle: z.string().max(256).nullish() });
+const NOT_A_HANDLE = `That is not an @handle: give theirs (no more than ${HANDLE_MAX} characters after the @), or leave it empty.`;
+
+/**
+ * A handle typed, for an invite or a Reopen: '' when none was (empty, blank or
+ * left out, as it always was); its name, without its @s or link (handleText);
+ * undefined when it is no handle, which the routes refuse with NOT_A_HANDLE.
+ */
+function typedHandle(raw: string | null | undefined): string | undefined {
+  const given = raw?.trim() ?? '';
+  if (!given) return '';
+  const name = handleText(given);
+  return name && name.length <= HANDLE_MAX ? name : undefined;
+}
 
 /** POST /v1/agents/:id/members/known: one of the people known from another agent. */
 const AddKnown = z.object({ userId: z.string().min(1) });
@@ -136,7 +156,9 @@ export function registerMemberRoutes(app: FastifyInstance, ctx: RouteContext): v
     const ownerId = ownerIdOf(req);
     const forParsed = NewInvite.safeParse(req.body ?? {});
     if (!forParsed.success) return reply.code(400).send({ error: zodMessage(forParsed.error) });
-    const made = invites.invite(agent, ownerId, { forHandle: forParsed.data.for, webChat: forParsed.data.webChat });
+    const forHandle = typedHandle(forParsed.data.for);
+    if (forHandle === undefined) return reply.code(400).send({ error: NOT_A_HANDLE });
+    const made = invites.invite(agent, ownerId, { forHandle: forHandle || undefined, webChat: forParsed.data.webChat });
     if ('refused' in made) return refuse(reply, made);
     const { code, expiresAt } = made;
     const path = `/join/${code}`;
@@ -144,6 +166,8 @@ export function registerMemberRoutes(app: FastifyInstance, ctx: RouteContext): v
       code,
       expiresAt,
       path,
+      // The handle it is kept for, as it is matched: the dialog says so, not what was typed (HB-1439 review).
+      ...(made.for ? { for: made.for } : {}),
       url: linkUrlFor() ? `${linkUrlFor()}${path}` : undefined,
     });
   });
@@ -350,9 +374,17 @@ export function registerMemberRoutes(app: FastifyInstance, ctx: RouteContext): v
     async (req, reply) => {
       const agent = ownedAgent(req, req.params.id);
       if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
-      // Read now, answered never: a handle that is not one is no handle.
+      // Not while a change holds the agent, as adding someone you know: a
+      // removal under way scrubs the member first, and a window opened during
+      // its scrub let them in on another app after the scrub had read its list
+      // (HB-1522 review).
+      if (busyNow(agent, reply)) return reply;
+      // A handle typed is used or refused, never dropped: dropped, the door
+      // opened to anyone (HB-1439 review). Empty or none: no handle, as before.
       const typed = ReopenBody.safeParse(req.body ?? {});
-      const reopened = roster.reopen(agent as Agent & { runtimeRef: string }, req.params.userId, typed.success ? typed.data.handle : undefined);
+      const handle = typed.success ? typedHandle(typed.data.handle) : undefined;
+      if (handle === undefined) return reply.code(400).send({ error: NOT_A_HANDLE });
+      const reopened = roster.reopen(agent as Agent & { runtimeRef: string }, req.params.userId, handle || undefined);
       if ('refused' in reopened) return refuse(reply, reopened);
       return reopened;
     },

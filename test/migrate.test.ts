@@ -515,6 +515,11 @@ describe('issue #1: an HTTP error from the import is not proof it rolled back', 
 
   it.each([
     [409, JSON.stringify({ error: 'needs a build', code: 'image_decision', problem: 'only the owner may build' }), /doesn't have the image/],
+    // What the destination has of that name, as it says (HB-1515 review). Was: "doesn't have the image" of each.
+    [409, JSON.stringify({ error: 'needs a build', code: 'image_decision', problem: 'a different image here already has the name hatchabot-derived:test', has: 'other' }), /^Desktop has another image named hatchabot-derived:test and won't build this one over it for this move \(a different image here/],
+    // In this side's words: "this machine" in the other server's reads as this one (HB-1515 re-review).
+    [409, JSON.stringify({ error: 'needs a pin', code: 'image_decision', problem: "only this machine's owner can pin an agent to a particular image", has: 'same' }), /^Desktop has the image hatchabot-derived:test but won't pin this agent to it for this move \(only that server's owner can pin an agent to a particular image\)\. /],
+    [409, JSON.stringify({ error: 'needs a build', code: 'image_decision', has: 'none' }), /^Desktop doesn't have the image hatchabot-derived:test and won't build it for this move/],
     [429, JSON.stringify({ error: 'agent cap reached' }), /couldn't import it: agent cap reached\. Your agent is unchanged\./],
   ])('a genuine %s refusal from Hatchabot still restarts the source without asking', async (status, body, msg) => {
     const w = await world();

@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { exportAgent, importAgent, MAX_RAW_STATE_BYTES, MAX_STATE_BYTES, packExport, peekFormat, stateAllowance, tooLarge, TransferError, type ExportManifest } from '../src/orchestrator/transfer/transfer.js';
+import { exportAgent, importAgent, MAX_RAW_STATE_BYTES, MAX_STATE_BYTES, packExport, peekFormat, stateAllowance, tooLarge, TransferError, unpackExport, type ExportManifest } from '../src/orchestrator/transfer/transfer.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
@@ -261,6 +261,22 @@ describe('image-build failures during import', () => {
     if (existing) expect(dst.store.getDerivedImage(name)).toMatchObject({ status: 'FAILED', error: expect.stringMatching(/no space left/) });
     else expect(dst.store.getDerivedImage(name)).toBeUndefined();
   });
+
+  it("cuts a thrown build failure too long for the rolled-back reason at the end of a word, in its room (HB-1333 review)", async () => {
+    const src = await installation();
+    await seedSourceAgent(src);
+    const manifest = JSON.parse(gunzipSync((await exportAgent(src.deps, 'a1')).data).toString('utf8'));
+    const tag = 'hatchabot-runtime:derived-fixture-tools';
+    manifest.image = { tag, recipe: { base: 'hatchabot-runtime:latest', packages: [], lines: 'RUN true', channels: [] } };
+    const dst = await installation('importer');
+    const words = Array.from({ length: 120 }, (_, i) => `made-up-step-${i}`).join(' ');
+    dst.provider.buildImage = async () => { throw new Error(words); };
+    const said = await importAgent(dst.deps, gzipSync(JSON.stringify(manifest)), { ownerId: 'importer', mayBuild: true, image: 'build' }).then(() => '', (e: Error) => e.message);
+    const cause = /\((the image .*)\)$/.exec(said)?.[1] ?? '';
+    expect(cause.startsWith(`the image ${tag} could not be built here: made-up-step-0 made-up-step-1 `)).toBe(true);
+    expect(cause.length).toBeLessThanOrEqual(500);
+    expect(cause).toMatch(/ made-up-step-\d+…$/);
+  });
 });
 
 describe('an import whose initial database writes fail', () => {
@@ -366,7 +382,8 @@ describe('a full copy made and read off the event loop (HB-0925)', () => {
     // Only the inflate is timed here: the import's own steps wait on the mock's promises too.
     let inflated = false;
     const parse = JSON.parse;
-    const spy = vi.spyOn(JSON, 'parse').mockImplementation(((text: string, r?: never) => { if (text.length > memory.length) inflated = true; return parse(text, r); }) as typeof JSON.parse);
+    // Its manifest parsed, the state left out of it (HB-1168): read only once inflated.
+    const spy = vi.spyOn(JSON, 'parse').mockImplementation(((text: string, r?: never) => { if (text.startsWith('{"format":"hatchabot-export"')) inflated = true; return parse(text, r); }) as typeof JSON.parse);
     let ran = false;
     setImmediate(() => { ran = true; });
     const importing = importAgent(dst.deps, data, { ownerId: 'importer' });
@@ -376,6 +393,73 @@ describe('a full copy made and read off the event loop (HB-0925)', () => {
     spy.mockRestore();
     const agent = await importing;
     expect(dst.provider.stateStore.get(agent.runtimeRef!)!.equals(memory)).toBe(true);
+  });
+
+  it('an import never parses the file\'s JSON whole: its state is decoded a piece at a time (HB-1168)', async () => {
+    const src = await installation();
+    const ref = await seedSourceAgent(src);
+    const memory = randomBytes(3 * 1024 * 1024);
+    src.provider.stateStore.set(ref, memory);
+    const { data } = await exportAgent(src.deps, 'a1');
+    const dst = await installation('importer');
+    let longest = 0;
+    const parse = JSON.parse;
+    const spy = vi.spyOn(JSON, 'parse').mockImplementation(((text: string, r?: never) => { longest = Math.max(longest, text.length); return parse(text, r); }) as typeof JSON.parse);
+    let agent;
+    try { agent = await importAgent(dst.deps, data, { ownerId: 'importer' }); } finally { spy.mockRestore(); }
+    expect(longest).toBeLessThan(64 * 1024); // the manifest without its state, never the 4 MiB of base64
+    expect(dst.provider.stateStore.get(agent.runtimeRef!)!.equals(memory)).toBe(true);
+  });
+
+  it('a file read a piece at a time is what parsing it whole read, and one laid out otherwise is parsed whole (HB-1168)', async () => {
+    /** The file as the import read it before: parsed whole, its state decoded whole. */
+    const before = (file: Buffer) => { const raw = JSON.parse(gunzipSync(file).toString('utf8')); return { raw: { ...raw, state: '' }, state: Buffer.from(raw.state, 'base64') }; };
+    const now = async (file: Buffer) => {
+      const r = await unpackExport(file) as { raw: { state: string }; state?: Buffer };
+      return { raw: { ...r.raw, state: '' }, state: r.state ?? Buffer.from(r.raw.state, 'base64'), pieces: r.state !== undefined };
+    };
+    const meta = { format: 'hatchabot-export', version: 1, agent: { name: 'Kitchen ✓', slug: 'kitchen', state: 'RUNNING' }, envVars: [{ name: 'A', value: 'made-up ,"state":" ✓' }], state: '' } as unknown as ExportManifest;
+    // What packExport writes, around a piece's edge (1 MiB of base64 is 786,432 bytes) and with every padding.
+    for (const n of [0, 1, 2, 3, 4, 786_431, 786_432, 786_433, 786_434, 2_359_296, 2_500_001]) {
+      const file = await packExport(meta, randomBytes(n));
+      const r = await now(file);
+      const was = before(file);
+      expect(r.pieces, `${n} bytes`).toBe(true);
+      expect(r.raw).toEqual(was.raw);
+      expect(r.state.equals(was.state), `${n} bytes`).toBe(true);
+    }
+    // Laid out otherwise: parsed whole, and read as it was.
+    const b64 = randomBytes(1_000_000).toString('base64');
+    const odd = [
+      `{"state":"${b64}"}`, // no key before it
+      `{"format":"hatchabot-export","state":"${b64}","version":1}`, // not last
+      `{"format":"hatchabot-export", "state":"${b64}" }`, // spaced
+      `{"format":"hatchabot-export","state":"${b64.slice(0, 1_200_000)}\\n${b64.slice(1_200_000)}"}`, // an escape in it
+      `{"format":"hatchabot-export","state":"${b64.slice(0, 4)}=${b64.slice(5)}"}`, // padding in the middle
+      `{"format":"hatchabot-export","state":"${b64.slice(0, 1_048_570)}-_${b64.slice(1_048_572)}"}`, // the URL-safe letters, as the decode takes them
+    ];
+    for (const text of odd) {
+      const file = gzipSync(Buffer.from(text, 'utf8'));
+      const r = await now(file);
+      const was = before(file);
+      expect(r.raw).toEqual(was.raw);
+      expect(r.state.equals(was.state), text.slice(0, 60)).toBe(true);
+    }
+    // Not JSON once its state is read: thrown, as parsing it whole threw.
+    for (const text of [`{"format":"x",,"state":"${b64}"}`, `{"format":"x","state":"${b64.slice(0, 2_000_000)}"${b64.slice(2_000_000)}"}`, `{"format":"x","state":"AAAA\u0001"}`, '{"format":"x","state":"}']) {
+      await expect(unpackExport(gzipSync(Buffer.from(text, 'utf8')))).rejects.toThrow(SyntaxError);
+    }
+  });
+
+  it('other work runs while a large state is decoded (HB-1168)', async () => {
+    const meta = { format: 'hatchabot-export', version: 1, state: '' } as unknown as ExportManifest;
+    const state = randomBytes(6 * 1024 * 1024);
+    const file = await packExport(meta, state);
+    const others = otherWork();
+    others.start();
+    const r = await unpackExport(file);
+    expect(others.stop()).toBeGreaterThan(6); // a turn between each of its eight pieces
+    expect(r.state!.equals(state)).toBe(true);
   });
 });
 

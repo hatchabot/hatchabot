@@ -7,6 +7,7 @@
  * (and fixes any stale paths / delivery) before they fire.
  */
 import Database from 'better-sqlite3';
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
@@ -147,7 +148,10 @@ export function applyReplacements(text: string | undefined, pairs: Array<[string
 // the old one or the new one and never one cut short (HB-0629). The new
 // file's name is `.hb-` and 12 hex digits, whatever the file's own: one
 // made from it was too long for a name near the 255-byte limit, and that
-// file was passed by. The walk never reads one (no .md, .txt or .json). A
+// file was passed by. The walk never reads one (no .md, .txt or .json); a
+// regular one it meets is a pass's that was killed before its rename, and is
+// removed (HB-1467). A name taken already is tried again with another, five
+// times: it left the file as it was, with nothing said (HB-1467). A
 // file that is read-only is replaced too, its mode kept: the folder
 // decides, as for any rename (written in place, it was refused). Written
 // through or in
@@ -156,22 +160,28 @@ export function applyReplacements(text: string | undefined, pairs: Array<[string
 // them), one in a folder it cannot add a file to (EACCES, EPERM, EROFS), and
 // one whose owner the new file cannot take. Any other failure (ENOSPC,
 // EDQUOT, EIO in the write, the sync or the rename) removes the new file and
-// leaves the old one as it was. Only regular files and links to them are read.
+// leaves the old one as it was. Only regular files and links to them are read,
+// and a link only when its real path is inside the workspace (`top`, the
+// workspace's own real path): one to a file outside it is left as it is
+// (HB-1501). The adopt never copies a link, so the agent made it, and what
+// it points at is not the workspace's. A file with other hard links is still
+// written in place, wherever they are: which are inside cannot be told
+// without a pass of its own, and it is the same user's file either way.
 const REWRITE_SCRIPT =
-  'const fs=require("fs"),path=require("path"),crypto=require("crypto");const pairs=JSON.parse(process.env.PAIRS);const root=process.env.WSDIR;' +
-  'function fileAt(p){try{return fs.statSync(p).isFile()}catch(_){return false}}' +
+  'const fs=require("fs"),path=require("path"),crypto=require("crypto");const pairs=JSON.parse(process.env.PAIRS);const root=process.env.WSDIR;let top;' +
+  'function fileAt(p){try{const r=fs.realpathSync(p);return r.startsWith(top)&&fs.statSync(r).isFile()}catch(_){return false}}' +
   'function put(p,o,link){if(link){fs.writeFileSync(p,o);return}' +
   'const st=fs.lstatSync(p);if(!st.isFile())return;if(st.nlink>1){fs.writeFileSync(p,o);return}' +
-  'const t=path.join(path.dirname(p),".hb-"+crypto.randomBytes(6).toString("hex"));let fd,own=true;' +
-  'try{fd=fs.openSync(t,"wx",st.mode&4095)}catch(e){if(e.code==="EACCES"||e.code==="EPERM"||e.code==="EROFS")fs.writeFileSync(p,o);return}' +
+  'let t,fd,own=true;for(let i=0;fd===undefined;i++){t=path.join(path.dirname(p),".hb-"+crypto.randomBytes(6).toString("hex"));' +
+  'try{fd=fs.openSync(t,"wx",st.mode&4095)}catch(e){if(e.code==="EEXIST"&&i<4)continue;if(e.code==="EACCES"||e.code==="EPERM"||e.code==="EROFS")fs.writeFileSync(p,o);return}}' +
   'try{try{fs.fchownSync(fd,st.uid,st.gid)}catch(e){if(st.uid!==process.getuid()||st.gid!==process.getgid()){own=false;throw e}}' +
   'fs.writeFileSync(fd,o);fs.fchmodSync(fd,st.mode&4095);fs.fsyncSync(fd);fs.closeSync(fd);fd=undefined;fs.renameSync(t,p)}' +
   'catch(_){if(fd!==undefined)try{fs.closeSync(fd)}catch(_){}try{fs.unlinkSync(t)}catch(_){}if(!own)fs.writeFileSync(p,o)}}' +
   'function walk(d){for(const e of fs.readdirSync(d,{withFileTypes:true})){const p=path.join(d,e.name);' +
-  'if(e.isDirectory())walk(p);else if(/\\.(md|txt|json)$/i.test(e.name)&&(e.isFile()||e.isSymbolicLink()&&fileAt(p))){' +
+  'if(e.isDirectory())walk(p);else if(e.isFile()&&/^\\.hb-[0-9a-f]{12}$/.test(e.name)){try{fs.unlinkSync(p)}catch(_){}}else if(/\\.(md|txt|json)$/i.test(e.name)&&(e.isFile()||e.isSymbolicLink()&&fileAt(p))){' +
   'let t;try{t=fs.readFileSync(p,"utf8")}catch(_){continue}let o=t;for(const x of pairs){if(!x[0])continue;o=o.replace(new RegExp(x[0],"gu"),function(){return x[1]})}' +
   'if(o!==t)try{put(p,o,e.isSymbolicLink())}catch(_){}}}}' +
-  'try{walk(root)}catch(e){process.exit(2)}';
+  'try{top=fs.realpathSync(root)+path.sep;walk(root)}catch(e){process.exit(2)}';
 
 /**
  * Repoint the adopted workspace's OWN files (SOUL/AGENTS/MEMORY, memory/*.md, …)
@@ -447,10 +457,52 @@ function looksLike(c: SourceCron, as: SourceCron, j: Cron): boolean {
 const asCarried = (c: SourceCron, as: SourceCron, j: Cron) => !!as.sessionTarget && j.sessionTarget === as.sessionTarget
   && (j.sessionKey ?? undefined) === (as.sessionKey ?? undefined) && (namesRecipient(c) || !j.deliveryTo);
 
+/**
+ * What a source task holds, as its fingerprint (HB-1200): what the owner
+ * wrote, as the source's store holds it, before the adopt re-points its
+ * paths (so the agent it goes to never changes it): its name, description,
+ * schedule and payload. Left out: where it runs and who it goes to (the
+ * sweep re-points a copy's, and OpenClaw gives a task with none a delivery
+ * of its own), and what OpenClaw stamps (its runs, its state, whether it is
+ * on), which a SourceCron never reads. Read as looksLike reads them: only
+ * the schedule's own fields, a time as a number or a date is one time, and
+ * an agent turn written `message`, or with no kind, is one kind.
+ */
+export function sourceTaskFingerprint(c: SourceCron): string {
+  const text = (v: string | undefined) => v || null;
+  const at = String(c.at ?? '').trim();
+  const when = c.scheduleKind === 'cron' ? [text(c.scheduleExpr), text(c.scheduleTz)]
+    : c.scheduleKind === 'every' ? [c.everyMs ?? null]
+    : c.scheduleKind === 'at' ? [/^\d+$/.test(at) ? Number(at) : Number.isNaN(Date.parse(at)) ? text(at) : Date.parse(at)]
+    : [];
+  const kind = c.payloadKind === 'systemEvent' || c.payloadKind === 'command' ? c.payloadKind
+    : !c.payloadKind || c.payloadKind === 'agentTurn' || c.payloadKind === 'message' ? 'agentTurn' : c.payloadKind;
+  const parts = [text(c.name), text(c.description), text(c.scheduleKind), ...when, kind, text(c.payloadMessage)];
+  return createHash('sha256').update(JSON.stringify(parts)).digest('hex').slice(0, 16);
+}
+
+/**
+ * The fingerprint a carried record keeps: the source task's, and the copy it
+ * became, so a record an older release gave another copy since (it leaves
+ * this column as it was) reads as one with none.
+ */
+const carriedFingerprint = (c: SourceCron, copyId: string | undefined) => `1:${sourceTaskFingerprint(c)}:${copyId ?? ''}`;
+/** Whether the source task changed since its record's copy was carried; false for a record that does not say. */
+function changedSince(c: SourceCron, record: { copyId?: string; fingerprint?: string }): boolean {
+  const kept = /^1:([0-9a-f]{16}):(.*)$/s.exec(record.fingerprint ?? '');
+  return !!kept && !!record.copyId && kept[2] === record.copyId && kept[1] !== sourceTaskFingerprint(c);
+}
+
 export interface CronMigrateResult {
   total: number;
   carried: number;
   failed: number;
+  /**
+   * Tasks carried before whose copy is still there, and whose source task
+   * changed in the old workspace since: not brought again (HB-1200). Only
+   * when there are any. A record from before these were kept is never one.
+   */
+  changed?: number;
   /** The source's tasks could not all be read: how, for the owner. */
   error?: string;
   /** The agent's gateway never answered: nothing was tried (the caller may try again). */
@@ -520,7 +572,7 @@ export async function migrateCrons(
   // them ids, and a later adopt must not add them again.
   const unrecorded = deps.store.mayHoldUnrecordedCarriedTasks(agentId);
   const carriedOne = (c: SourceCron, copyId: string | undefined) => {
-    if (c.sourceId) deps.store.recordCarriedTask(agentId, entry.id, c.sourceId, copyId);
+    if (c.sourceId) deps.store.recordCarriedTask(agentId, entry.id, c.sourceId, copyId, carriedFingerprint(c, copyId));
     else deps.store.markUnrecordedCarriedTasks(agentId);
   };
 
@@ -570,6 +622,7 @@ export async function migrateCrons(
 
   let carried = 0;
   let failed = 0;
+  let changed = 0;
   for (const [i, { c, rewritten, record, copyThere }] of plans.entries()) {
     if (!rewritten) {
       // Reported, not carried unbound: it would have run somewhere else.
@@ -579,7 +632,11 @@ export async function migrateCrons(
     }
     if (copyThere) {
       carried++;
-      log('cron.migrate_already_present', { name: c.name, id: record!.copyId });
+      // Edited in the old workspace since it was carried: its copy stays as
+      // it was, and the answer says how many (HB-1200, the owner's choice).
+      const edited = changedSince(c, record!);
+      if (edited) changed++;
+      log('cron.migrate_already_present', { name: c.name, id: record!.copyId, ...(edited ? { changed: true } : {}) });
       continue;
     }
     const same = found.get(i);
@@ -614,5 +671,5 @@ export async function migrateCrons(
       log('cron.migrate_error', { name: c.name ?? '(unnamed)', error: String(err).slice(0, 200) });
     }
   }
-  return { total: crons.length, carried, failed, ...unread };
+  return { total: crons.length, carried, failed, ...(changed ? { changed } : {}), ...unread };
 }

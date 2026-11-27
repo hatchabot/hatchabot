@@ -221,13 +221,23 @@ export function createCopies(deps: CopiesDeps): Copies {
     // quiesces then tars the volume (minutes on a large agent), and without
     // the flag a concurrent Start passed its guards and booted the container
     // to write the volume mid-`tar`, silently tearing the archive.
-    download: (agent) => whileBusy(agent.id, 'download', () =>
-      exportAgent(
-        { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel,
-          log: trace(agent.id) },
-        agent.id,
-      ),
-    ),
+    //
+    // It stops a running agent for the copy and starts it again when the
+    // copy fails. A restart in the copy left it stopped with no file: kept
+    // from before the stop, the next start starts it again (HB-1479).
+    download: (agent) => whileBusy(agent.id, 'download', async () => {
+      const kept = store.getAgent(agent.id)?.state === 'RUNNING' ? randomUUID() : undefined;
+      if (kept) store.setAgentHold(agent.id, 'download-stop', kept);
+      try {
+        return await exportAgent(
+          { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel,
+            log: trace(agent.id) },
+          agent.id,
+        );
+      } finally {
+        if (kept) store.clearAgentHold(agent.id, 'download-stop', kept);
+      }
+    }),
 
     template: (agent, includeMemory) => exportInTurn(agent, { store, provider: providerFor(agent.hostId), log: trace(agent.id) }, includeMemory),
 

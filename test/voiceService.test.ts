@@ -1,8 +1,8 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { Store } from '../src/store/store.js';
 import { createAgentVoice, type AgentVoice, type VoiceCaller } from '../src/orchestrator/voice/agentVoice.js';
-import { clearBusy, isBusy, markBusy } from '../src/orchestrator/lifecycle/busy.js';
+import { isBusy, markBusy } from '../src/orchestrator/lifecycle/busy.js';
 import { configureVoice, readVoiceStatus } from '../src/orchestrator/voice/voice.js';
 import type { Agent } from '../src/domain/types.js';
 
@@ -20,7 +20,6 @@ const OWNER = 'user-owner';
 interface World { store: Store; voice: AgentVoice; traced: string[]; caller: VoiceCaller; watched: number; valid: boolean; agent(o?: Partial<Agent>): Agent }
 
 beforeEach(() => { vi.resetAllMocks(); });
-afterEach(() => { clearBusy('a1'); });
 
 function world(): World {
   const store = new Store(new Database(':memory:'));

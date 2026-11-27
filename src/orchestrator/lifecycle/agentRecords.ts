@@ -100,7 +100,7 @@ export interface AgentRecordsDeps {
   parkArchivedChannels: (agent: Agent) => Promise<void>;
   /** The agent settings service forgets a deleted agent. */
   forgetSettings: (agentId: string) => void;
-  /** The conversations service forgets a deleted agent's cached reads (HB-0914). */
+  /** The conversations service forgets a deleted or archived agent's cached reads (HB-0914, HB-1362). */
   forgetConversations: (agentId: string) => void;
   /** The queue's (rebuildQueue.ts). */
   kickProvision: (agentId: string, opts?: { webOnlyIfNoBot?: boolean }) => void;
@@ -282,6 +282,9 @@ export function createAgentRecords(deps: AgentRecordsDeps): AgentRecords {
         deps.logError({ agentId: agent.id, err: String(err) }, 'archive failed');
         return { ok: false, status: 502, error: "Couldn't archive the agent — try again in a moment." };
       }
+      // Not read again until it is brought back, in a new container: what
+      // was cached of its sessions stayed until a restart (HB-1362).
+      deps.forgetConversations(agent.id);
       // Done: the marker (cleared below) is not part of the answer. Where its
       // bot went, as it happened (HB-0476): null when it had none to give back.
       return { ok: true, value: answer({ checkpointWarning, botReturn: archived.bot ?? null }) };

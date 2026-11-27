@@ -375,6 +375,27 @@ describe('the readings and Recommended', () => {
     expect(fleet.byBilling).toMatchObject({ api: 1_000_000, local: 0 });
   });
 
+  it('the fleet: lifetime totals that include time on an earlier source are marked so (HB-1272)', async () => {
+    const read = JSON.stringify(fakeUsage([{ model: 'claude-opus-4-8', input: 1_000_000 }]));
+    const w = world({ providerFor: () => ({ execShell: async () => ({ code: 0, stdout: read, stderr: '' }) }) as never });
+    w.store.insertAIProfile({ id: 'plan', ownerId: OWNER, name: 'Plan', vendor: 'anthropic', kind: 'subscription', model: 'claude-opus-4-8', secretRef: 'ai/plan', createdAt: 'now' } as never);
+    w.agent('a1', 'Garden Notes');
+    w.agent('a2', 'Recipe Box');
+    w.store.setAgentApplied('a1', 'key', 'claude-opus-4-8');
+    w.store.setAgentApplied('a2', 'key', 'claude-opus-4-8');
+    expect((await w.svc.readings.fleetUsage(OWNER)).agents.some((a) => 'earlierSource' in a)).toBe(false);
+    // a2's container moved to the plan: its lifetime is billed by the plan (the numbers stay as they were), and marked.
+    expect(w.store.setAgentAIProfile('a2', 'plan')).toBe('ok');
+    w.store.setAgentApplied('a2', 'plan', 'claude-opus-4-8');
+    const fleet = await w.svc.readings.fleetUsage(OWNER);
+    expect(fleet.agents.find((a) => a.id === 'a2')).toMatchObject({ billing: 'included', profileName: 'Plan', cost: null, earlierSource: true });
+    expect(fleet.agents.find((a) => a.id === 'a1')).not.toHaveProperty('earlierSource');
+    expect(fleet.byBilling).toMatchObject({ api: 1_000_000, included: 1_000_000 });
+    // A switch saved and not rebuilt yet is no earlier source: it still runs the one it is billed by (HB-1009).
+    expect(w.store.setAgentAIProfile('a1', 'plan')).toBe('ok');
+    expect((await w.svc.readings.fleetUsage(OWNER)).agents.find((a) => a.id === 'a1')).not.toHaveProperty('earlierSource');
+  });
+
   it('the fleet: a stopped agent is skipped, not counted as zero', async () => {
     const w = world();
     w.agent('a1', 'Asleep', { state: 'STOPPED' });

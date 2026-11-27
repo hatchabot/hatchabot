@@ -22,7 +22,8 @@ const dirs: string[] = [];
 afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
 const shim = (bin: string, name: string, body: string) => writeFileSync(join(bin, name), `#!/usr/bin/env bash\n${body}\n`, { mode: 0o755 });
 
-function world(opts: { runs?: string; manifest?: boolean } = {}) {
+/** `user` and `inputs`: what the image built runs as, and its build-inputs label, as docker's inspect says them (node, and this OpenClaw's, unless a test says). */
+function world(opts: { runs?: string; manifest?: boolean; user?: string; inputs?: string } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'hb-build-image-')); dirs.push(root);
   const home = join(root, 'home'), bin = join(root, 'bin'), app = join(root, 'my apps', 'hatchabot');
   for (const d of [home, bin, join(app, 'scripts'), join(app, 'docker')]) mkdirSync(d, { recursive: true });
@@ -40,7 +41,7 @@ function world(opts: { runs?: string; manifest?: boolean } = {}) {
 case "$1" in
   inspect) echo ${JSON.stringify(openclaw)} ;;
   run) echo ${JSON.stringify(opts.runs ?? `OpenClaw ${openclaw}`)} ;;
-  image) exit 1 ;;
+  image) case "$4" in *Config.User*) echo ${JSON.stringify(`${opts.user ?? 'node'}|${opts.inputs ?? `v1;openclaw=${openclaw};engine=baked`}`)} ;; *) exit 1 ;; esac ;;
   manifest) exit 1 ;;
 esac
 exit 0`);
@@ -65,6 +66,100 @@ describe('scripts/build-runtime-image.sh (audit, 2026-10-29)', () => {
       const r = w.run({ BUILD_LOCAL: '1', NO_LATEST: '1', OPENCLAW_VERSION: '2026.9.8' });
       expect(r.status, runs + r.stdout + r.stderr).toBe(0);
       expect(r.stdout).toContain('Built hatchabot-runtime:2026.9.8 (candidate');
+    }
+  });
+
+  it('uses a built image only when it runs as node and says what it was built from, as a derived build is checked (HB-1326)', () => {
+    // The Dockerfile is Hatchabot's own and sets both; one edited so it did
+    // not made an image every agent on it fails with (root), or one no other
+    // machine could tell from the standard image of its OpenClaw.
+    for (const [o, said] of [
+      [{ user: 'root' }, "would run as 'root', not node"],
+      [{ user: '' }, "would run as 'root', not node"],
+      [{ user: '0:0' }, "would run as '0:0', not node"],
+      [{ inputs: '' }, 'carries no build-inputs label'],
+      [{ inputs: '<no value>' }, 'carries no build-inputs label'],
+    ] as const) {
+      const w = world(o);
+      const r = w.run({ BUILD_LOCAL: '1', NO_LATEST: '1', OPENCLAW_VERSION: '2026.9.8' });
+      expect(r.status, JSON.stringify(o) + r.stdout + r.stderr).toBe(1);
+      expect(r.stderr).toContain(`hatchabot-runtime:2026.9.8 ${said}`);
+      expect(r.stderr).toContain('Removing it.');
+      expect(w.calls()).toContain('docker rmi hatchabot-runtime:2026.9.8');
+      expect(r.stdout).not.toContain('Built hatchabot-runtime');
+    }
+    // Not made the default either.
+    const w = world({ user: 'root' });
+    expect(w.run({ BUILD_LOCAL: '1', OPENCLAW_VERSION: '2026.9.8' }).status).toBe(1);
+    expect(w.calls()).not.toContain('docker tag hatchabot-runtime:2026.9.8 hatchabot-runtime:latest');
+    // As this Dockerfile builds it: used.
+    const ok = world();
+    const r = ok.run({ BUILD_LOCAL: '1', NO_LATEST: '1', OPENCLAW_VERSION: '2026.9.8' });
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).toContain('Built hatchabot-runtime:2026.9.8 (candidate');
+    expect(ok.calls()).not.toContain('docker rmi');
+  });
+
+  it('uses a pulled published image only when it runs as node and says what it was built from, as a build here is checked (HB-1511)', () => {
+    const pulled = 'ghcr.io/hatchabot/runtime@sha256:fixture';
+    for (const [o, said] of [
+      [{ user: 'root' }, "would run as 'root', not node"],
+      [{ user: '' }, "would run as 'root', not node"],
+      [{ inputs: '' }, 'carries no build-inputs label'],
+      [{ inputs: '<no value>' }, 'carries no build-inputs label'],
+    ] as const) {
+      for (const NO_LATEST of ['1', '']) {
+        const w = world({ manifest: true, ...o });
+        const r = w.run({ NO_LATEST });
+        expect(r.status, JSON.stringify(o) + r.stdout + r.stderr).toBe(1);
+        expect(w.calls()).toContain(`docker pull ${pulled}`);
+        expect(r.stderr).toContain(`✗ The published image ${pulled} ${said}`);
+        expect(r.stderr).toContain('Build it from source instead: BUILD_LOCAL=1 ./scripts/build-runtime-image.sh');
+        // It takes no tag of this script's, :latest least of all, and nothing is built in its place.
+        expect(w.calls()).not.toMatch(/^docker tag /m);
+        expect(w.calls()).not.toMatch(/^docker build /m);
+        expect(r.stdout).not.toContain('Pulled hatchabot-runtime');
+      }
+    }
+    // As the release's own image is (this Dockerfile sets both): used.
+    const w = world({ manifest: true });
+    const r = w.run({ NO_LATEST: '1' });
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(w.calls()).toContain(`docker tag ${pulled} hatchabot-runtime:${w.openclaw}`);
+    expect(r.stdout).toContain(`Pulled hatchabot-runtime:${w.openclaw} (candidate`);
+  });
+
+  it('a default build under a HATCHABOT_IMAGE that pins another tag says the fleet stays on it, and how to move it, not "promoted" (HB-1355)', () => {
+    const digest = `sha256:${'ab'.repeat(32)}`;
+    for (const manifest of [false, true]) {
+      const built = manifest ? 'Pulled' : 'Built';
+      for (const pin of ['hatchabot-runtime:2026.9.4', `hatchabot-runtime@${digest}`]) {
+        const w = world({ manifest });
+        const r = w.run({ HATCHABOT_IMAGE: pin, ...(manifest ? {} : { BUILD_LOCAL: '1' }) });
+        expect(r.status, pin + r.stdout + r.stderr).toBe(0);
+        expect(w.calls()).toContain(`docker tag hatchabot-runtime:${w.openclaw} hatchabot-runtime:latest`);
+        expect(r.stdout).toContain(`${built} hatchabot-runtime:${w.openclaw} (moved hatchabot-runtime:latest; the fleet default stays ${pin})\n`
+          + `  To make it the fleet default, set HATCHABOT_IMAGE in .env to hatchabot-runtime:${w.openclaw} and restart Hatchabot.\n`);
+        expect(r.stdout).not.toContain('promoted');
+      }
+      // Another repository named for the build: the fleet's default stays, whatever HATCHABOT_IMAGE says.
+      const other = world({ manifest });
+      const o = other.run({ HATCHABOT_IMAGE_REPO: 'example-runtime', ...(manifest ? {} : { BUILD_LOCAL: '1' }) });
+      expect(o.stdout, o.stderr).toContain(`${built} example-runtime:${other.openclaw} (moved example-runtime:latest; the fleet default stays hatchabot-runtime:latest)`);
+      // And not how to make it the default: built outside the fleet's repository, it is tagged in to be used (review of HB-1386).
+      expect(o.stdout).not.toContain('To make it the fleet default');
+      // The fleet's own repository named: said, as before.
+      const own = world({ manifest });
+      const n = own.run({ HATCHABOT_IMAGE: 'example-runtime:2026.9.4', HATCHABOT_IMAGE_REPO: 'example-runtime', ...(manifest ? {} : { BUILD_LOCAL: '1' }) });
+      expect(n.stdout, n.stderr).toContain(`  To make it the fleet default, set HATCHABOT_IMAGE in .env to example-runtime:${own.openclaw} and restart Hatchabot.\n`);
+      // The default is :latest (named so, or with no tag, or not at all): promoted, as before.
+      for (const image of [undefined, 'hatchabot-runtime:latest', 'hatchabot-runtime', 'registry.example:5000/team/runtime']) {
+        const w = world({ manifest });
+        const r = w.run({ ...(image ? { HATCHABOT_IMAGE: image } : {}), ...(manifest ? {} : { BUILD_LOCAL: '1' }) });
+        expect(r.status, String(image) + r.stdout + r.stderr).toBe(0);
+        expect(r.stdout, String(image)).toContain(`${built} ${imageRepository(image ?? 'hatchabot-runtime')}:${w.openclaw} (promoted to :latest)\n`);
+        expect(r.stdout).not.toContain('To make it the fleet default');
+      }
     }
   });
 

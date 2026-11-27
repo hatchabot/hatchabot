@@ -41,6 +41,8 @@ export interface LeftOut {
   /** How many recent finished sets were looked at. */
   of: number;
   asleep: number;
+  /** Left out while its files were being replaced (a restore, an import, a move): the next backup takes it (HB-1205). */
+  replacing: number;
   failed: number;
   missing: number;
   other: number;
@@ -191,12 +193,14 @@ export function computeReadiness(input: {
 
     // The recent sets it was due in: made after the agent was.
     const due = own.slice(0, RECENT_SETS).filter((s) => !Number.isFinite(made) || setStart(s) > made);
-    const leftOut: LeftOut = { count: 0, of: due.length, asleep: 0, failed: 0, missing: 0, other: 0 };
+    const leftOut: LeftOut = { count: 0, of: due.length, asleep: 0, replacing: 0, failed: 0, missing: 0, other: 0 };
     for (const s of due) {
       if (usableFor(s, vol)) continue;
       leftOut.count++;
       if ((s.skipped ?? []).includes(vol)) leftOut.asleep++;
       else if ((s.missing ?? []).includes(vol)) leftOut.missing++;
+      // Ahead of failed: such a volume is in failedVolumes too, for older readers.
+      else if ((s.replacing ?? []).includes(vol)) leftOut.replacing++;
       else if ((s.failedVolumes ?? []).includes(vol) || s.volumes.some((v) => v.file === `${vol}.tgz`)) leftOut.failed++;
       else leftOut.other++;
     }
@@ -217,6 +221,7 @@ export function computeReadiness(input: {
     // Why it was left out, in words: "left out of the last 3 backups: its machine (Laptop runner) was asleep or offline".
     const why: string[] = [];
     if (leftOut.asleep) why.push(`${runner ? `its machine (${runner.name})` : 'its machine'} was asleep or offline${leftOut.asleep < leftOut.count ? ` (${leftOut.asleep})` : ''}`);
+    if (leftOut.replacing) why.push(`its files were being replaced (a restore, an import or a move): the next backup takes it${leftOut.replacing < leftOut.count ? ` (${leftOut.replacing})` : ''}`);
     if (leftOut.failed) why.push(`its archive failed${leftOut.failed < leftOut.count ? ` (${leftOut.failed})` : ''}`);
     if (leftOut.missing) why.push(`its volume was not there${leftOut.missing < leftOut.count ? ` (${leftOut.missing})` : ''}`);
     if (leftOut.other) why.push(`it was not taken${leftOut.other < leftOut.count ? ` (${leftOut.other})` : ''}`);

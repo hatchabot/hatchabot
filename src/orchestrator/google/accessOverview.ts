@@ -55,6 +55,8 @@ export const STALE_REMOVAL_MS = 24 * 3600_000;
 const GONE_SHOWN_MS = 7 * 24 * 3600_000;
 /** Mismatches that go under Alerts (a missing one is ⚠ in the section only). */
 export const ALERT_MISMATCHES: readonly Mismatch[] = ['extra', 'differs', 'stale-removal'];
+/** A chat app's "people not in Hatchabot" check that found its door open to everybody: its detail, in place of a count (HB-1201). */
+export const ANYONE = '*';
 
 const GIT_BASE = '/home/node/.openclaw';
 const tokenHash = (t: string) => createHash('sha256').update(t).digest('hex').slice(0, 16);
@@ -353,7 +355,9 @@ async function verifyNow(deps: VerifyDeps, agent: Agent, runtimeRef: string, sam
       if (!others.length) { if (prior.some((c) => c.kind === 'person-unknown' && c.subject === kind)) unread('person-unknown', kind); continue; }
     }
     if (others.length || prior.some((c) => c.kind === 'person-unknown' && c.subject === kind)) {
-      record(agent.id, 'person-unknown', kind, others.length > 0, String(others.length), at);
+      // A door open to everybody is recorded as "*", not as a count: its "*"
+      // was counted as one more person, "1 other person" (HB-1201).
+      record(agent.id, 'person-unknown', kind, others.length > 0, others.includes('*') ? ANYONE : String(others.length), at);
     }
   }
   return done({ status: 'checked', at, checked, ...(skipped.length ? { skipped } : {}) });
@@ -514,11 +518,18 @@ export function accessOverview(store: Store, agent: Agent, now = Date.now()): Ag
     const c = check('person-unknown', kind);
     if (c?.present) {
       const n = Number(c.detail) || 0;
-      people.push({
-        kind: 'person-unknown', subject: kind, label: `${n} other ${n === 1 ? 'person' : 'people'} on ${kind[0]!.toUpperCase() + kind.slice(1)}`,
-        intended: false, managed: false, verified: { status: 'present', at: c.checkedAt },
-        note: 'admitted inside OpenClaw (its own console or pairing list) with no member in Hatchabot — Hatchabot does not manage them',
-      });
+      const app = kind[0]!.toUpperCase() + kind.slice(1);
+      people.push(c.detail === ANYONE
+        ? {
+          kind: 'person-unknown', subject: kind, label: `Anyone on ${app}`,
+          intended: false, managed: false, verified: { status: 'present', at: c.checkedAt },
+          note: 'its door is open to everybody inside OpenClaw (an allowFrom of "*", or an open DM policy) — Hatchabot does not manage it',
+        }
+        : {
+          kind: 'person-unknown', subject: kind, label: `${n} other ${n === 1 ? 'person' : 'people'} on ${app}`,
+          intended: false, managed: false, verified: { status: 'present', at: c.checkedAt },
+          note: 'admitted inside OpenClaw (its own console or pairing list) with no member in Hatchabot — Hatchabot does not manage them',
+        });
     }
   }
 

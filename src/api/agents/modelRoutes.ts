@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { keptSaid } from '../../orchestrator/lifecycle/memoryLimits.js';
 import { assessModelChange } from '../../orchestrator/usage/modelLedger.js';
+import { ownModelOverClass } from '../../orchestrator/usage/budgets.js';
 import { effectiveModel } from '../../orchestrator/lifecycle/provision.js';
 import { VOLUME_GONE } from '../../providers/provider.js';
 import { zodMessage, type RouteContext } from '../routeContext.js';
@@ -47,7 +48,12 @@ export function registerModelRoutes(app: FastifyInstance, ctx: RouteContext): vo
       // `apply`: its runtime is told next, and the ask for that is stored
       // with the model, so a restart between the two leaves it to the next
       // start rather than to some later rebuild (HB-0809).
-      const dropped = await ledgered(req, 'model', [agent.id], () => store.transact(() => { store.setAgentModel(agent.id, model, { apply: true }); return detachClassIfDrifted(agent.id); }));
+      const dropped = await ledgered(req, 'model', [agent.id], () => store.transact(() => {
+        // Set by hand after a class ended its budget's switch: it wins for the rest of the month (HB-1477 review).
+        if ((store.getAgent(agent.id)?.model ?? null) !== model) ownModelOverClass(store, agent.id);
+        store.setAgentModel(agent.id, model, { apply: true });
+        return detachClassIfDrifted(agent.id);
+      }));
       const classDetached = dropped.detached;
       const applied = effectiveModel(store.getAgent(agent.id)!, profile);
       const how = await applyModelToRuntime(agent.id);

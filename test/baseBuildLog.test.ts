@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { chmodSync, closeSync, constants, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../src/store/store.js';
 import { createRuntimeImages, type RuntimeImages } from '../src/orchestrator/machines/runtimeImages.js';
+import { beginOperation, newBootForTests } from '../src/orchestrator/lifecycle/operations.js';
 
 /**
  * The base build's log (HB-0878). It could not be opened (a directory at its
@@ -210,6 +211,99 @@ describe('the base build log (HB-0878)', () => {
     } finally {
       // Left running (the old way): ended here, by their own pids only.
       for (const p of pids) if (p > 1 && !gone(p)) try { process.kill(p, 'SIGKILL'); } catch { /* gone */ }
+    }
+  }, 20_000);
+
+  it.runIf(existsSync(tool('sleep')) && ['/bin/ps', '/usr/bin/ps'].some((p) => existsSync(p)))('a default build the process before left running as it died is stopped at the next start, and said so (HB-1507)', async () => {
+    // Under launchd a crash or a SIGKILL of the service left the build's
+    // group running: the next start said it was cut off while it went on,
+    // to end unseen onto the tag and log the next build takes.
+    const buildPid = join(dir, 'build-pid');
+    const partPid = join(dir, 'part-pid');
+    shim(`echo $$ > "${buildPid}"; ${tool('sleep')} 30 & echo $! > "${partPid}"; wait`);
+    const gone = (pid: number) => { try { process.kill(pid, 0); return false; } catch { return true; } };
+    const pids: number[] = [];
+    const file = join(dir, 'hatchabot.db');
+    const deps = (store: Store) => ({
+      store, providerFor: () => { throw new Error('no machine in this test'); }, defaultBase: 'hatchabot-runtime:latest', dataDir: join(dir, 'data'),
+      notify: async () => {}, log: { info: () => {}, error: () => {} },
+    });
+    const makeDefault = { hostId: 'h1', tag: 'hatchabot-runtime:2026.9.8', latest: 'hatchabot-runtime:latest', version: '2026.9.8' };
+    const opOf = (store: Store) => store.listMachineOperations(['h1']).find((o) => o.kind === 'base-build')!;
+    // Another process now under a pid a record kept: one that is no build, and one that looks like one, started long after its record.
+    const stray = spawn(tool('sleep'), ['30'], { detached: true, stdio: 'ignore' });
+    const lookalike = spawn('/bin/sh', ['-c', `${tool('sleep')} 30; :`, 'scripts/build-runtime-image.sh'], { detached: true, stdio: 'ignore' });
+    const opened: Database.Database[] = [];
+    const open = () => { const db = new Database(file); opened.push(db); return new Store(db); };
+    let before: RuntimeImages | undefined, after: RuntimeImages | undefined, again: RuntimeImages | undefined;
+    try {
+      const first = open();
+      before = createRuntimeImages(deps(first));
+      before.startBaseBuild({ version: '2026.9.8', candidate: false, forOwner: 'owner-a', makeDefault });
+      const until = Date.now() + 5_000;
+      while (!(existsSync(partPid) && readFileSync(partPid, 'utf8').trim()) && Date.now() < until) await new Promise((r) => setTimeout(r, 20));
+      pids.push(Number(readFileSync(buildPid, 'utf8')), Number(readFileSync(partPid, 'utf8')));
+      expect(pids.every((p) => p > 1)).toBe(true);
+      // Its group's leader is on the record.
+      expect(opOf(first).params).toMatchObject({ pid: pids[0], pidAt: expect.any(String) });
+      // The service dies without its stop: its database goes with it; the build's group runs on.
+      opened[0]!.close();
+      newBootForTests();
+      const second = open();
+      after = createRuntimeImages(deps(second));
+      const said = 'The default base image build for OpenClaw 2026.9.8 was cut off by a restart, so it was not made the fleet default. It was still running after the restart, and was stopped before its end: build it again.';
+      expect(after.baseBuildNow()).toMatchObject({ running: false, ok: false, error: said });
+      expect(opOf(second)).toMatchObject({ status: 'failed', outcome: said });
+      const reaped = Date.now() + 5_000;
+      while (!pids.every(gone) && Date.now() < reaped) await new Promise((r) => setTimeout(r, 20));
+      expect(pids.filter((p) => !gone(p))).toEqual([]);
+      // A record whose pid is now another process's (not the build script, or not started then) stops nothing: said as cut off, as before.
+      for (const [pid, pidAt] of [[stray.pid!, new Date().toISOString()], [process.pid, new Date().toISOString()], [lookalike.pid!, '2026-01-01T00:00:00.000Z']] as const) {
+        beginOperation(second, 'base-build', null, { version: '2026.9.8', tag: makeDefault.tag, latest: makeDefault.latest, pid, pidAt }, { hostId: 'h1', requestedBy: 'owner-a' });
+        newBootForTests();
+        again?.stop();
+        again = createRuntimeImages(deps(second));
+        expect(again.baseBuildNow().error, String(pid)).toMatch(/^The default base image build for OpenClaw 2026\.9\.8 was cut off by a restart, so it was not made the fleet default\. If it got to its end/);
+        expect([gone(stray.pid!), gone(lookalike.pid!)]).toEqual([false, false]);
+      }
+    } finally {
+      for (const i of [before, after, again]) i?.stop();
+      for (const db of opened) if (db.open) db.close();
+      // Left running (the old way): ended here, by their own pids only.
+      for (const p of [...pids, stray.pid ?? 0, lookalike.pid ?? 0]) if (p > 1 && !gone(p)) try { process.kill(p, 'SIGKILL'); } catch { /* gone */ }
+      for (const c of [stray, lookalike]) if (c.pid) try { process.kill(-c.pid, 'SIGKILL'); } catch { /* gone */ }
+    }
+  }, 20_000);
+
+  it.runIf(existsSync(tool('setsid')) && existsSync(tool('sleep')))('a step that starts a session of its own is stopped with the build (HB-1186)', async () => {
+    // setsid puts the step in a session, and so a process group, of its own:
+    // the kill of the build's group did not reach it, and it ran on after
+    // the service had stopped.
+    const partPid = join(dir, 'part-pid');
+    shim(`${tool('setsid')} ${tool('sleep')} 30 & echo $! > "${partPid}"; echo waiting; wait`);
+    const gone = (pid: number) => { try { process.kill(pid, 0); return false; } catch { return true; } };
+    let part = 0;
+    try {
+      images.startBaseBuild({ candidate: true, forOwner: 'owner-a' });
+      const until = Date.now() + 5_000;
+      while (!(existsSync(partPid) && readFileSync(partPid, 'utf8').trim()) && Date.now() < until) await new Promise((r) => setTimeout(r, 20));
+      part = Number(readFileSync(partPid, 'utf8'));
+      expect(part).toBeGreaterThan(1);
+      // In a session of its own, as setsid makes it (its session id is its own pid).
+      const sid = () => readFileSync(`/proc/${part}/stat`, 'utf8').replace(/^.*\) /, '').split(' ')[3];
+      if (existsSync(`/proc/${part}/stat`)) {
+        for (const t0 = Date.now(); sid() !== String(part) && Date.now() - t0 < 2000;) await new Promise((r) => setTimeout(r, 20));
+        expect(sid()).toBe(String(part));
+      }
+      images.stop();
+      const b = await settled();
+      expect(b).toMatchObject({ ok: false, error: 'The build was stopped as Hatchabot stopped.' });
+      const reaped = Date.now() + 5_000;
+      while (!gone(part) && Date.now() < reaped) await new Promise((r) => setTimeout(r, 20));
+      expect(gone(part)).toBe(true);
+    } finally {
+      // Left running (the old way): ended here, by its own pid only.
+      if (part > 1 && !gone(part)) try { process.kill(part, 'SIGKILL'); } catch { /* gone */ }
     }
   }, 20_000);
 

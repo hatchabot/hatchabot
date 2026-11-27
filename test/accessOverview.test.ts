@@ -9,9 +9,10 @@ import type { SecretStore } from '../src/secrets/secretStore.js';
 import type { Agent } from '../src/domain/types.js';
 import type { ExecResult } from '../src/providers/provider.js';
 import { accessAlertOf, accessOverview, accessProbeScript, REPLACED_WHILE_CHECKED, verifyAgentAccess } from '../src/orchestrator/google/accessOverview.js';
-import { beginOperation } from '../src/orchestrator/lifecycle/operations.js';
+import { noteFilesReplacing } from '../src/orchestrator/lifecycle/operations.js';
 import { recordGoogleSeen, syncConnections } from '../src/orchestrator/google/googleConnections.js';
 import { PAIRING_DB } from '../src/orchestrator/members/claim.js';
+import { browserSteerers } from '../src/orchestrator/console/browserLogins.js';
 import vm from 'node:vm';
 import { telegramRefuses } from './support/telegramStandIn.js';
 import nodePath from 'node:path';
@@ -308,6 +309,20 @@ describe('Verify now records what is inside the running agent', () => {
     expect(w.row('a1', 'person-unknown', 'telegram')).toMatchObject({ managed: false, label: '2 other people on Telegram' });
   });
 
+  it('a door open to everybody is "anyone", never counted as one other person (HB-1201)', async () => {
+    const w = await world();
+    w.inside.admitted = { telegram: [tgId(1), tgId(2), '*'] };
+    await verifyAgentAccess(w.deps, 'a1');
+    expect(w.row('a1', 'person-unknown', 'telegram')).toMatchObject({ managed: false, label: 'Anyone on Telegram', note: expect.stringMatching(/open to everybody/) });
+    // Who could steer its browser says the same.
+    expect(browserSteerers(w.store, w.store.getAgent('a1')!)).toContain('anyone on Telegram, let in inside OpenClaw itself');
+    expect(browserSteerers(w.store, w.store.getAgent('a1')!).join(' ')).not.toMatch(/other person/);
+    // Closed again to its list: a count once more.
+    w.inside.admitted = { telegram: [tgId(1), tgId(2), tgId(7)] };
+    await verifyAgentAccess(w.deps, 'a1');
+    expect(w.row('a1', 'person-unknown', 'telegram')).toMatchObject({ label: '1 other person on Telegram' });
+  });
+
   it('a member\'s id is looked for only on the chat apps it is on now: web-only, nothing is "not found" (no false ⚠)', async () => {
     const w = await world();
     w.store.deleteChannelForAgent('a1', 'all');
@@ -359,8 +374,8 @@ describe('Verify now records what is inside the running agent', () => {
       w.store.setAgentHost('a1', 'h2');
     });
     await heldWhile('gog auth list', (w) => w.store.setAgentState('a1', 'STOPPED'));
-    // A rebuild keeps the runtime's name: its operation beginning is what tells.
-    await heldWhile('HB_ACCESS_PROBE=', (w) => { beginOperation(w.store, 'rebuild', 'a1', {}); });
+    // A rebuild keeps the runtime's name: the count its take moves is what tells (provision.ts rebuildAgent, HB-1491).
+    await heldWhile('HB_ACCESS_PROBE=', () => { noteFilesReplacing('a1'); });
     // Nothing changed meanwhile: what it found is kept.
     const w = await world();
     w.inside.env = {};

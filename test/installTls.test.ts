@@ -8,13 +8,15 @@
  * listen on loopback only.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer as createHttpServer, type Server as HttpServer } from 'node:http';
 import { createServer, type Server } from 'node:https';
 import { createServer as createTcpServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { installFetch, installTlsSettings, ownTls, pinnedFetch } from '../src/config/installTls.js';
+import { dirname, join } from 'node:path';
+import { installFetch, installTlsSettings, ownTls, pinnedFetch, zonedTarget } from '../src/config/installTls.js';
+import { zonedTarget as doctorsZonedTarget } from '../src/doctor.js';
 import { noAnswer } from '../src/cli.js';
 
 const haveOpenssl = (() => { try { execFileSync('openssl', ['version'], { stdio: 'ignore' }); return true; } catch { return false; } })();
@@ -215,7 +217,7 @@ describe('the CLI sends its requests to its install through installRequest (HB-1
     // for an address that is not https, or one of Google's. A guard that
     // looked for `fetch(` and `await fetch(` alone let
     // await (fetch(`${base}/v1/config`)) through (review of HB-1375).
-    const plain = 'if (!/^https:/i.test(url)) return fetch(url, init);';
+    const plain = 'if (!/^https:/i.test(url) && !zonedTarget(url)) return fetch(url, init);';
     const google = /^fetch\(\s*`https:\/\/[a-z]+\.googleapis\.com\//;
     let installs = 0, start = 0;
     src.split('\n').forEach((raw, i) => {
@@ -230,5 +232,100 @@ describe('the CLI sends its requests to its install through installRequest (HB-1
       start += raw.length + 1;
     });
     expect(installs).toBe(1);
+  });
+});
+
+/**
+ * HB-1539: an address with a zone (a link-local fe80::1%eth0) is in no URL
+ * Node's fetch takes, so every command failed on one; doctor asked it by host
+ * and port (zonedTarget, HB-1378), and now the CLI's requests do too, through
+ * the same helper. A loopback address with its zone (::1%lo) is the closest
+ * to a link-local one a sandbox can listen on: the listeners are on ::1.
+ */
+describe.skipIf(process.platform !== 'linux')('the CLI reaches an install bound to an address with a zone (HB-1539)', () => {
+  const seen: Array<{ method: string; url: string; auth?: string; body: string }> = [];
+  let http: HttpServer | undefined; let port = 0;
+  beforeAll(async () => {
+    const s = createHttpServer((req, res) => {
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', () => {
+        seen.push({ method: req.method!, url: req.url!, auth: req.headers.authorization, body });
+        res.writeHead(200, { 'content-type': 'application/json' });
+        if (req.url === '/v1/config') res.end('{"authMode":"accounts"}');
+        else if (req.url === '/v1/agents' || req.url === '/v1/agents?all=1') res.end(JSON.stringify([{ id: 'agent-0001-zone', name: 'Homework Helper', slug: 'homework-helper', hostId: 'h1', state: 'RUNNING' }]));
+        else res.end(JSON.stringify({ method: req.method, body }));
+      });
+    });
+    port = await new Promise<number>((r) => { s.once('error', () => r(0)); s.listen(0, '::1', () => r((s.address() as { port: number }).port)); });
+    if (port) http = s;
+  });
+  afterAll(() => { http?.closeAllConnections(); http?.close(); });
+
+  it('the one helper: doctor gives the CLI\'s, and a zoned URL is no URL fetch takes', () => {
+    expect(doctorsZonedTarget).toBe(zonedTarget);
+    expect(zonedTarget('http://[::1%25lo]:9137/v1/config')).toEqual({ protocol: 'http:', host: '::1%lo', port: 9137, path: '/v1/config' });
+    expect(() => new URL('http://[::1%25lo]:9137/v1/config')).toThrow();
+  });
+
+  it('installFetch asks it by host and port: an answer, and a body sent and answered', async (ctx) => {
+    if (!http) ctx.skip(); // no IPv6 loopback here
+    const env = envFile([]);
+    const cfg = await installFetch(`http://[::1%25lo]:${port}/v1/config`, {}, env);
+    expect(cfg.status).toBe(200);
+    expect(await cfg.json()).toEqual({ authMode: 'accounts' });
+    // The % bare, as some write it, the same.
+    const sent = await installFetch(`http://[::1%lo]:${port}/v1/agents/x/notes`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer made-up-cli-credential' }, body: '{"note":"made-up"}' }, env);
+    expect(await sent.json()).toEqual({ method: 'POST', body: '{"note":"made-up"}' });
+    expect(seen.at(-1)).toMatchObject({ method: 'POST', url: '/v1/agents/x/notes', auth: 'Bearer made-up-cli-credential' });
+    // Nothing listening there: it fails as fetch fails, so the CLI reads it as no answer.
+    const none = await installFetch(`http://[::1%25lo]:1/v1/config`, {}, env).then(() => undefined, (e: unknown) => e);
+    expect(none).toMatchObject({ message: 'fetch failed', cause: { code: 'ECONNREFUSED' } });
+    expect(noAnswer(none)).toBe(true);
+  });
+
+  it('the hatchabot command itself, with HATCHABOT_URL at such an address, lists the agents there', async (ctx) => {
+    if (!http) ctx.skip();
+    const home = mkdtempSync(join(tmpdir(), 'hb-cli-zone-'));
+    try {
+      seen.length = 0;
+      // The real CLI in a child process: a temp HOME, PATH holding only node, an environment built from scratch.
+      const r = await new Promise<{ code: number; out: string; err: string }>((resolve) => {
+        execFile(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'list', '--json'], {
+          cwd: join(__dirname, '..'),
+          env: { HOME: home, PATH: dirname(process.execPath), HATCHABOT_URL: `http://[::1%25lo]:${port}`, HATCHABOT_TOKEN: 'made-up-cli-credential', NO_COLOR: '1' },
+          timeout: 60_000,
+        }, (err, stdout, stderr) => resolve({ code: err ? ((err as { code?: number }).code ?? 1) : 0, out: String(stdout), err: String(stderr) }));
+      });
+      expect(r.code, r.out + r.err).toBe(0);
+      expect(r.out).toContain('Homework Helper');
+      expect(seen.some((q) => q.url.startsWith('/v1/agents') && q.auth === 'Bearer made-up-cli-credential')).toBe(true);
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  }, 70_000);
+});
+
+describe.skipIf(!haveOpenssl || process.platform !== 'linux')('an https install bound to an address with a zone: its own certificate there too (HB-1539)', () => {
+  let pair: { key: string; cert: string }; let port = 0; let s: Server | undefined;
+  beforeAll(async () => {
+    pair = selfSigned('zoned', 'DNS:made-up-box.example.org');
+    const srv = createServer({ key: readFileSync(pair.key), cert: readFileSync(pair.cert) }, (_req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"authMode":"accounts"}'); });
+    port = await new Promise<number>((r) => { srv.once('error', () => r(0)); srv.listen(0, '::1', () => r((srv.address() as { port: number }).port)); });
+    if (port) { s = srv; servers.push(srv); }
+  });
+
+  it('own when it is the bind address, zone and all; not another zone, nor plain http', () => {
+    const cert = pair.cert;
+    expect(ownTls('https://[fe80::10%25eth0]:8443/', { cert, bind: 'fe80::10%eth0' })).toBeDefined();
+    expect(ownTls('https://[fe80::10%eth0]:8443/', { cert, bind: '[fe80::10%eth0]' })).toBeDefined();
+    expect(ownTls('https://[fe80::10%25eth1]:8443/', { cert, bind: 'fe80::10%eth0' })).toBeUndefined();
+    expect(ownTls('http://[fe80::10%25eth0]:8080/', { cert, bind: 'fe80::10%eth0' })).toBeUndefined();
+  });
+
+  it('pinned there: a request by host and port that trusts the install\'s own certificate', async (ctx) => {
+    if (!s) ctx.skip();
+    const r = await installFetch(`https://[::1%25lo]:${port}/v1/config`, {}, envFile([`HATCHABOT_TLS_CERT=${pair.cert}`, 'HATCHABOT_BIND=::1%lo']));
+    expect(await r.json()).toEqual({ authMode: 'accounts' });
+    // With no certificate of the install's, it is checked as fetch checks one, and refused.
+    await expect(installFetch(`https://[::1%25lo]:${port}/v1/config`, {}, envFile([]))).rejects.toMatchObject({ message: 'fetch failed' });
   });
 });

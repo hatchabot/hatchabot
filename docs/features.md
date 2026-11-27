@@ -82,7 +82,8 @@ The header holds:
   search for every agent into Settings → Hosts), its Health tab repeated the
   home screen (what it alone showed — each machine, the latest backup, the
   OpenClaw version — is the machine line at the foot of the home screen, its
-  problems Alerts on the Hatchabot agent's tile), and Activity is the home
+  problems Alerts on the Hatchabot agent's tile, or on the machine line when
+  there is no Hatchabot agent), and Activity is the home
   screen's last section.
 - **Bulk actions** (a bolt), shown once there are two agents to pick from;
   **Rebuild all** and **Check all** are at its foot.
@@ -90,7 +91,8 @@ The header holds:
   hover (Chris, 2026-09-27). On a phone they tighten, and under 400 px wide the
   wordmark gives way to the logo.
 - **Settings**: this machine's settings, opened directly.
-- An inbox button, which appears only when someone has sent you an agent.
+- An inbox button, which appears only when someone has sent you an agent, with how
+  many are waiting. The inbox lists the newest 50, and **Show more** the next 50.
 - The account menu: who you're signed in as, light or dark appearance,
   install as an app, help, report a problem, the version, and sign out.
 
@@ -610,7 +612,15 @@ the Alerts line and the tile's tooltip are what you have.
   use, live, until the 1st —
   it keeps answering; its own model comes back on the 1st or as soon as the
   budget is raised, and a model you set by hand wins for the rest of the
-  month. Stopping and starting it, or archiving it, keeps that promise: an
+  month. A class that moves it to another AI source and off the cheaper
+  model (to the class's own model, or to a source without the cheaper one)
+  ends the switch as the class's doing, not yours: once it is rebuilt on that
+  source, the next check moves it to that source's cheapest model if one
+  costs less, and the class's model comes back on the 1st (a class with only
+  a source puts back the model you chose, if that source offers it and can
+  run it). A model you set by hand after that wins for the rest of the month
+  too. A class whose model is the cheaper one keeps it when the switch ends.
+  Stopping and starting it, or archiving it, keeps that promise: an
   archived agent gets its own model back on its record at once. The switch is
   in the model ledger as Hatchabot's ("budget"): the
   quality guard gives it no verdict and no switch-back card, and Right-size's
@@ -637,7 +647,10 @@ the Alerts line and the tile's tooltip are what you have.
 - **The whole machine**: the machine owner can give this Hatchabot one
   budget (every agent's spend, everyone's) in the same panel; "pause it" there
   pauses every agent but the Hatchabot agent. Its line is on the Hatchabot
-  agent's tile.
+  agent's tile. An agent it moved to a cheaper model says so under Alerts on
+  its own tile, to its owner: "On claude-haiku-4-5 until December 1: this
+  Hatchabot's monthly budget moved it — raise that budget to switch back now"
+  ("ask the machine's owner" to an owner who is not the machine's).
 - **Your Hatchabot agent** is never paused (it is how you manage the others):
   its own budget can only warn.
 - **The month** is the calendar month in the machine's time zone. Spend is
@@ -1544,7 +1557,10 @@ the point of the door. So when somebody redeems an invite and only gets round
 to messaging two hours later, the answer is to hold the door open again rather
 than to leave it ajar all day: their row under **Members** says *"hasn't
 messaged yet"* with **Let them in again**, which opens a fresh 30 minutes (and
-keeps the named @handle, if the invite had one). Hatchabot also tells you when
+keeps the named @handle, if the invite had one: then it asks for none). Each
+press asks for their @handle (a t.me link to them works too): give it and only
+they are let in; leave it empty and whoever writes first is, as before. One
+that is not a handle is asked for again, never taken as none. Hatchabot also tells you when
 an invite's window closes unused, so you find out while the invite is still fresh instead
 of when they complain the bot ignores them. The 30 minutes count only while the
 agent is up, but how long a window waits for a stopped or rebuilding agent
@@ -1595,7 +1611,8 @@ in, name them.
 @handle; give it, and the 30-minute window that opens admits **only** that
 account — anyone else who messages the bot in the meantime is turned away and
 never shown to you. Leave it blank and the window behaves as before: the first
-person to message is admitted. The handle is only ever used to match the knock;
+person to message is admitted. Their t.me link works too; one that is not a
+handle is asked for again, and the invite says whom it was kept for. The handle is only ever used to match the knock;
 what gets stored on the allowlist is the numeric Telegram id, so a handle
 changing hands later grants nobody anything.
 
@@ -1621,7 +1638,8 @@ knock it is expecting:
   anyone who messages gets a pairing reply, and the first one is let in
   unless the invite named their @handle (a copied Telegram invite only shows
   the knock; you let them in). **Let them in again** reopens only the app
-  they joined with, or asks for their @handle when that is not known; or
+  they joined with, and asks for their @handle, which you may leave empty
+  (it is needed when that app is not known); or
 - the sender is **someone you already know**: your own linked Telegram, or an
   active member of any agent you own — let someone into one agent and they are
   not a stranger at the next.
@@ -1913,7 +1931,15 @@ no boot-loader edit. It sets `vm.swappiness` only if you say yes. `--zram`
 uses zram instead (on Ubuntu cloud images it needs
 `linux-modules-extra-$(uname -r)`; the script says so). zram turns zswap off,
 so `--zram` is refused while a disk swap is on: use zswap in front of it, or
-turn the disk swap and its `/etc/fstab` line off first. `--status` shows the
+turn the disk swap and its `/etc/fstab` line off first. A disk swap that
+comes back later beside zram (its `/etc/fstab` line left in) is found at boot:
+zswap is then left as it is, not turned off, and the unit's journal
+(`journalctl -u hatchabot-compressed-swap`) says so and how to fix it. A
+boot helper written by a release before 2.193.0 turns zswap off there all
+the same until the script writes it again: `--status` says when the helper is
+another release's and gives the command that writes it with the same
+settings, and `--zram`, refused beside a disk swap, still brings it up to date
+on a machine set up in zram mode, changing nothing else. `--status` shows the
 state and the compression ratio; `--undo` puts it all back. When the check at
 the end finds no compressed swap after all, the script says so and exits 1.
 
@@ -2265,7 +2291,15 @@ agent's first reading the figure is a *range* (low = all input, high = all
 output). A
 trailing `+` means a model had no known price and was left out. On the CLI,
 `hatchabot usage` (no agent name) prints the lifetime ranked table with cost;
-`hatchabot usage <agent>` shows one agent's breakdown by model.
+`hatchabot usage <agent>` shows one agent's breakdown by model. Lifetime
+totals (that table, and the "in all" of an agent's own usage) are billed by
+the source each agent runs now: the history to split them by source is not
+kept, so one whose container ran on an earlier source is marked as including
+that time (a `*` in the table). An agent moved here from another Hatchabot,
+or restored from a download, is marked too when its transcripts include time
+on a source other than the one it lands on: the download names the source it
+ran on there, and an earlier one (since v2.193.0; an older download carries no
+such mark, so its copy is not marked).
 
 **Spike warnings.** (Since v2.158.0 a spike of the last day is a line under
 Alerts and a Recommended item; the box on Usage keeps the earlier ones, and a
@@ -2373,14 +2407,17 @@ the answer, with usage and cost when the runtime reports them. The model run has
 a 60-second deadline and a 512-output-token setting per response; those are not
 a guaranteed dollar cap. Metered AI charges apply, and each agent has a two-minute
 interval between attempts. What a practice spends counts as the agent's own
-calls do: toward its budget and its spike warnings, as its source's tokens (a
-Claude plan's too), and in its Usage, where it shows as "practice". It counts
+calls do: toward its budget and its spike warnings, as its source's tokens and
+requests (a Claude plan's too), in the model scorecard's calls and month, and in
+its Usage, where it shows as "practice". A practice call is not a success or a
+refusal in a source's status, and its refused calls are not counted. It counts
 once: the practice's transcript stays in its own temporary folder, which the
 usage sampler never reads, and Practice records what it spent before the folder
 goes. A run stopped at its time limit counts what it had spent by then, but if
 the machine stops answering before the run reports back, what it spent cannot be
 read and is not counted. Practice waits while the
-agent is paused by its budget. Unsupported runtimes or model harnesses report that
+agent is paused by its budget, and from the moment a budget that pauses it (its
+own, or this Hatchabot's) is reached, before the pause is made. Unsupported runtimes or model harnesses report that
 limitation. A practice result does not prove Google, Jira, browser or image-provider
 access. See [Skills setup and examples](skills.md).
 
@@ -2707,9 +2744,12 @@ lines run as **root** (the base ends as `USER node`), then the image restores
 on; you never write your own `FROM`/`USER` (a heredoc's text may say `USER`:
 a script's `USER=…` is the script's). Every line is judged as an instruction,
 since docker could read it as one: a line that begins with `FROM`, with a
-`RUN` whose flags are not allowed (such as `--device`), or with a `LABEL` of
-Hatchabot's own is refused even in a heredoc's text or in a line that goes
-on. A heredoc's name is a
+`RUN` whose flags are not allowed (such as `--device`), with a `COPY --from`
+(it would copy another image's files in: any image on the machine, or one
+Docker can pull with its logins), with an `ADD` of a URL or a git address
+(Docker fetches it from the machine's own network: download it with
+`RUN curl` instead), or with a `LABEL` of Hatchabot's own is
+refused even in a heredoc's text or in a line that goes on. A heredoc's name is a
 plain word such as `EOF` (letters, digits and `_`, quoted or not), and a line
 that goes on to the next ends with one `\`, never two. A build whose image would not run
 as `node` (a line that hides that last `USER node`), or is not built on its
@@ -2787,7 +2827,17 @@ machine, for its own CPU, in minutes.
   and which of those were set by hand). An image there of the very same layers
   (a copy Install image made), or one built the same way, is the base; the
   base a derived image there is already built on stays its base while it is
-  one of those. A Node
+  one of those. Either way it must run as the base does: the same user,
+  entrypoint, command, environment, volumes, working folder, ONBUILD steps,
+  shell and stop signal, so an image built by hand FROM the base with only a
+  `USER root`, an `ENV` or a `VOLUME` (its layers and label are the base's) is
+  not one. The refusal says one of the two was built by hand, and since
+  which is not known there, gives each its fix: the one there built by hand,
+  build that OpenClaw there or take it out of the runtime repository; the
+  agent's, make it a derived image where it was made, so its lines travel.
+  A base taken by its name (from before 2.191.0) is held to how it ran too.
+  A recipe or file from before 2.193.0 does not say how its base runs, and
+  is matched as before. A Node
   patch, the plugins' versions (unless set by hand), Claude Code and the
   release may differ; nothing else may. A base with packages is matched by one
   with the same packages, or by one with none, and they are laid on. Nothing
@@ -2819,7 +2869,7 @@ machine, for its own CPU, in minutes.
   stops and **shows what building would run**; only that machine's owner can
   choose Build (the lines run as root while building), and anyone can choose the
   default image. The file is untrusted: a recipe with its own `FROM`, `USER`, a
-  build mount or network, a base from outside its own fleet, a name with a
+  build mount or network, a `COPY --from` another image, an `ADD` of a URL, a base from outside its own fleet, a name with a
   registry's host or port, or a
   package name that isn't one is never built, nor are a Node or plugins the
   file says were set by hand: they are only matched. A derived image arrives

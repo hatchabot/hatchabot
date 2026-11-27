@@ -962,6 +962,62 @@ describe('a restore keeps its safety copy on disk', () => {
       expect(store.managedCron('a1', MODEL_REVIEW_NAME)).toEqual({ jobId: 'job-before', at: '2026-08-01T09:00:00.000Z', messageHash: reviewMessageHash() });
     }
   });
+
+  const listing = (jobs: Array<{ id: string; name: string }>) =>
+    ({ code: 0, stdout: JSON.stringify({ jobs: jobs.map((j) => ({ ...j, enabled: true, schedule: { kind: 'cron', expr: '0 9 * * 1' } })) }), stderr: '' });
+
+  it('one recorded after the copy that the copy holds all the same, renamed by hand, is found by its id: no second one (HB-1317)', async () => {
+    const { store, provider, runtimeRef } = await agent('2026-09-17');
+    // Recorded when a build found it by its name, after the copy was made; the owner renamed it since.
+    store.setManagedCron('a1', MODEL_REVIEW_NAME, 'job-in-copy', '2026-10-01T09:00:00.000Z', reviewMessageHash());
+    await restoreAgentFromBackup({ store, provider }, 'a1', '2026-09-17');
+    provider.execResponses.set('cron list', listing([{ id: 'job-in-copy', name: 'Monday token look' }]));
+    const n = provider.execLog.length;
+    expect(await syncModelReviewCron({ store, provider }, manager, runtimeRef, 'weekly')).toBe('present');
+    expect(cronCalls(provider, n, 'add')).toEqual([]);
+    expect(cronCalls(provider, n, 'edit').map((a) => a[2])).toEqual(['job-in-copy']);
+    // Its words written again, and the name the owner gave it kept (review).
+    expect(cronCalls(provider, n, 'edit')[0]).not.toContain('--name');
+    expect(store.managedCron('a1', MODEL_REVIEW_NAME)).toEqual({ jobId: 'job-in-copy', at: '2026-10-01T09:00:00.000Z', messageHash: reviewMessageHash() });
+    // The next build takes the record at its word again.
+    const m = provider.execLog.length;
+    expect(await syncModelReviewCron({ store, provider }, manager, runtimeRef, 'weekly')).toBe('kept');
+    expect(provider.execLog.length).toBe(m);
+  });
+
+  it('a copy made after the record, restored over an older one\'s, takes its mark off: the task is in it or was deleted by hand (HB-1317)', () => {
+    const store = new Store(new Database(':memory:'));
+    store.setManagedCron('a1', MODEL_REVIEW_NAME, 'job-x', '2026-10-01T09:00:00.000Z', reviewMessageHash());
+    expect(store.matchManagedCronsToCopy('a1', Date.parse('2026-09-20T00:00:00Z'))).toEqual({ unsure: [MODEL_REVIEW_NAME], rewritten: [] });
+    expect(store.managedCron('a1', MODEL_REVIEW_NAME)).toEqual({ jobId: 'job-x', at: '2026-10-01T09:00:00.000Z', afterCopy: true });
+    expect(store.matchManagedCronsToCopy('a1', Date.parse('2026-10-05T00:00:00Z'))).toEqual({ unsure: [], rewritten: [MODEL_REVIEW_NAME] });
+    expect(store.managedCron('a1', MODEL_REVIEW_NAME)).toEqual({ jobId: 'job-x', at: '2026-10-01T09:00:00.000Z' });
+  });
+
+  it('one recorded with no id before the copy is found by its name and reworded, or else stays deleted (HB-1317)', async () => {
+    for (const there of [true, false]) {
+      const { store, provider, runtimeRef } = await agent('2026-09-18');
+      store.setManagedCron('a1', MODEL_REVIEW_NAME, undefined, '2026-08-01T09:00:00.000Z', reviewMessageHash());
+      await restoreAgentFromBackup({ store, provider }, 'a1', '2026-09-18');
+      provider.execResponses.set('cron list', listing(there ? [{ id: 'job-named', name: MODEL_REVIEW_NAME }] : [{ id: 'job-other', name: 'Water the plants' }]));
+      const n = provider.execLog.length;
+      expect(await syncModelReviewCron({ store, provider }, manager, runtimeRef, 'weekly')).toBe(there ? 'present' : 'kept');
+      expect(cronCalls(provider, n, 'edit').map((a) => a[2])).toEqual(there ? ['job-named'] : []);
+      expect(cronCalls(provider, n, 'add')).toEqual([]);
+      expect(store.managedCron('a1', MODEL_REVIEW_NAME)).toEqual({ ...(there ? { jobId: 'job-named' } : {}), at: '2026-08-01T09:00:00.000Z', messageHash: reviewMessageHash() });
+    }
+  });
+
+  it('one recorded with no id that no restore marked is not looked for by its name: a task of the owner\'s under that name keeps its words (review of HB-1317)', async () => {
+    const { store, provider, runtimeRef } = await agent('2026-09-19');
+    // Recorded with an older release's words; the owner has since made a task of their own under the same name.
+    store.setManagedCron('a1', MODEL_REVIEW_NAME, undefined, '2026-08-01T09:00:00.000Z', 'older-words-mark');
+    provider.execResponses.set('cron list', listing([{ id: 'job-owners', name: MODEL_REVIEW_NAME }]));
+    const n = provider.execLog.length;
+    expect(await syncModelReviewCron({ store, provider }, manager, runtimeRef, 'weekly')).toBe('kept');
+    expect(provider.execLog.slice(n).filter((a) => a[0] === 'cron')).toEqual([]);
+    expect(store.managedCron('a1', MODEL_REVIEW_NAME)).toEqual({ at: '2026-08-01T09:00:00.000Z', messageHash: reviewMessageHash() });
+  });
 });
 
 describe('a move carries the volume in a private file', () => {

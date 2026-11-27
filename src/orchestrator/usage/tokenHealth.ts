@@ -454,17 +454,24 @@ export function modelRefOf(agent: Pick<Agent, 'model'>, profile: Pick<AIProfile,
   return { provider, id: effectiveModel(agent, profile) };
 }
 
+/** A source as the container runs it: the record, or a deleted one's tombstone (Store.formerAIProfile). */
+export type RunningSource = Pick<AIProfile, 'id' | 'name' | 'vendor' | 'kind' | 'model'> & Partial<Pick<AIProfile, 'models'>>;
+
 /**
  * The source and model the agent's container runs. While a switch of source
  * waits for its rebuild, that is the source it was built with, not the one
- * chosen. What its context cap is judged and written by (compaction.ts,
- * `cappedModelOf`), and what its token health row says it runs and how it
- * is billed: the cap menu and the cap's Recommended item read that, so they
- * agree with what the cap route takes (HB-1170).
+ * chosen: deleted since, as its tombstone keeps it (its vendor and how it was
+ * paid for), with the model the container was built with (HB-1344). What its
+ * context cap is judged and written by (compaction.ts, `cappedModelOf`), and
+ * what its token health row says it runs and how it is billed: the cap menu
+ * and the cap's Recommended item read that, so they agree with what the cap
+ * route takes (HB-1170).
  */
-export function runningModelOf(store: Pick<Store, 'getAIProfile'>, agent: Agent): { profile: AIProfile; provider: string; id: string } | undefined {
+export function runningModelOf(store: Pick<Store, 'getAIProfile' | 'formerAIProfile'>, agent: Agent): { profile: RunningSource; provider: string; id: string } | undefined {
   const pending = !!agent.appliedProfileId && agent.appliedProfileId !== agent.aiProfileId;
-  const profile = store.getAIProfile(pending ? agent.appliedProfileId! : agent.aiProfileId);
+  const profile: RunningSource | undefined = pending
+    ? store.getAIProfile(agent.appliedProfileId!) ?? store.formerAIProfile(agent.appliedProfileId!)
+    : store.getAIProfile(agent.aiProfileId);
   if (!profile) return undefined;
   const ref = modelRefOf(agent, profile);
   return { profile, provider: ref.provider, id: pending ? agent.appliedModel ?? profile.model : ref.id };
@@ -476,7 +483,7 @@ function stateOf(a: Agent): string {
   return a.state.toLowerCase();
 }
 
-export function tokenHealthRow(a: Agent, running: { profile: AIProfile; provider: string; id: string } | undefined, stored: { health: TokenHealthRaw; at: string } | undefined, ctx: {
+export function tokenHealthRow(a: Agent, running: { profile: RunningSource; provider: string; id: string } | undefined, stored: { health: TokenHealthRaw; at: string } | undefined, ctx: {
   now: number; marks: StoredMark[]; consults: Array<{ to: string; from: string; at: string }>; incidents: TokenIncidentRow[];
   cap?: { tokens?: number; appliedModel?: string };
   /** The owner's enabled scheduled tasks, from the model profile (null = unreadable). */
@@ -594,7 +601,7 @@ export function buildTokenHealth(store: Store, ownerId: string, opts: { now?: nu
   const compactions = store.lastMainCompactions(ids);
   const profiles = new Map<string, AIProfile | undefined>();
   const profileOf = (id: string) => { if (!profiles.has(id)) profiles.set(id, store.getAIProfile(id)); return profiles.get(id); };
-  const rows = agents.map((a) => tokenHealthRow(a, runningModelOf({ getAIProfile: profileOf }, a), healths.get(a.id), {
+  const rows = agents.map((a) => tokenHealthRow(a, runningModelOf({ getAIProfile: profileOf, formerAIProfile: (id) => store.formerAIProfile(id) }, a), healths.get(a.id), {
     now, marks: marks.filter((m) => m.agentId === a.id), consults, incidents, cap: store.getContextCap(a.id), crons: crons.get(a.id)?.profile.crons,
     compaction: compactions.get(a.id), compacting: compactingNow.has(a.id),
   })).sort((x, y) => (y.cost30d?.total ?? -1) - (x.cost30d?.total ?? -1) || (y.conversation?.calls ?? 0) - (x.conversation?.calls ?? 0));

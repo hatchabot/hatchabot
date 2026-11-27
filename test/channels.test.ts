@@ -312,11 +312,14 @@ describe('a recycled pool bot does not keep the last agent\'s identity', () => {
     const releasing = pool.release('recycled');
     await entered;
     // Held for its farewell: another agent asking meanwhile is not given it,
-    // or its "this bot is now …" came before the farewell (HB-1048).
-    await expect(pool.provision({ agentId: 'a2', agentName: 'Second Agent', slug: 'second' })).rejects.toThrow(/exhausted/);
+    // or its "this bot is now …" came before the farewell (HB-1048). It
+    // waits for the farewell instead (HB-1266).
+    const asked = pool.provision({ agentId: 'a2', agentName: 'Second Agent', slug: 'second' });
+    await new Promise((r) => setTimeout(r, 30));
+    expect((db.prepare(`SELECT leased_to FROM telegram_pool WHERE username='recycled'`).get() as any).leased_to).toBeNull();
     letGo();
     await releasing;
-    await pool.provision({ agentId: 'a2', agentName: 'Second Agent', slug: 'second' });
+    await asked;
 
     const row = db.prepare(`SELECT leased_to, desired_name FROM telegram_pool WHERE username='recycled'`).get() as any;
     expect(row.leased_to).toBe('a2');

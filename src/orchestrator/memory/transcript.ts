@@ -57,7 +57,7 @@ let damaged = 0;
 // all of every conversation was held to the end, however little the
 // answer could show (HB-1172). The stats count messages: their text is not
 // kept (HB-0969). Nor is a current conversation's that a recovery leaves out.
-const open = (live) => ({ live, started: '', n: 0, first: null, firstTs: '', prev: null, cut: 0, msgs: mode === 'stats' || (skipLive && live) ? null : [], size: 0, limit: 2 * MAXB });
+const open = (live) => ({ live, started: '', n: 0, first: null, firstTs: '', prev: null, img: null, mirror: false, cut: 0, msgs: mode === 'stats' || (skipLive && live) ? null : [], size: 0, limit: 2 * MAXB });
 // How many of a conversation's oldest messages cannot reach the newest MAXB
 // bytes: the lines of those after them take that much.
 const keepNewest = (msgs) => { let acc = 0, k = msgs.length; while (k > 0 && acc < MAXB) acc += least(msgs[--k]); return acc >= MAXB ? k : 0; };
@@ -69,11 +69,13 @@ const feed = (c, j) => {
   const role = j.message.role; if (role !== 'user' && role !== 'assistant') return;
   const t = textOf(j.message.content).trim(); if (!t || t === 'NO_REPLY') return;
   const ts = j.timestamp || j.message.timestamp;
-  const prev = c.prev;
+  const prev = c.prev, img = j.message.img || null, mirror = !!j.message.mirror;
   // OpenClaw records a delivered assistant reply twice with the SAME timestamp;
-  // drop only that mirror, never a user's genuinely repeated message.
-  if (prev && role === 'assistant' && prev.role === role && prev.t === t && prev.ts === ts) return;
-  c.prev = { role, t, ts }; c.n++;
+  // drop only that mirror, never a user's genuinely repeated message. Two
+  // different pictures both read "[image]": two replies, unless one is
+  // marked as the delivery's copy (HB-1361, as the web chat's HB-0912).
+  if (prev && role === 'assistant' && prev.role === role && prev.t === t && prev.ts === ts && (c.mirror || mirror || samePictures(c.img, img))) return;
+  c.prev = { role, t, ts }; c.img = img; c.mirror = mirror; c.n++;
   if (c.n === 1) c.firstTs = ts;
   if (c.first == null && role === 'user') c.first = t;
   if (!c.msgs) return;
@@ -109,7 +111,21 @@ const slim = (j) => {
   if (j.type === 'session') return { type: 'session', timestamp: j.timestamp };
   if (j.type !== 'message' || !j.message) return null;
   const role = j.message.role; if (role !== 'user' && role !== 'assistant') return null;
-  return { type: 'message', id: j.id, timestamp: j.timestamp, message: { role, content: textOf(j.message.content), timestamp: j.message.timestamp } };
+  const m = j.message;
+  return { type: 'message', id: j.id, timestamp: j.timestamp, message: { role, content: textOf(m.content), timestamp: m.timestamp, img: role === 'assistant' ? picturesOf(m.content) : null, mirror: !!(m.openclawDeliveryMirror || m.model === 'delivery-mirror') } };
+};
+// What textOf shows as [image]: the parts themselves, held only for the
+// reply kept last. Compared only for a reply with its words and its time,
+// not hashed for each: a history of pictures took over twice as long.
+const picturesOf = (c) => {
+  const parts = Array.isArray(c) ? c.filter((p) => p && p.type !== 'text' && /image/.test(p.type || '')) : [];
+  return parts.length ? parts : null;
+};
+const samePictures = (a, b) => {
+  if (!a || !b) return a === b;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (JSON.stringify(a[i]) !== JSON.stringify(b[i])) return false;
+  return true;
 };
 // Text one line at a time, without an array of all its lines.
 const eachLine = (text, fn) => { let at = 0, i; while ((i = text.indexOf('\n', at)) >= 0) { if (i > at) fn(text.slice(at, i)); at = i + 1; } if (at < text.length) fn(text.slice(at)); };

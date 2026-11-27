@@ -37,6 +37,7 @@ OLD="${4:-}"; [ "${3:-}" = "--old" ] || OLD=""
 [ -n "$OLD" ] && [ -f "$OLD/.env" ] || { echo "Can't find the AgentClaw checkout (no agentclaw.service, no ~/agentclaw-prod/.env, no ~/agentclaw/.env). Pass --old <dir>."; exit 1; }
 REPO="${HATCHABOT_REPO:-https://github.com/hatchabot/hatchabot.git}"
 NEW="$HOME/hatchabot-prod"; UNITS="$HOME/.config/systemd/user"; DATA="$HOME/hatchabot-data"
+BACKUPS_LINK="$HOME/agentclaw-backups.moved"   # step 5: the link to the moved backups, until it is in place
 envval() { sed -n "s/^$2=//p" "$1" | sed -n 1p | sed -e 's/[[:space:]]*#.*$//' -e "s/^['\"]//" -e "s/['\"]$//"; }
 say() { printf '\n== %s\n' "$*"; }
 echo "Old checkout: $OLD"
@@ -56,7 +57,10 @@ echo "Database:     $OLD_DB"
 # the run at step 4, the old units stopped, an empty .env left behind
 # (review of HB-1072).
 esc() { printf '%s' "$1" | sed -e 's/[&|\\]/\\&/g'; }
-rewrite_env() { ( umask 077; sed -e 's/^AGENTCLAW_/HATCHABOT_/' -e "s|$(esc "$HOME")/agentclaw-backups|$HOME/hatchabot-backups|g" -e "s|$(esc "$OLD")|$NEW|g" "$1" | { grep -vE '^HATCHABOT_DB=' || true; } > "$2" ); chmod 600 "$2"; }
+# An `export AGENTCLAW_…` line is renamed too, as the plain one is: kept as
+# it was, it named the old key, and an `export AGENTCLAW_DB=` line stayed
+# beside the HATCHABOT_DB line written below (HB-1232).
+rewrite_env() { ( umask 077; sed -e 's/^\(export[[:space:]][[:space:]]*\)\{0,1\}AGENTCLAW_/\1HATCHABOT_/' -e "s|$(esc "$HOME")/agentclaw-backups|$HOME/hatchabot-backups|g" -e "s|$(esc "$OLD")|$NEW|g" "$1" | { grep -vE '^(export[[:space:]]+)?HATCHABOT_DB=' || true; } > "$2" ); chmod 600 "$2"; }
 would_write() { rewrite_env "$OLD/.env" "$1"; printf 'HATCHABOT_DB=%s\n' "$DATA/hatchabot.sqlite" >> "$1"; }
 # put DEST CMD…: CMD writes a file beside DEST, which becomes DEST only once
 # it is whole. A run cut off on the way leaves no part-written DEST, which a
@@ -148,6 +152,11 @@ on_exit() {
     if [ -e "$DATA/hatchabot.sqlite" ] && ! [ "$OLD_DB" -ef "$DATA/hatchabot.sqlite" ]; then
       echo "   AgentClaw's database is at $DATA/hatchabot.sqlite now, and its old path does not lead there yet. Before starting AgentClaw, or running this again: ln -s \"$DATA/hatchabot.sqlite\" \"$OLD_DB\""
     fi
+    # Its backups moved, and the link to them not in place yet (HB-1350):
+    # AgentClaw started so would make an empty ~/agentclaw-backups.
+    if [ -L "$BACKUPS_LINK" ] && [ ! -e "$HOME/agentclaw-backups" ] && [ ! -L "$HOME/agentclaw-backups" ]; then
+      echo "   AgentClaw's backups are in $HOME/hatchabot-backups now, and $HOME/agentclaw-backups does not lead there yet. Before starting AgentClaw: mv -T \"$BACKUPS_LINK\" \"$HOME/agentclaw-backups\" (running this again does it too)"
+    fi
     if { [ "$NEW_STARTING" = 1 ] || [ -e "$DATA/hatchabot.sqlite" ]; } \
       && ! { unit_state hatchabot.service && { [ "$UNIT_ST" = inactive ] || [ "$UNIT_ST" = failed ]; }; }; then
       if [ "$UNIT_ST" = active ]; then
@@ -208,9 +217,19 @@ if [ ! -f "$DATA/hatchabot.sqlite" ]; then
   echo "   $DATA/hatchabot.sqlite (old path is now a symlink to it)"
   for extra in derived-builds mgmt-cli-home; do [ -d "$(dirname "$OLD_DB")/$extra" ] && [ ! -e "$DATA/$extra" ] && mv "$(dirname "$OLD_DB")/$extra" "$DATA/$extra"; done
 fi
-[ -e "$HOME/agentclaw-data" ] || [ "$(dirname "$OLD_DB")" != "$HOME/agentclaw-data" ] || true
+# The link to the moved backups is made first, beside the old path
+# (BACKUPS_LINK), and renamed into it once they are moved: a run stopped
+# between the mv and the link left no ~/agentclaw-backups, and a run again
+# never made it (HB-1350). The link waiting beside it says they were moved,
+# so a run again finishes it.
 if [ -d "$HOME/agentclaw-backups" ] && [ ! -L "$HOME/agentclaw-backups" ]; then
-  mv "$HOME/agentclaw-backups" "$HOME/hatchabot-backups"; ln -s "$HOME/hatchabot-backups" "$HOME/agentclaw-backups"; echo "   ~/hatchabot-backups (symlink left at ~/agentclaw-backups)"
+  ln -sfn "$HOME/hatchabot-backups" "$BACKUPS_LINK"
+  mv "$HOME/agentclaw-backups" "$HOME/hatchabot-backups"
+fi
+if [ -L "$BACKUPS_LINK" ]; then
+  if [ -e "$HOME/agentclaw-backups" ] || [ -L "$HOME/agentclaw-backups" ]; then rm -f "$BACKUPS_LINK"
+  else mv -fT "$BACKUPS_LINK" "$HOME/agentclaw-backups"; fi
+  echo "   ~/hatchabot-backups (symlink left at ~/agentclaw-backups)"
 fi
 
 say "6. systemd units (from deploy/ templates)"

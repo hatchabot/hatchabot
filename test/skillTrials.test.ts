@@ -87,6 +87,24 @@ if(mode==='spend-crowded'){
   const agentDir=path.join(stateDir,'agents',${JSON.stringify(target.slug)},'agent');fs.mkdirSync(agentDir,{recursive:true});
   for(let i=0;i<450;i++)fs.writeFileSync(path.join(agentDir,'blob-'+i+'.bin'),'x');
 }
+if(mode==='spend-refused'){
+  // Calls its source refused (a rate limit): none of them with tokens, one in two places; an error that was no rate limit (HB-1497).
+  const stateDir=argv[argv.indexOf('--state-dir')+1];
+  const dir=path.join(stateDir,'agents',${JSON.stringify(target.slug)},'agent');fs.mkdirSync(dir,{recursive:true});
+  const db=new sq.DatabaseSync(path.join(dir,'openclaw-agent.sqlite'));
+  db.exec('CREATE TABLE transcript_events (session_id TEXT, seq INTEGER, created_at INTEGER, event_json TEXT, event_zstd BLOB)');
+  const put=db.prepare('INSERT INTO transcript_events VALUES (?, ?, ?, ?, ?)');
+  const refused=(id,model,stopReason,errorMessage,usage)=>JSON.stringify({type:'message',id,message:{role:'assistant',model,stopReason,errorMessage,...(usage?{usage}:{})}});
+  put.run('s1',0,0,asked,null);
+  put.run('s1',1,1,refused('x1','claude-opus-4-8','error','429 rate_limit_error: This request would exceed the rate limit'),null);
+  put.run('s1',2,2,refused('x2','claude-opus-4-8','error','API rate limit reached',{input:0,output:0}),null);
+  put.run('s1',3,3,refused('x3','claude-opus-4-8','error','overloaded_error: Overloaded',{input:0,output:0}),null);
+  put.run('s1',4,4,refused('x4','claude-haiku-4-5','timeout','Rate limit: try again later'),null);
+  put.run('s1',5,5,call('e1','claude-opus-4-8',{input:100,output:40,cacheRead:2000,cacheWrite:300}),null);
+  db.close();
+  const sessions=path.join(stateDir,'agents',${JSON.stringify(target.slug)},'sessions');fs.mkdirSync(sessions,{recursive:true});
+  fs.writeFileSync(path.join(sessions,'s2.jsonl'),refused('x1','claude-opus-4-8','error','429 rate_limit_error: This request would exceed the rate limit'));
+}
 if(mode==='spend'||mode==='spend-killed'||mode==='spend-own-quotes'||mode==='spend-crowded'){
   // The run's own transcript in its state folder, as 2026.9 keeps one: calls in
   // the agent's database (one compressed), a session file, a channel's copy of
@@ -287,6 +305,15 @@ describe('what a practice run spent, read before its folder goes, counted once (
     expect(r.spentFrom).toBe('reported');
     expect(r.spent).toEqual([{ model: 'fixture', calls: 0, input: 100, output: 40, cacheRead: 0, cacheWrite: 0 }]);
   });
+  it('the calls its source refused, by model, each once, an error that was no rate limit not among them (HB-1497)', () => {
+    const r = sandbox({ mode: 'spend-refused' }).run();
+    expect(r.spentFrom).toBe('state');
+    // Was: the refusals nowhere, a model whose every call was refused left out.
+    expect(byModel(r.spent)).toEqual([
+      { model: 'claude-haiku-4-5', calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, refused: 1 },
+      { model: 'claude-opus-4-8', calls: 1, input: 100, output: 40, cacheRead: 2000, cacheWrite: 300, refused: 2 },
+    ]);
+  });
   it('nothing for a run that never called the model', () => {
     expect(sandbox({ version: '2026.8.1' }).run()).toEqual({ status: 'unsupported', openclaw: '2026.8.1' });
   });
@@ -296,7 +323,9 @@ describe('what a practice run spent, read before its folder goes, counted once (
     expect(timeout).toMatchObject({ status: 'timeout', spent, spentFrom: 'reported' });
     const lost = await runSkillTrial({ execShell: async () => response({ status: 'completed', spent, spentFrom: 'state' }) }, target, skill);
     expect(lost).toMatchObject({ status: 'unavailable', spent, spentFrom: 'state' });
-    for (const bad of [[{ ...spent[0], input: -1 }], [{ ...spent[0], model: 'a b' }], [{ ...spent[0], calls: 1.5 }], Array(21).fill(spent[0]), 'many'])
+    // Its refused calls pass on as counted (HB-1497).
+    expect((await runSkillTrial({ execShell: async () => response({ status: 'timeout', spent: [{ ...spent[0], refused: 4 }], spentFrom: 'state' }) }, target, skill)).spent).toEqual([{ ...spent[0], refused: 4 }]);
+    for (const bad of [[{ ...spent[0], input: -1 }], [{ ...spent[0], model: 'a b' }], [{ ...spent[0], calls: 1.5 }], [{ ...spent[0], refused: -1 }], [{ ...spent[0], refused: 0.5 }], Array(21).fill(spent[0]), 'many'])
       expect((await runSkillTrial({ execShell: async () => response({ status: 'timeout', spent: bad, spentFrom: 'state' }) }, target, skill)).spent).toBeUndefined();
     // Not saying where it came from, it is not known whether the sampler counts it: none.
     expect((await runSkillTrial({ execShell: async () => response({ status: 'timeout', spent }) }, target, skill)).spent).toBeUndefined();

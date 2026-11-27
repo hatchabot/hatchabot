@@ -378,6 +378,63 @@ describe('Move — a pinned image the runner does not have (2026-09-22)', () => 
 });
 
 
+describe("an import's image question says what is here of the image's name (HB-1515 review)", () => {
+  it('none, or another image of that name: said in the answer, for a move from another server to word its refusal by', async () => {
+    const tag = 'hatchabot-runtime:derived-media';
+    const src = await makeWorld();
+    const id = await seedRunningAgent(src);
+    src.store.upsertDerivedImage({ name: 'media', tag, base: 'hatchabot-runtime:latest', dockerfile: 'RUN true', createdBy: src.owner });
+    src.store.setDerivedImageStatus('media', 'READY');
+    (src.providers.get('mock') as MockProvider).tags.push({ tag, imageId: 'src-media', derived: 'media' } as any);
+    src.store.setAgentImage(id, tag);
+    const file = (await src.f.inject({ method: 'GET', url: `/v1/agents/${id}/backup`, headers: as() })).rawPayload;
+    const restore = (w: Awaited<ReturnType<typeof makeWorld>>) =>
+      w.f.inject({ method: 'POST', url: '/v1/agents/restore', headers: { ...as('owner-b'), 'content-type': 'application/octet-stream' }, payload: file });
+    const none = await makeWorld('owner-b');
+    const r1 = await restore(none);
+    expect(r1.statusCode, r1.body).toBe(409);
+    expect(r1.json()).toMatchObject({ code: 'image_decision', image: tag, has: 'none' });
+    const other = await makeWorld('owner-b');
+    (other.providers.get('mock') as MockProvider).tags.push({ tag, imageId: 'theirs', derived: 'media' } as any);
+    other.store.upsertDerivedImage({ name: 'media', tag, base: 'hatchabot-runtime:latest', dockerfile: 'RUN false', createdBy: 'owner-b' });
+    other.store.setDerivedImageStatus('media', 'READY');
+    const r2 = await restore(other);
+    expect(r2.statusCode, r2.body).toBe(409);
+    expect(r2.json()).toMatchObject({ code: 'image_decision', image: tag, has: 'other', problem: `a different image here already has the name ${tag}` });
+  });
+});
+
+describe('an import onto a runner whose image cannot be built there (HB-1515 re-review)', () => {
+  it("is told of that runner, and to build it here and copy it there, not of this machine", async () => {
+    const inputs = (openclaw: string, packages: string[]) => formatBuildInputs({
+      // This release's Node line and messaging plugins: a build from Settings would do.
+      openclaw, engine: 'none', packages, node: 'node:24-slim', channels: ['slack', 'discord'], channelPlugins: openclaw, plugins: [], pluginInstall: 'npm',
+      embedPlugin: '2026.7.1', claudeCode: '2.1.224', byHand: [], release: '2.190.0',
+    });
+    const layer = (c: string) => `sha256:${c.repeat(64)}`;
+    const tag = 'hatchabot-runtime:2026.9.8-plus-jq';
+    const src = await makeWorld();
+    const id = await seedRunningAgent(src);
+    (src.providers.get('mock') as MockProvider).tags.push({ tag, imageId: 'src', openclawVersion: '2026.9.8', extraPackages: ['jq'], buildInputs: inputs('2026.9.8', ['jq']), layers: [layer('1')] } as any);
+    src.store.setAgentImage(id, tag);
+    const file = (await src.f.inject({ method: 'GET', url: `/v1/agents/${id}/backup`, headers: as() })).rawPayload;
+    const dst = await makeWorld('owner-b');
+    const runner = new MockProvider();
+    dst.providers.set('mock2', runner);
+    dst.store.insertHost({ id: 'h2', ownerId: 'owner-b', kind: 'cloud', provider: 'mock2', name: 'Laptop', settings: {}, createdAt: 'now' });
+    runner.tags = [{ tag: 'hatchabot-runtime:latest', imageId: 'theirs', openclawVersion: '2026.9.6', buildInputs: inputs('2026.9.6', []), layers: [layer('7')] } as any];
+    const res = await dst.f.inject({ method: 'POST', url: '/v1/agents/restore?hostId=h2&image=build', headers: { ...as('owner-b'), 'content-type': 'application/octet-stream' }, payload: file });
+    const said = res.json().error as string;
+    expect(res.statusCode, res.body).toBeGreaterThanOrEqual(400);
+    // Was: "could not be built here: no image on this machine is built the way … Build … on this machine (…), then try again, or run it on this machine's default image".
+    expect(said).toContain(`the image ${tag} could not be built on Laptop: no image on Laptop is built the way ${tag}'s base is: hatchabot-runtime:latest runs OpenClaw 2026.9.6, not 2026.9.8.`);
+    // Cut at a word in the room an import's rolled-back reason keeps (HB-1333), the copy said first.
+    expect(said).toContain("make it this machine's default and copy it to Laptop (Settings → Hosts → Check, then Install image or Update image");
+    expect(said).not.toContain('this machine (Settings → Advanced → Runtime images), then try again');
+    expect(runner.built).toEqual([]);
+  });
+});
+
 describe('Move — the pinned image travels as its recipe (item 5, 2026-09-23)', () => {
   const setup = async (sourceTag: Record<string, unknown>) => {
     const w = await makeWorld();
@@ -449,6 +506,52 @@ describe('Move — the pinned image travels as its recipe (item 5, 2026-09-23)',
     const r2 = await b.move();
     expect(r2.statusCode).toBe(409);
     expect(r2.json().error).toMatch(/the rebuild failed: E: Unable to locate package/);
+  });
+
+  it('a refusal to move back to this machine offers this machine\'s default image, its problem without a full stop of its own (HB-1451)', async () => {
+    const tag = 'hatchabot-runtime:2026.7.1-2-plus-jq';
+    const { w, mock2, id, move } = await setup({ tag, imageId: 'src', openclawVersion: '2026.7.1-2', extraPackages: ['jq'] });
+    // On the runner, on its pin: the image was there.
+    mock2.tags.push({ tag, imageId: 'there', openclawVersion: '2026.7.1-2', extraPackages: ['jq'] } as any);
+    expect((await move()).statusCode).toBe(200);
+    expect(w.store.getAgent(id)!.hostId).toBe('h2');
+    // This machine no longer has it, and building it again fails with a sentence of its own.
+    const here = w.providers.get('mock') as MockProvider;
+    here.tags = here.tags.filter((t) => t.tag !== tag);
+    here.publishedBases.add('hatchabot-runtime:2026.7.1-2');
+    here.buildImage = async () => ({ ok: false, error: 'E: Unable to locate package jq.' });
+    const back = await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/move-host?wait=1`, headers: as(), payload: { hostId: 'h1' } });
+    expect(back.statusCode).toBe(409);
+    expect(back.json()).toMatchObject({ code: 'pinned_image_missing', image: tag });
+    expect(back.json().error).toBe(`"${w.store.getAgent(id)!.name}" is pinned to the image ${tag}, which box does not have, and it couldn't be rebuilt there (the rebuild failed: E: Unable to locate package jq). Move it on this machine's default image instead — its extra packages will be missing there.`);
+    expect(w.store.getAgent(id)!.hostId).toBe('h2');
+  });
+
+  it("a move back to this machine, by the name its host has, is told to build it here, not to install it on itself (HB-1515 review)", async () => {
+    const inputs = (openclaw: string, packages: string[]) => formatBuildInputs({
+      // This release's Node line and messaging plugins: a build from Settings would do.
+      openclaw, engine: 'none', packages, node: 'node:24-slim', channels: ['slack', 'discord'], channelPlugins: openclaw, plugins: [], pluginInstall: 'npm',
+      embedPlugin: '2026.7.1', claudeCode: '2.1.224', byHand: [], release: '2.190.0',
+    });
+    const layer = (c: string) => `sha256:${c.repeat(64)}`;
+    const tag = 'hatchabot-runtime:2026.9.8-plus-jq';
+    const { w, mock2, id, move } = await setup({ tag, imageId: 'src', openclawVersion: '2026.9.8', extraPackages: ['jq'], buildInputs: inputs('2026.9.8', ['jq']), layers: [layer('1')] });
+    mock2.tags.push({ tag, imageId: 'there', openclawVersion: '2026.9.8', extraPackages: ['jq'], buildInputs: inputs('2026.9.8', ['jq']), layers: [layer('1')] } as any);
+    expect((await move()).statusCode).toBe(200);
+    expect(w.store.getAgent(id)!.hostId).toBe('h2');
+    // This machine's host by the name src/index.ts gives it; its image of the pin gone, its default another OpenClaw's.
+    (w.store as any).db.prepare(`UPDATE hosts SET name = 'This machine (fixture-box)' WHERE id = 'h1'`).run();
+    const here = w.providers.get('mock') as MockProvider;
+    here.tags = [{ tag: 'hatchabot-runtime:latest', imageId: 'mine', openclawVersion: '2026.9.6', buildInputs: inputs('2026.9.6', []), layers: [layer('7')] } as any];
+    const back = await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/move-host?wait=1`, headers: as(), payload: { hostId: 'h1' } });
+    expect(back.statusCode).toBe(409);
+    const said = back.json().error as string;
+    // Was: "…make it this machine's default and install it on This machine (fixture-box) (Settings → Hosts → Install image), then try again, or run it on that machine's default image".
+    expect(said).toContain("on this machine (Settings → Advanced → Runtime images), then try again, or run it on this machine's default image");
+    expect(said).not.toContain('Install image');
+    expect(said).not.toContain("that machine's");
+    expect(here.built).toEqual([]);
+    expect(w.store.getAgent(id)!.hostId).toBe('h2');
   });
 
   it('another image of the pin\'s name there is refused with why, left as it is, and the agent stays (HB-1325)', async () => {

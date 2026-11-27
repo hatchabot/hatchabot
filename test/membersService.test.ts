@@ -1,9 +1,19 @@
 import { describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
+import * as fs from 'node:fs';
+import * as crypto from 'node:crypto';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { runInNewContext } from 'node:vm';
 import { Store } from '../src/store/store.js';
 import { createMembersAndInvites, type MembersAndInvites } from '../src/orchestrator/members/membersAndInvites.js';
 import { checkInvite, createInvite, InviteInvalidError } from '../src/orchestrator/members/invite.js';
-import { RevokeError } from '../src/orchestrator/members/members.js';
+import {
+  ChannelConfigBusyError, ChannelConfigTurnNested, grantChannelAccess, grantRoomAccess, inChannelConfigTurn, revokeMember, RevokeError,
+} from '../src/orchestrator/members/members.js';
+import { createKnocks } from '../src/orchestrator/channels/knocks.js';
+import { claimFirstContact, holdDoorForKnocks } from '../src/orchestrator/members/claim.js';
+import { MockProvider } from '../src/providers/mockProvider.js';
 import type { Agent, Channel } from '../src/domain/types.js';
 import { DISCORD_ID } from './support/fixtures.js';
 import { MemSecrets } from './support/world.js';
@@ -36,7 +46,7 @@ interface World {
   channel(agentId: string, kind: Channel['kind'], accountId: string): Channel;
 }
 
-function world(opts: { authMode?: 'password' | 'accounts' | 'identity'; passwords?: boolean; telegramFetch?: (url: string, init: { signal: AbortSignal }) => Promise<Response>; handleLookMs?: number } = {}): World {
+function world(opts: { authMode?: 'password' | 'accounts' | 'identity'; passwords?: boolean; telegramFetch?: (url: string, init: { signal: AbortSignal }) => Promise<Response>; handleLookMs?: number; provider?: MockProvider } = {}): World {
   const db = new Database(':memory:');
   const store = new Store(db);
   store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
@@ -47,7 +57,7 @@ function world(opts: { authMode?: 'password' | 'accounts' | 'identity'; password
   const neverReached = new Proxy({}, { get: (_t, name) => { throw new Error(`the runtime was reached (${String(name)})`); } });
   w.members = createMembersAndInvites({
     store, secrets: w.secrets,
-    providerFor: () => neverReached as never,
+    providerFor: () => (opts.provider ?? neverReached) as never,
     trace: () => (event) => { w.traced.push(event); },
     authMode: () => opts.authMode ?? 'identity',
     localAccountsOn: () => opts.passwords ?? true,
@@ -285,6 +295,203 @@ describe('the members', () => {
     expect(w.store.getMembership(a.id, OWNER)?.status).toBe('active');
   });
 
+  it('removing a member closes the windows waiting for their first message, and puts the door back to rest; another person\'s window stays (HB-1522)', async () => {
+    const w = world();
+    const a = w.agent('a1', { state: 'RUNNING' });
+    w.channel(a.id, 'telegram', 'kitchen_bot');
+    w.store.insertMembership({ id: 'm1', agentId: a.id, userId: SAM, role: 'user', displayName: 'Sam', status: 'active' });
+    w.store.insertMembership({ id: 'm2', agentId: a.id, userId: PAT, role: 'user', displayName: 'Pat', status: 'active' });
+    const until = new Date(Date.now() + 30 * 60_000).toISOString();
+    w.store.openPairingWindow(a.id, until, SAM, { kind: 'telegram', expect: '@sam_made_up' });
+    w.store.openPairingWindow(a.id, until, SAM, { kind: 'discord' });
+    w.store.openPairingWindow(a.id, until, PAT, { kind: 'telegram' });
+    expect(await w.members.roster.remove(a, SAM)).toEqual({ revoked: true });
+    // Was: both of Sam's left open for the rest of their half hour, the door in pairing.
+    expect(w.store.pairingWindows(a.id).map((x) => x.seat)).toEqual([`telegram:${PAT}`]);
+    expect(w.doors).toEqual(['a1']);
+    expect(w.traced).toContain('member.windows_closed');
+    // Nothing waited for them: the door is left as it was.
+    w.doors.length = 0;
+    w.store.insertMembership({ id: 'm3', agentId: a.id, userId: RAE, role: 'user', displayName: 'Rae', status: 'active' });
+    await w.members.roster.remove(a, RAE);
+    expect(w.doors).toEqual([]);
+  });
+
+  /** A running agent on Telegram and Discord whose runtime is a mock one, Sam a member known on Telegram, and the scrub of a removal held. */
+  const removalRace = async () => {
+    const provider = new MockProvider();
+    const w = world({ provider });
+    const a = w.agent('a1', { state: 'RUNNING' });
+    const { runtimeRef } = await provider.provision({ agentId: 'a1', slug: 'a1', workspace: { files: {}, configPatch: { agentId: 'a1', authMode: 'api-key' } }, env: {} });
+    w.store.setAgentRuntimeRef(a.id, runtimeRef);
+    w.channel(a.id, 'telegram', 'kitchen_bot');
+    w.channel(a.id, 'discord', 'hatchabot');
+    w.store.insertMembership({ id: 'm1', agentId: a.id, userId: SAM, role: 'user', displayName: 'Sam', status: 'active' });
+    w.store.bindMembershipChannelUser(a.id, SAM, '41001');
+    const scrubs: string[] = [];
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    provider.execShellOnVolume = (async (_ref: string, script: string) => {
+      if (script.includes('-allowFrom.json')) {
+        scrubs.push(script);
+        if (scrubs.length === 1) await held;
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      return { code: 0, stdout: 'set\n', stderr: '' }; // a door written
+    }) as never;
+    const knocking = (id?: string, code?: string) => provider.execResponses.set('sh', { code: 0, stdout: JSON.stringify({ version: 1, requests: id ? [{ id, code }] : [] }), stderr: '' });
+    provider.execResponses.set('pairing approve', { code: 0, stdout: 'ok', stderr: '' });
+    const approvals = () => provider.execLog.map((x) => x.join(' ')).filter((x) => x.startsWith('pairing approve'));
+    return { w, provider, a: w.store.getAgent(a.id)!, runtimeRef, scrubs, release, knocking, approvals };
+  };
+  const settle = async (done: () => boolean) => { for (let i = 0; i < 200 && !done(); i++) await new Promise((r) => setTimeout(r, 5)); };
+
+  it('removing someone closes their windows before the scrub: a knock on another app while it runs is not let in for good (HB-1522 review)', async () => {
+    const { w, provider, a, runtimeRef, scrubs, release, knocking, approvals } = await removalRace();
+    // Sam's window for a first message on Discord, its watch at its first wait.
+    knocking();
+    let wake: (() => void) | undefined;
+    const watch = claimFirstContact(
+      { store: w.store, provider, sleep: () => new Promise<void>((r) => { wake = r; }) },
+      { agentId: a.id, runtimeRef, accountId: 'hatchabot', forUserId: SAM, kind: 'discord', timeoutMs: 30 * 60_000 },
+    );
+    await settle(() => !!wake);
+    // An invite Sam joined by, copied again: its window waits for their @handle on Telegram.
+    const inv = createInvite(w.store, a.id, OWNER, '@sam_made_up');
+    w.store.markInviteRedeemed(inv.code, SAM);
+    const invId = w.store.getInviteByCode(inv.code)!.id;
+    await holdDoorForKnocks({ store: w.store, provider, log: () => {} }, { agentId: a.id, runtimeRef, accountId: 'kitchen_bot', key: invId, expect: 'sam_made_up', noTimer: true });
+    // The owner removes Sam: the scrub of their Telegram is under way, their seat still active.
+    const removing = w.members.roster.remove(a, SAM);
+    await settle(() => scrubs.length === 1);
+    expect(w.store.getMembership(a.id, SAM)?.status).toBe('active');
+    // Sam writes on Discord meanwhile, and the watch looks.
+    knocking(DISCORD_ID, 'DSCCODE1');
+    const woke = wake!;
+    wake = undefined;
+    woke();
+    // Was: approved and bound while the scrub ran, on a list read before it: Sam chatted on Discord for good.
+    expect(await watch).toBeNull();
+    expect(approvals()).toEqual([]);
+    release();
+    expect(await removing).toEqual({ revoked: true });
+    expect(w.store.getMembership(a.id, SAM)?.status).toBe('revoked');
+    expect(Object.keys(w.store.memberIdentities(a.id, SAM))).toEqual(['telegram']);
+    // Their invite's knock window closed with them, and the door went back to rest once.
+    expect(w.store.pairingWindows(a.id)).toEqual([]);
+    expect(w.doors).toEqual(['a1']);
+  });
+
+  it('an id bound to someone while their removal scrubs is scrubbed too before they are removed; an approval after it is taken back (HB-1522 review)', async () => {
+    const { w, a, scrubs, release } = await removalRace();
+    const removing = w.members.roster.remove(a, SAM);
+    await settle(() => scrubs.length === 1);
+    // A window that opened for them during the scrub (a Reopen pressed then) let them in on Discord: their seat was still active.
+    expect(w.store.bindMemberIdentity(a.id, SAM, 'discord', DISCORD_ID)).toBe(true);
+    release();
+    expect(await removing).toEqual({ revoked: true });
+    // Was: one scrub, of Telegram, read before; their Discord approval stayed.
+    expect(scrubs).toHaveLength(2);
+    expect(scrubs[0]).toContain('41001');
+    expect(scrubs[0]).not.toContain(DISCORD_ID);
+    expect(scrubs[1]).toContain(DISCORD_ID);
+    expect(scrubs[1]).not.toContain('41001');
+    expect(w.traced).toContain('member.allowlist_scrubbed');
+    // Revoked, nothing binds to their seat: an approval that lands now is not theirs, and its watch takes it back
+    // (test/claim.test.ts, "an approval whose seat was removed meanwhile is taken back, and the window closes").
+    expect(w.store.bindMemberIdentity(a.id, SAM, 'slack', 'U0MADEUP1')).toBe(false);
+  });
+
+  it('a window opened for them while their removal scrubs waits for the scrub: their message is never let in (HB-1554)', async () => {
+    const { w, provider, a, runtimeRef, scrubs, release, knocking, approvals } = await removalRace();
+    const removing = w.members.roster.remove(a, SAM);
+    await settle(() => scrubs.length === 1);
+    // A window that opens for them during the scrub; their message on Discord is already waiting.
+    knocking(DISCORD_ID, 'DSCCODE1');
+    const watch = claimFirstContact(
+      { store: w.store, provider, sleep: async () => {} },
+      { agentId: a.id, runtimeRef, accountId: 'hatchabot', forUserId: SAM, kind: 'discord', timeoutMs: 30 * 60_000 },
+    );
+    // Its door is opened in the agent's turn, after the scrub's: nothing is read or approved meanwhile.
+    // Was: approved and bound while the scrub ran, their seat still active (HB-1522 review's third round).
+    await new Promise((r) => setTimeout(r, 50));
+    expect(approvals()).toEqual([]);
+    expect(Object.keys(w.store.memberIdentities(a.id, SAM))).toEqual(['telegram']);
+    release();
+    expect(await removing).toEqual({ revoked: true });
+    // Once it looks, their seat is gone: the window closes, and nobody is let in.
+    expect(await watch).toBeNull();
+    expect(approvals()).toEqual([]);
+    expect(scrubs).toHaveLength(1);
+    expect(w.store.pairingWindows(a.id)).toEqual([]);
+  });
+
+  it('a room grant asked for during the removal\'s scrub writes nothing once they are removed, and the watch takes its approval back: their id is left in no room (HB-1522 review, HB-1554)', async () => {
+    const { w, provider, a, runtimeRef, release, knocking } = await removalRace();
+    // What lands on the volume, in order; the watch's door write and room grant are held.
+    const landed: string[] = [];
+    const base = provider.execShellOnVolume.bind(provider);
+    let letGrantGo!: () => void;
+    const grantHeld = new Promise<void>((r) => { letGrantGo = r; });
+    let letDoorGo!: () => void;
+    const doorHeld = new Promise<void>((r) => { letDoorGo = r; });
+    let granting = false;
+    let resting = false;
+    provider.execShellOnVolume = (async (ref: string, script: string, o?: { readOnly?: boolean }) => {
+      if (script.includes('r.users.push(t.id)')) { granting = true; await grantHeld; landed.push('grant'); return { code: 0, stdout: 'added\n', stderr: '' }; }
+      if (script.includes('"policy":"allowlist"')) { resting = true; await doorHeld; landed.push('door'); return { code: 0, stdout: 'set\n', stderr: '' }; }
+      const r = await base(ref, script, o);
+      if (script.includes('-allowFrom.json')) landed.push(['scrub', script.includes('41001') ? 'telegram' : '', script.includes(DISCORD_ID) ? 'discord' : ''].filter(Boolean).join(' '));
+      return r;
+    }) as never;
+    // Sam's first message on Discord is approved and bound, their seat active; the watch puts the door back to rest.
+    knocking(DISCORD_ID, 'DSCCODE1');
+    const watch = claimFirstContact(
+      { store: w.store, provider, sleep: async () => {} },
+      { agentId: a.id, runtimeRef, accountId: 'hatchabot', forUserId: SAM, kind: 'discord', timeoutMs: 30 * 60_000 },
+    );
+    await settle(() => resting);
+    expect(Object.keys(w.store.memberIdentities(a.id, SAM)).sort()).toEqual(['discord', 'telegram']);
+    // Removed while that write is on its way: the scrub waits for it, and the room grant for the scrub (HB-1554).
+    const removing = w.members.roster.remove(a, SAM);
+    release();
+    await new Promise((r) => setTimeout(r, 20));
+    letDoorGo();
+    expect(await removing).toEqual({ revoked: true });
+    expect(landed).toEqual(['door', 'scrub telegram discord']);
+    letGrantGo();
+    expect(await watch).toBeNull();
+    // Was: the grant waited for the scrub and landed after the flip, their id back in the rooms' users lists until
+    // the watch's scrub took it out again (and until the next build when that failed). Its seat looked at in its turn,
+    // nothing is written.
+    expect(granting).toBe(false);
+    expect(landed).toEqual(['door', 'scrub telegram discord', 'scrub discord']);
+    // No greeting for someone removed.
+    expect(provider.execLog.some((x) => x[0] === 'message' && x[1] === 'send')).toBe(false);
+  });
+
+  it('a removal whose scrub fails still puts the door back to rest for the windows it closed (HB-1522 review)', async () => {
+    const { w, provider, a } = await removalRace();
+    provider.execShellOnVolume = (async () => ({ code: 1, stdout: '', stderr: 'made-up failure' })) as never;
+    w.store.openPairingWindow(a.id, new Date(Date.now() + 30 * 60_000).toISOString(), SAM, { kind: 'discord' });
+    await expect(w.members.roster.remove(a, SAM)).rejects.toBeInstanceOf(RevokeError);
+    expect(w.store.getMembership(a.id, SAM)?.status).toBe('active');
+    expect(w.store.pairingWindows(a.id)).toEqual([]);
+    // Was (a rest only after a removal that took): the door left in pairing with their window closed.
+    expect(w.doors).toEqual(['a1']);
+    expect(w.traced).toContain('member.windows_closed');
+  });
+
+  it('removing the owner is refused, and leaves their windows open', async () => {
+    const w = world();
+    const a = w.agent('a1', { state: 'RUNNING' });
+    w.channel(a.id, 'telegram', 'kitchen_bot');
+    w.store.openPairingWindow(a.id, new Date(Date.now() + 30 * 60_000).toISOString(), OWNER, { kind: 'telegram' });
+    await expect(w.members.roster.remove(a, OWNER)).rejects.toBeInstanceOf(RevokeError);
+    expect(w.store.pairingWindows(a.id).map((x) => x.seat)).toEqual([`telegram:${OWNER}`]);
+    expect(w.doors).toEqual([]);
+  });
+
   it('reopens the door only on the app they joined with, or for a named handle; refuses the rest in order', () => {
     const w = world();
     const ops = w.agent('ops', { ops: true }) as Agent & { runtimeRef: string };
@@ -436,5 +643,296 @@ describe('who is offered for web chat', () => {
     expect(w.members.roster.shareWebChat(OWNER, a, () => true, { userId: PAT, name: 'Someone else' })).toEqual({ userId: PAT, webChat: true, name: 'Pat' });
     expect(w.store.listMemberships(a.id).filter((m) => m.userId === PAT)).toHaveLength(1);
     expect(w.ready.map((r) => r.why)).toEqual(['grant', 'grant']);
+  });
+});
+
+/**
+ * Door writes, grants and a removal's scrub on one agent's volume, one at a
+ * time (HB-1554). The volume is a folder: each script the runtime is handed
+ * runs on it as its one-shot container would, and lands when the test says.
+ * `reads`: when a script reads the files, as it is asked for (it lands what
+ * it wrote from that read, as a container started then does) or as it lands
+ * (a container that started late). Whatever is waiting lands in turn, a scrub
+ * first: the order that put a removed member back, when both were in flight.
+ */
+describe('a removal and the writes of the door, in order (HB-1554)', () => {
+  const STATE = '/home/node/.openclaw';
+  const OWNER_TG = '41000';
+  const SAM_TG = '41001';
+  const PAT_DISCORD = '100000000000000004';
+  const OWNER_DISCORD = '100000000000000003';
+  const SAM_DISCORD = '100000000000000005';
+  const files = (d: string) => ['openclaw.json', ...fs.readdirSync(join(d, 'credentials')).map((f) => `credentials/${f}`)];
+
+  const setUp = (reads: 'asked' | 'landing', telegram: { dmPolicy: string; allowFrom: string[] }) => {
+    const dir = fs.mkdtempSync(join(tmpdir(), 'hb-door-'));
+    fs.mkdirSync(join(dir, 'credentials'));
+    fs.writeFileSync(join(dir, 'openclaw.json'), JSON.stringify({ channels: {
+      telegram: { accounts: { kitchen_bot: telegram } },
+      discord: { accounts: { hatchabot: { dmPolicy: 'allowlist', allowFrom: [OWNER_DISCORD] } }, guilds: { g1: { users: [OWNER_DISCORD] } } },
+    } }));
+    fs.writeFileSync(join(dir, 'credentials/telegram-kitchen_bot-allowFrom.json'), JSON.stringify({ allowFrom: [SAM_TG] }));
+    const run = (script: string, on: string) => {
+      let stdout = '';
+      const exit = new Error('exit');
+      try {
+        runInNewContext(script.replaceAll(STATE, on).slice("node -e '".length, -1), {
+          require: (name: string) => { if (name === 'fs') return fs; if (name === 'crypto') return crypto; throw new Error(`Unexpected module: ${name}`); },
+          console: { log: (line: unknown) => { stdout += `${String(line)}\n`; } },
+          process: { exit: () => { throw exit; } },
+        });
+      } catch (err) { if (err !== exit) return { code: 1, stdout, stderr: String(err) }; }
+      return { code: 0, stdout, stderr: '' };
+    };
+    const pending: Array<{ scrub: boolean; land: () => void }> = [];
+    const landed: string[] = [];
+    /** What the bot's pairing requests list says, and what a pairing approve does meanwhile. */
+    const knocks: { requests: Array<{ id: string; code: string }>; onApprove?: () => Promise<void> } = { requests: [] };
+    /** While true, nothing on the volume lands. */
+    const hold = { landing: false };
+    const what = (script: string) => (script.includes('const drop = ') ? 'scrub' : script.includes('t.policy') ? 'door' : script.includes('r.users.push(t.id)') ? 'rooms' : 'other');
+    const provider = {
+      execShellOnVolume: (_ref: string, script: string) => new Promise((resolve) => {
+        const scrub = what(script) === 'scrub';
+        if (reads === 'landing') {
+          pending.push({ scrub, land: () => { landed.push(what(script)); resolve(run(script, dir)); } });
+          return;
+        }
+        // Read now, on a copy: what it wrote lands later, whole, over the volume.
+        const copy = fs.mkdtempSync(join(tmpdir(), 'hb-door-read-'));
+        fs.cpSync(dir, copy, { recursive: true });
+        const before = new Map(files(copy).map((f) => [f, fs.readFileSync(join(copy, f), 'utf8')]));
+        const result = run(script, copy);
+        const wrote = files(copy).filter((f) => fs.readFileSync(join(copy, f), 'utf8') !== before.get(f)).map((f) => [f, fs.readFileSync(join(copy, f), 'utf8')] as const);
+        fs.rmSync(copy, { recursive: true, force: true });
+        pending.push({ scrub, land: () => { landed.push(what(script)); for (const [f, text] of wrote) fs.writeFileSync(join(dir, f), text); resolve(result); } });
+      }),
+      exec: async (_ref: string, argv: string[]) => {
+        if (argv[0] === 'pairing' && argv[1] === 'approve') await knocks.onApprove?.();
+        return { code: 0, stdout: '', stderr: '' };
+      },
+      execShell: async () => ({ code: 0, stdout: JSON.stringify({ version: 1, requests: knocks.requests }), stderr: '' }),
+    };
+    const db = new Database(':memory:');
+    const store = new Store(db);
+    store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
+    store.insertAIProfile({ id: 'p1', ownerId: OWNER, name: 'AI', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p1', createdAt: 'now' });
+    // An agent of its own each time: what the door last asserted is remembered per agent, process-wide.
+    const id = `door-${crypto.randomUUID()}`;
+    store.insertAgent({
+      id, ownerId: OWNER, name: 'Kitchen', slug: 'kitchen', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1',
+      persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now', runtimeRef: `rt-${id}`,
+    } as never);
+    store.insertChannel({ id: `ch-${id}-tg`, agentId: id, kind: 'telegram', accountId: 'kitchen_bot', secretRef: `channel/${id}/telegram`, deepLink: 'https://example.invalid/kitchen_bot', createdAt: 'now' });
+    store.insertChannel({ id: `ch-${id}-dc`, agentId: id, kind: 'discord', accountId: 'hatchabot', secretRef: `channel/${id}/discord`, deepLink: 'https://example.invalid/discord', createdAt: 'now' });
+    store.insertMembership({ id: `own-${id}`, agentId: id, userId: OWNER, role: 'owner', status: 'active' });
+    store.bindMembershipChannelUser(id, OWNER, OWNER_TG);
+    store.bindMemberIdentity(id, OWNER, 'discord', OWNER_DISCORD);
+    store.insertMembership({ id: `sam-${id}`, agentId: id, userId: SAM, role: 'user', displayName: 'Sam', status: 'active' });
+    store.bindMembershipChannelUser(id, SAM, SAM_TG);
+    const doors = createKnocks({
+      store, providerFor: () => provider as never, trace: () => () => {}, opsPush: { waiting: async () => true }, knockCacheMs: 0, sweepEveryMs: 0,
+    });
+    const deps = { store, provider: provider as never };
+    /** Lands whatever waits, a scrub first, until every one of `work` has settled. */
+    const landAll = async (...work: Array<Promise<unknown>>) => {
+      let done = false;
+      const all = Promise.allSettled(work).then((r) => { done = true; return r; });
+      for (let i = 0; i < 400 && !done; i++) {
+        await new Promise((r) => setTimeout(r, 5));
+        if (hold.landing) continue;
+        const at = pending.findIndex((x) => x.scrub);
+        (at >= 0 ? pending.splice(at, 1)[0] : pending.shift())?.land();
+      }
+      for (const r of await all) if (r.status === 'rejected') throw r.reason;
+    };
+    const config = () => JSON.parse(fs.readFileSync(join(dir, 'openclaw.json'), 'utf8'));
+    const approved = () => JSON.parse(fs.readFileSync(join(dir, 'credentials/telegram-kitchen_bot-allowFrom.json'), 'utf8')).allowFrom;
+    const done = () => { doors.stop(); db.close(); fs.rmSync(dir, { recursive: true, force: true }); };
+    /** Until a write of `kind` is on the volume, not yet landed. */
+    const onVolume = async (kind: 'scrub' | 'other') => { while (!pending.some((x) => x.scrub === (kind === 'scrub'))) await new Promise((r) => setTimeout(r, 1)); };
+    const writeConfig = (cfg: unknown) => fs.writeFileSync(join(dir, 'openclaw.json'), JSON.stringify(cfg));
+    const scrubsOnVolume = () => pending.filter((x) => x.scrub).length;
+    return {
+      store, knocks: doors, deps, agent: () => store.getAgent(id)!, id, landAll, landed, onVolume, config, approved, done,
+      requests: knocks, hold, writeConfig, scrubsOnVolume, provider,
+    };
+  };
+
+  it('a door rest asked for while the scrub runs, landing after it, does not put the removed member back on allowFrom', async () => {
+    // Its container starts late: it reads the config the scrub has already written.
+    const t = setUp('landing', { dmPolicy: 'allowlist', allowFrom: [OWNER_TG, SAM_TG] });
+    try {
+      const removing = revokeMember(t.deps, t.id, SAM);
+      const resting = t.knocks.restDoor(t.agent()); // the sweep, or another window closing
+      await t.landAll(removing, resting);
+      expect(t.store.getMembership(t.id, SAM)?.status).toBe('revoked');
+      // Was: the rest read Sam as still active, and its write after the scrub put them back: they could DM the agent.
+      expect(t.config().channels.telegram.accounts.kitchen_bot).toEqual({ dmPolicy: 'allowlist', allowFrom: [OWNER_TG] });
+      expect(t.approved()).toEqual([]);
+      expect(t.landed[0]).toBe('scrub');
+    } finally { t.done(); }
+  });
+
+  it('a door rest that read the config before the scrub runs first, and the scrub takes out what it wrote', async () => {
+    // A window had just closed: the rest writes the door shut, from the config as it read it.
+    const t = setUp('asked', { dmPolicy: 'pairing', allowFrom: [OWNER_TG, SAM_TG] });
+    try {
+      const resting = t.knocks.restDoor(t.agent());
+      const removing = revokeMember(t.deps, t.id, SAM);
+      await t.landAll(removing, resting);
+      expect(t.store.getMembership(t.id, SAM)?.status).toBe('revoked');
+      // Was: the scrub landed first, and the rest wrote back the whole config it had read before it, Sam and all.
+      expect(t.config().channels.telegram.accounts.kitchen_bot).toEqual({ dmPolicy: 'allowlist', allowFrom: [OWNER_TG] });
+      expect(t.approved()).toEqual([]);
+      expect(t.landed.slice(0, 2)).toEqual(['door', 'scrub']);
+    } finally { t.done(); }
+  });
+
+  it('a knock window opening the door while the scrub runs does not write back what the scrub took out', async () => {
+    const t = setUp('asked', { dmPolicy: 'allowlist', allowFrom: [OWNER_TG, SAM_TG] });
+    try {
+      // Copy pressed on someone else's Telegram invite: the door opens for half an hour.
+      const opening = holdDoorForKnocks({ store: t.store, provider: t.deps.provider, log: () => {} }, { agentId: t.id, runtimeRef: `rt-${t.id}`, accountId: 'kitchen_bot', key: 'inv-pat', noTimer: true });
+      const removing = revokeMember(t.deps, t.id, SAM);
+      await t.landAll(removing, opening);
+      // Was: its write, read before the scrub and landing after it, put Sam back.
+      expect(t.config().channels.telegram.accounts.kitchen_bot).toEqual({ dmPolicy: 'pairing', allowFrom: [OWNER_TG] });
+      expect(t.approved()).toEqual([]);
+    } finally { t.done(); }
+  });
+
+  it("a room grant for them, asked for while their removal scrubs, writes nothing once they are removed: the claim watch's check, in its turn", async () => {
+    const t = setUp('landing', { dmPolicy: 'allowlist', allowFrom: [OWNER_TG, SAM_TG] });
+    try {
+      t.store.bindMemberIdentity(t.id, SAM, 'discord', SAM_DISCORD);
+      const removing = revokeMember(t.deps, t.id, SAM);
+      await t.onVolume('scrub');
+      // Their first Discord message was just bound by its watch: its grant of the rooms, with the watch's seat check.
+      const seatActive = () => t.store.getMembership(t.id, SAM)?.status === 'active';
+      const granting = grantRoomAccess(t.deps, { agentId: t.id, runtimeRef: `rt-${t.id}`, kind: 'discord', channelUserId: SAM_DISCORD, onlyIf: seatActive });
+      await t.landAll(removing, granting);
+      expect(t.store.getMembership(t.id, SAM)?.status).toBe('revoked');
+      expect(await granting).toBe(false);
+      // Was: it ran after the flip and put Sam back in the server's users, until the watch took it out again.
+      expect(t.config().channels.discord.guilds.g1.users).toEqual([OWNER_DISCORD]);
+      expect(t.landed).not.toContain('rooms');
+    } finally { t.done(); }
+  });
+
+  it("a door grant for them, asked for while their removal scrubs, writes nothing once they are removed: the join's check, in its turn", async () => {
+    const t = setUp('landing', { dmPolicy: 'allowlist', allowFrom: [OWNER_TG, SAM_TG] });
+    try {
+      const removing = revokeMember(t.deps, t.id, SAM);
+      await t.onVolume('scrub');
+      const granting = grantChannelAccess(t.deps, {
+        agentId: t.id, runtimeRef: `rt-${t.id}`, kind: 'telegram', accountId: 'kitchen_bot', channelUserId: SAM_TG,
+        onlyIf: () => t.store.getMembership(t.id, SAM)?.status === 'active',
+      });
+      await t.landAll(removing, granting);
+      expect(await granting).toBe('skipped');
+      // Was: written after the flip, back on the door and in OpenClaw's approvals, until the join took it back.
+      expect(t.config().channels.telegram.accounts.kitchen_bot.allowFrom).toEqual([OWNER_TG]);
+      expect(t.approved()).toEqual([]);
+    } finally { t.done(); }
+  });
+
+  it("an approval the claim watch takes back while a removal scrubs waits for the removal's turn, and both changes are kept", async () => {
+    const t = setUp('asked', { dmPolicy: 'allowlist', allowFrom: [OWNER_TG, SAM_TG] });
+    try {
+      // An approval on Discord for someone Pat's watch is about to let in: on the door and in the server's users.
+      const cfg = t.config();
+      cfg.channels.discord.accounts.hatchabot.allowFrom.push(PAT_DISCORD);
+      cfg.channels.discord.guilds.g1.users.push(PAT_DISCORD);
+      t.writeConfig(cfg);
+      t.store.insertMembership({ id: `pat-${t.id}`, agentId: t.id, userId: 'user-pat', role: 'user', displayName: 'Pat', status: 'active' });
+      t.requests.requests = [{ id: PAT_DISCORD, code: 'PATCODE1' }];
+      let removing: Promise<void> | undefined;
+      t.requests.onApprove = async () => {
+        // Sam is removed while the approve runs, and Pat too: the approval binds nobody, and the watch takes it back.
+        t.hold.landing = true;
+        removing = revokeMember(t.deps, t.id, SAM);
+        await t.onVolume('scrub');
+        t.store.revokeMembership(t.id, 'user-pat');
+        setTimeout(() => { t.hold.landing = false; }, 40);
+      };
+      const watch = claimFirstContact(
+        { store: t.store, provider: t.provider as never, sleep: () => new Promise((r) => setTimeout(r, 2)) },
+        { agentId: t.id, runtimeRef: `rt-${t.id}`, accountId: 'hatchabot', forUserId: 'user-pat', kind: 'discord', timeoutMs: 30 * 60_000 },
+      );
+      await t.landAll(watch);
+      expect(await watch).toBeNull();
+      await removing;
+      expect(t.store.getMembership(t.id, SAM)?.status).toBe('revoked');
+      const after = t.config();
+      // Was: the take-back read the config before the removal's scrub landed and wrote it back after: Sam let in again.
+      expect(after.channels.telegram.accounts.kitchen_bot.allowFrom).toEqual([OWNER_TG]);
+      expect(after.channels.discord.accounts.hatchabot.allowFrom).toEqual([OWNER_DISCORD]);
+      expect(after.channels.discord.guilds.g1.users).toEqual([OWNER_DISCORD]);
+      expect(t.approved()).toEqual([]);
+    } finally { t.done(); }
+  });
+
+  it('a room grant for someone else and the scrub keep each other\'s change', async () => {
+    const t = setUp('asked', { dmPolicy: 'allowlist', allowFrom: [OWNER_TG, SAM_TG] });
+    try {
+      const granting = grantRoomAccess(t.deps, { agentId: t.id, runtimeRef: `rt-${t.id}`, kind: 'discord', channelUserId: PAT_DISCORD });
+      const removing = revokeMember(t.deps, t.id, SAM);
+      await t.landAll(removing, granting);
+      expect(await granting).toBe(true);
+      const cfg = t.config();
+      // Was: the grant wrote back the config it read before the scrub: Sam on Telegram's allowFrom again.
+      expect(cfg.channels.telegram.accounts.kitchen_bot.allowFrom).toEqual([OWNER_TG]);
+      expect(cfg.channels.discord.guilds.g1.users).toEqual([OWNER_DISCORD, PAT_DISCORD]);
+    } finally { t.done(); }
+  });
+});
+
+describe("an agent's turns at its chat apps (HB-1554)", () => {
+  const timeout = (ms: number) => new Promise<'hung'>((r) => setTimeout(() => r('hung'), ms));
+
+  it('a turn asked for inside its own agent\'s turn is refused, not left waiting for itself; another agent\'s, or one asked after it ends, is not', async () => {
+    const store = new Store(new Database(':memory:'));
+    const said = vi.spyOn(console, 'error').mockImplementation(() => {});
+    let first: unknown;
+    try {
+      const nested = inChannelConfigTurn(store, 'a1', () => inChannelConfigTurn(store, 'a1', async () => 'inner'));
+      // Was: it waited for itself, and every later write of the agent's chat apps behind it, until a restart.
+      first = await Promise.race([nested.then(() => 'ran', (err: unknown) => err), timeout(500)]);
+      // Said where it is raised: most callers make any failure a write that did not take.
+      expect(said.mock.calls.map((c) => String(c[0]).split('\n')[0])).toEqual([
+        "[chat-app turns] A write of agent a1's chat-app access asked for its turn inside its own turn: it would wait for itself (HB-1554).",
+      ]);
+    } finally { said.mockRestore(); }
+    expect(first).toBeInstanceOf(ChannelConfigTurnNested);
+    expect(await Promise.race([inChannelConfigTurn(store, 'a1', async () => 'free'), timeout(500)])).toBe('free');
+    expect(await inChannelConfigTurn(store, 'a1', () => inChannelConfigTurn(store, 'a2', async () => 'other agent'))).toBe('other agent');
+    // Set off in a turn and left running: once the turn is over it waits its own turn.
+    let later!: Promise<string>;
+    await inChannelConfigTurn(store, 'a1', async () => {
+      later = new Promise((r) => setTimeout(r, 5)).then(() => inChannelConfigTurn(store, 'a1', async () => 'after it'));
+    });
+    expect(await later).toBe('after it');
+  });
+
+  it("a press that waits longer than it may for the agent's turn is refused in words, and nothing of it runs", async () => {
+    const store = new Store(new Database(':memory:'));
+    store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
+    store.insertAIProfile({ id: 'p1', ownerId: OWNER, name: 'AI', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p1', createdAt: 'now' });
+    store.insertAgent({
+      id: 'a1', ownerId: OWNER, name: 'Kitchen', slug: 'kitchen', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1',
+      persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now',
+    } as never);
+    let release!: () => void;
+    const slow = inChannelConfigTurn(store, 'a1', () => new Promise<void>((r) => { release = r; }));
+    let ran = false;
+    const press = inChannelConfigTurn(store, 'a1', async () => { ran = true; }, { waitMs: 20 });
+    const refused = await press.then(() => undefined, (err: unknown) => err);
+    expect(refused).toBeInstanceOf(ChannelConfigBusyError);
+    expect((refused as ChannelConfigBusyError).userMessage).toBe("Another change to Kitchen's chat apps is still being written: try again in a minute.");
+    release();
+    await slow;
+    expect(ran).toBe(false);
+    expect(await inChannelConfigTurn(store, 'a1', async () => 'next', { waitMs: 20 })).toBe('next');
   });
 });

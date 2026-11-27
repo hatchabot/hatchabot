@@ -169,6 +169,32 @@ describe('snapshots over HTTP: create, restore, delete', () => {
   });
 });
 
+describe('a snapshot taken before a change of setup values, from before 2.192.0 (HB-1467)', () => {
+  it('is listed, read and restored under its reason, not as a manual one; one named by hand keeps its name', async () => {
+    const { store, f, provider } = await liveWorld();
+    provider.execResponses.set('sh', { code: 0, stdout: 'soul text', stderr: '' });
+    // As an older release stored it: no words for its reason then.
+    store.insertSnapshot({ id: 'snap-old', agentId: 'a1', label: 'manual snapshot', reason: 'pre-params', files: { 'SOUL.md': 'soul text' }, createdAt: '2026-11-01T10:00:00.000Z' });
+    store.insertSnapshot({ id: 'snap-hand', agentId: 'a1', label: 'manual snapshot', reason: 'manual', files: { 'SOUL.md': 'soul text' }, createdAt: '2026-11-02T10:00:00.000Z' });
+    const listed = (await f.inject({ method: 'GET', url: '/v1/agents/a1/snapshots', headers: H })).json() as Array<{ id: string; label: string }>;
+    expect(Object.fromEntries(listed.map((s) => [s.id, s.label]))).toEqual({ 'snap-old': 'before its setup values or definition changed', 'snap-hand': 'manual snapshot' });
+    expect((await f.inject({ method: 'GET', url: '/v1/agents/a1/snapshots/snap-old', headers: H })).json().label).toBe('before its setup values or definition changed');
+    const restored = await f.inject({ method: 'POST', url: '/v1/agents/a1/snapshots/snap-old/restore?wait=1', headers: H, payload: {} });
+    expect(restored.statusCode).toBe(200);
+    const op = store.listOperations(['a1']).find((o) => o.kind === 'restore-snapshot');
+    expect(op?.params).toMatchObject({ label: 'before its setup values or definition changed' });
+    // The copy taken first, and what the restore says when done, name it so too.
+    expect(op?.outcome).toBe('Restored its files from "before its setup values or definition changed".');
+    expect(store.listSnapshots('a1').map((s) => s.label)).toContain('before restoring before its setup values or definition changed');
+    // And a restore that fails part way names that copy so.
+    const sh = provider.execShell.bind(provider);
+    provider.execShell = async (ref, script, opts) => / base64 -d > /.test(script) ? { code: 1, stdout: '', stderr: 'disk full (made up)' } : sh(ref, script, opts);
+    const failed = await f.inject({ method: 'POST', url: '/v1/agents/a1/snapshots/snap-old/restore?wait=1', headers: H, payload: {} });
+    expect(JSON.stringify(failed.json())).toContain('before restoring before its setup values or definition changed');
+    expect(JSON.stringify(failed.json())).not.toContain('manual snapshot');
+  });
+});
+
 describe('a snapshot by hand: its label (HB-0814)', () => {
   it('a label that is not text, or a body that is not an object, is a 400 and takes none', async () => {
     const { store, f, provider } = await liveWorld();

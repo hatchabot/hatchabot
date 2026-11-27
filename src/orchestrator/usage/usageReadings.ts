@@ -1,3 +1,4 @@
+import type { Agent } from '../../domain/types.js';
 import type { RuntimeProvider } from '../../providers/provider.js';
 import type { Store } from '../../store/store.js';
 import { sixAtATime } from '../../util/queues.js';
@@ -35,6 +36,15 @@ export interface UsageReadings {
    */
   fleetUsage(ownerId: string): Promise<FleetUsage>;
 }
+
+/**
+ * Its container has run on an earlier AI source than the one it runs now
+ * (the change of applied source its record keeps, Store.setAgentApplied):
+ * its lifetime totals, read from its transcripts and billed by the source it
+ * runs now, include that time (HB-1272). The history to split them is not
+ * kept, so they are marked rather than split.
+ */
+export const ranOnAnEarlierSource = (a: Agent): boolean => !!a.appliedProfilePrevId && a.appliedProfilePrevId !== (a.appliedProfileId ?? a.aiProfileId);
 
 /** The answer of GET /v1/usage. */
 export type FleetUsage = Awaited<ReturnType<typeof computeFleetUsage>>;
@@ -98,7 +108,9 @@ async function computeFleetUsage(deps: UsageReadingsDeps, ownerId: string) {
         // No known price for any of its models: say so, not "$0.00+" (2026-09-30).
         const unpriced = pricesNothing(priced);
         const cost = unpriced ? null : priced;
-        return { id: a.id, name: a.name, ...u, billing, profileName: p?.name, cost, ...(unpriced ? { unpriced: true } : {}) };
+        // Lifetime totals, billed by the source it runs now: marked when that
+        // includes time on an earlier one (HB-1272).
+        return { id: a.id, name: a.name, ...u, billing, profileName: p?.name, cost, ...(unpriced ? { unpriced: true } : {}), ...(ranOnAnEarlierSource(a) ? { earlierSource: true as const } : {}) };
       } catch {
         return null; // unreachable container — treat as skipped, not zero
       }
@@ -129,7 +141,13 @@ async function computeFleetUsage(deps: UsageReadingsDeps, ownerId: string) {
     try {
       // No cost: this one prices LIFETIME totals, which on a day's bar read
       // as that day's spend; the sampler prices the day's own use (review, 2026-09-29).
-      store.upsertUsageSnapshot(ownerId, { day: localDay(Date.now()).day, totalTokens, byBilling });
+      // Its counters as the sampler writes them, practice left out: with it,
+      // the store's larger-wins kept a jump in the day's total on days this
+      // view was read. Practice is in the day's own use already (Store.tokenDeltas, HB-1271).
+      const counters = (a: (typeof agentsUsage)[number]) => a.totalTokens - (a.practice?.tokens ?? 0);
+      const snapBilling = { included: 0, api: 0, local: 0 } as Record<string, number>;
+      for (const a of agentsUsage) snapBilling[a.billing] = (snapBilling[a.billing] ?? 0) + counters(a);
+      store.upsertUsageSnapshot(ownerId, { day: localDay(Date.now()).day, totalTokens: agentsUsage.reduce((s, a) => s + counters(a), 0), byBilling: snapBilling });
     } catch { /* trend is a nicety; never break the view */ }
   }
   return {

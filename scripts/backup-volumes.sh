@@ -63,8 +63,12 @@ done
 #  - Linux: systemd's EnvironmentFile rules (the reader is uninstall.sh's,
 #    held the same by test/backupKeyLine.test.ts). Nothing runs.
 #  - a Mac: the launchd job sources .env (launchd-plist.sh), so it is sourced
-#    here too, in a subshell. That runs nothing the service does not run at
-#    every start.
+#    here too, as that job runs it: by /bin/bash, with launchd's few settings
+#    (HOME, PATH, USER, LOGNAME, SHELL, TMPDIR; the PATH this shell's, not the
+#    plist's) and nothing on its input. In
+#    a subshell of this one, a .env that named a setting from the shell's
+#    profile read it, where the job reads it empty, and nothing said so
+#    (HB-1233). That runs nothing the service does not run at every start.
 # Each reading also says, as a record starting with a dot, the key .env itself
 # gives, whatever the environment has: compared with this run's below.
 # systemd_major FILE: the first number of `systemctl --version`, in
@@ -79,7 +83,7 @@ done
 # line too), and that is the rule of every systemd since 2023 and of
 # Hatchabot's own readers. Never taken from the environment: one a caller
 # exported chose the rule, so it is unset here, before any reading. The same
-# in the seven scripts that read .env so (test/backupKeyLine.test.ts).
+# in every script that reads .env so (test/backupKeyLine.test.ts, READERS).
 unset SYSTEMD_MAJOR
 systemd_major() {
   [ -z "${SYSTEMD_MAJOR+x}" ] || return 0
@@ -96,11 +100,13 @@ file_key() {
 if [ -f .env ]; then
   if [ "$(uname -s)" = Darwin ]; then
     NODE_BIN="$(command -v node || true)"
+    LAUNCHD_ENV=(HOME="$HOME" PATH="$PATH")
+    for v in USER LOGNAME SHELL TMPDIR; do [ -z "${!v:-}" ] || LAUNCHD_ENV+=("$v=${!v}"); done
     while IFS= read -r -d '' kv; do
       case "$kv" in .*) file_key "$kv" ;; *) k="${kv%%=*}"; [ -n "${!k+x}" ] || export "$kv" ;; esac
     done < <(
-      set +eu; unset HATCHABOT_SECRET_KEY AGENTCLAW_SECRET_KEY; set -a; . ./.env >/dev/null 2>&1; set +a
-      "$NODE_BIN" -e 'for (const [k, v] of Object.entries(process.env)) if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) process.stdout.write((/^(HATCHABOT|AGENTCLAW)_SECRET_KEY$/.test(k) ? "." + k + "=" + v + "\0" : "") + k + "=" + v + "\0");')
+      env -i "${LAUNCHD_ENV[@]}" /bin/bash -c 'set -a; . ./.env >/dev/null 2>&1; set +a; exec "$@"' launchd-job \
+        "$NODE_BIN" -e 'for (const [k, v] of Object.entries(process.env)) if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) process.stdout.write((/^(HATCHABOT|AGENTCLAW)_SECRET_KEY$/.test(k) ? "." + k + "=" + v + "\0" : "") + k + "=" + v + "\0");' </dev/null)
   else
     systemd_major .env
     while IFS= read -r -d '' kv; do case "$kv" in .*) file_key "$kv" ;; *) export "$kv" ;; esac; done < <(node -e '
@@ -270,7 +276,10 @@ STATUS="$DEST/backup-status.json"
 count=0
 failed=0
 # Of those, left out because a change was replacing their files (replacing, below).
+# Named in "replacing" too, and kept in failedVolumes, so a reader from before
+# the list reads the set as before (HB-1205).
 replacing_n=0
+replacing_list=""
 failed_list=""
 missing_list=""
 captured_list=""
@@ -288,8 +297,8 @@ json_list() { local out="" x; for x in $1; do out="$out${out:+,}\"$x\""; done; p
 write_status() {
   local kept=""
   [ -z "$retention_ran" ] || kept=",\"keptUnlisted\":{$kept_unlisted}"
-  printf '{"state":"%s","startedAt":"%s","finishedAt":"%s","volumes":%d,"failed":%d,"failedVolumes":%s,"missing":%s,"orphans":%s,"skipped":%s,"captured":%s%s}\n' \
-    "$1" "$started" "$(date -u +%FT%TZ)" "$count" "$failed" "$(json_list "$failed_list")" "$(json_list "$missing_list")" "$(json_list "$orphan_list")" "$(json_list "$skipped_list")" "$(json_list "$captured_list")" "$kept" \
+  printf '{"state":"%s","startedAt":"%s","finishedAt":"%s","volumes":%d,"failed":%d,"failedVolumes":%s,"replacing":%s,"missing":%s,"orphans":%s,"skipped":%s,"captured":%s%s}\n' \
+    "$1" "$started" "$(date -u +%FT%TZ)" "$count" "$failed" "$(json_list "$failed_list")" "$(json_list "$replacing_list")" "$(json_list "$missing_list")" "$(json_list "$orphan_list")" "$(json_list "$skipped_list")" "$(json_list "$captured_list")" "$kept" \
     > "$STATUS.tmp" && mv -f "$STATUS.tmp" "$STATUS"
 }
 # The record starts only once the run can really begin (below): a run that
@@ -620,12 +629,14 @@ fi
 # Hatchabot (its copy here stays stopped), an archive, a rebuild or a setup
 # (held only when putting it right after a restart failed) (review of HB-0922).
 #
-# Since a time: one asked for since then, or one whose row changed since then
-# and is not held now. A rebuild queued before the archive began, then started
-# and finished under it, was asked for before it and kept (review of HB-0922).
-# A hold of a kind that leaves the files whole is no bar either way: the
-# question asked again every ten minutes of a move to another Hatchabot
-# writes its row each time.
+# Since a time: one asked for since then, or one whose row changed since then.
+# A rebuild queued before the archive began, then started and finished under
+# it, was asked for before it and kept (review of HB-0922). A hold of a kind
+# that leaves the files whole is no bar before the archive; after it, one that
+# ran under it is, held now or not: a rebuild that began during the copy and
+# was left held by an app restart mid-copy was passed over as held, and its
+# copy kept (HB-1206). Only a held move to another Hatchabot is no bar by its
+# row: the question asked again every ten minutes writes it each time.
 replacing() {
   local id
   id="$(awk -F'\t' -v v="$1" '$1 == v { print $2; exit }' <<<"$agent_ids")"
@@ -643,7 +654,7 @@ replacing() {
     const op = db.prepare("SELECT kind, status, requested_at began, updated_at changed FROM operations WHERE agent_id = ? AND kind IN (" + kinds.map(() => "?").join(",") + ")")
       .all(process.argv[2], ...kinds)
       .find((o) => o.status === "running" || o.status === "interrupted" || (o.status === "held" && heldHalf.includes(o.kind))
-        || after(o.began) || (o.status !== "held" && after(o.changed)));
+        || after(o.began) || (after(o.changed) && !(o.status === "held" && o.kind === "migrate")));
     if (op) console.log(said[op.kind]);' "$DB_PATH" "$id" "${2:-}" 2>/dev/null || true
 }
 # The time an archive begins, for `replacing`: a second early, so an op
@@ -693,6 +704,7 @@ while IFS= read -r vol; do
     echo "  ✗ $vol: its agent is in the middle of $why, which replaces its files — not in this set (the next backup takes it)" >&2
     failed=$((failed + 1))
     replacing_n=$((replacing_n + 1))
+    replacing_list="$replacing_list $vol"
     failed_list="$failed_list $vol"
     continue
   fi
@@ -749,6 +761,7 @@ while IFS= read -r vol; do
     echo "  ✗ $vol: while it was being copied, $why began on its agent, so this copy may be half replaced — not kept (the next backup takes it)" >&2
     failed=$((failed + 1))
     replacing_n=$((replacing_n + 1))
+    replacing_list="$replacing_list $vol"
     failed_list="$failed_list $vol"
     continue
   fi
@@ -817,6 +830,7 @@ if [ -n "$remote" ]; then
       echo "  ✗ $vol on ${rhost#*://}: its agent is in the middle of $why, which replaces its files — not in this set (the next backup takes it)" >&2
       failed=$((failed + 1))
       replacing_n=$((replacing_n + 1))
+      replacing_list="$replacing_list $vol"
       failed_list="$failed_list $vol"
       continue
     fi
@@ -870,6 +884,7 @@ if [ -n "$remote" ]; then
       echo "  ✗ $vol on ${rhost#*://}: while it was being copied, $why began on its agent, so this copy may be half replaced — not kept (the next backup takes it)" >&2
       failed=$((failed + 1))
       replacing_n=$((replacing_n + 1))
+      replacing_list="$replacing_list $vol"
       failed_list="$failed_list $vol"
       continue
     fi

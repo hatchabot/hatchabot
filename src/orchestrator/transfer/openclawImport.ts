@@ -179,11 +179,23 @@ function findCommand(name: string, env: NodeJS.ProcessEnv): string | undefined {
   return undefined;
 }
 
-/** How long a gateway restart may take before it is stopped and called failed. */
+/**
+ * How long a gateway restart may take before it is stopped and called failed.
+ * It runs to its end, or to this limit, whether or not the client that asked
+ * is still there: a page closed or a request cut off does not stop it
+ * (HB-1298). On purpose: stopping `systemctl --user restart` does not cancel
+ * the job systemd has queued, and stopping `openclaw gateway restart` part
+ * way could leave the gateway down, with its bots already switched off in
+ * the config.
+ */
 const GATEWAY_RESTART_MS = 3 * 60_000;
 
-/** The restart, as its owner types it. */
-function restartByHand(how: ReturnType<typeof gatewayRestart>): string {
+/**
+ * The restart, as its owner types it: by default this machine's, the one the server's own hand-over
+ * runs (its unit's name from HATCHABOT_OPENCLAW_GATEWAY_UNIT on Linux). The adopt's inspect gives it
+ * to the web app and the CLI, which built their own and missed the setting (HB-1282).
+ */
+export function restartByHand(how: ReturnType<typeof gatewayRestart> = gatewayRestart()): string {
   if ('problem' in how || how.cmd !== 'systemctl') return 'openclaw gateway restart';
   return ['systemctl', ...how.args].join(' ');
 }

@@ -244,6 +244,12 @@ export function registerGoogleRoutes(app: FastifyInstance, ctx: RouteContext): v
     return out;
   });
 
+  /** A deleted account's access the pass gave up ending, marked done by its owner (the Connections page's notice, HB-1336). */
+  app.delete<{ Params: { id: string } }>('/v1/connections/ending/:id', async (req, reply) => {
+    if (!vault.dismissEnding(ownerIdOf(req), req.params.id)) return reply.code(404).send({ error: 'No such notice: it may be marked done already.' });
+    return { dismissed: true };
+  });
+
   /** Attach a vault connection to an agent — live immediately when RUNNING,
    *  and re-materialized on every future provision/rebuild. */
   app.post<{ Params: { id: string } }>(

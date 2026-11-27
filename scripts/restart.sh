@@ -71,7 +71,7 @@ mark_rolled_back() {
   systemd_major "$1/.env"   # here, so that it is asked once a run, not in each reading
   note="$(rolled_back_note "$1")"; mark="${note#*:}"
   [ -n "$mark" ] || return 0
-  [ "${note%%:*}" != unread ] || echo "Could not read $1/.env to find the database (no node to read it with, or it failed), so this rollback is written down beside the one the service opens when .env names none, ${mark%.rolled-back}. If .env names another (HATCHABOT_DB), the next start may take up what the release left had still to do for its agents."
+  [ "${note%%:*}" != unread ] || echo "Could not read $1/.env to find the database (node failed, or with none to read it with, it has a line bash cannot read as systemd does), so this rollback is written down beside the one the service opens when .env names none, ${mark%.rolled-back}. If .env names another (HATCHABOT_DB), the next start may take up what the release left had still to do for its agents."
   if [ ! -d "$(dirname "$mark")" ]; then
     [ "${note%%:*}" != named ] || echo "The folder of the database .env names (${mark%.rolled-back}) is not there, so this rollback was not written down beside it: the next start may take up what the release left had still to do for its agents."
     return 0
@@ -87,10 +87,10 @@ mark_rolled_back() {
   if [ -n "${2:-}" ] && [ -f "$mark" ]; then cp -p "$mark" "$mark.prev" 2>/dev/null || rm -f "$mark.prev" 2>/dev/null || true
   else rm -f "$mark.prev" 2>/dev/null || true; fi
   [ -z "${2:-}" ] || printf 'noted %s\n' "$at" >> "$2" 2>/dev/null || true
-  if ! { printf '%s\n' "$at" > "$mark.tmp" && mv -f "$mark.tmp" "$mark"; } 2>/dev/null; then
+  { printf '%s\n' "$at" > "$mark.tmp" && mv -f "$mark.tmp" "$mark"; } 2>/dev/null || {
     rm -f "$mark.tmp" 2>/dev/null || true
     echo "Could not write $mark (a full disk?), so the next start may take up what the release left had still to do for its agents. Once there is room: printf '%s\n' $at > \"$mark\""
-  fi
+  }
   return 0
 }
 # systemd_major FILE: the first number of `systemctl --version`, in
@@ -105,7 +105,7 @@ mark_rolled_back() {
 # line too), and that is the rule of every systemd since 2023 and of
 # Hatchabot's own readers. Never taken from the environment: one a caller
 # exported chose the rule, so it is unset here, before any reading. The same
-# in the seven scripts that read .env so (test/backupKeyLine.test.ts).
+# in every script that reads .env so (test/backupKeyLine.test.ts, READERS).
 unset SYSTEMD_MAJOR
 systemd_major() {
   [ -z "${SYSTEMD_MAJOR+x}" ] || return 0
@@ -113,11 +113,43 @@ systemd_major() {
   SYSTEMD_MAJOR="$( { systemctl --version 2>/dev/null || true; } | sed -n '1s/^[^0-9]*\([0-9][0-9]*\).*/\1/p')"
 }
 env_named() {
-  # ENV_READ: 1 once .env was read through (no node, or one that failed, reads nothing).
+  # ENV_READ: 1 once .env was read through (a node that failed reads nothing;
+  # with no node on Linux, only what bash reads as systemd does, below).
+  # A HATCHABOT_ name is read under its name from before the rename too
+  # (AGENTCLAW_), which the service takes when the new one is not set
+  # (applyLegacyEnv): a pre-rename AGENTCLAW_IMAGE was the service's image,
+  # and the upgrade's and setup's was the default (HB-1379).
   local kv k
+  local -a names=()
+  for k in "$@"; do
+    names+=("$k")
+    case "$k" in
+      HATCHABOT_*) names+=("AGENTCLAW_${k#HATCHABOT_}") ;;
+    esac
+  done
   ENV_READ=''
   systemd_major .env
-  for k in "$@"; do printf -v "ENV_$k" '%s' ''; printf -v "ENVSET_$k" '%s' ''; done
+  for k in "${names[@]}"; do printf -v "ENV_$k" '%s' ''; printf -v "ENVSET_$k" '%s' ''; done
+  # The reading, in the < <( ... ) below, says what it is here: bash 3.2
+  # finds where one ends by its quotes and parentheses, comments in it too
+  # (review of HB-1529).
+  # - On a Mac, as the launchd job sources it (launchd-plist.sh): by
+  #   /bin/bash, with launchd's few settings and nothing on its input; the
+  #   PATH is this shell's, not the job's own (the plist's). In a subshell of
+  #   this one it had the caller's whole environment, its shell's variables
+  #   and its input (HB-1381).
+  # - With no node to ask (a restart from cron or a bare ssh, with an nvm
+  #   node off its PATH): what bash reads as systemd does, NAME=value with
+  #   spaces or tabs around the = (only those: systemd keeps a form feed or a
+  #   vertical tab) and the value whole, or quoted whole, on its line. A file
+  #   with a carriage return or a backslash at a line's end, or with a value
+  #   on any line that opens a quote it does not close on that line (systemd
+  #   reads on into the lines after it, and they are no settings of their
+  #   own), is left unread, and so is a value asked for that is quoted any
+  #   other way or has a backslash in it. Unread whenever node was not
+  #   there, a restart asked plain http on port 8080, and failed a listener
+  #   the sed it replaced had found (review of HB-1529).
+  # - Otherwise by systemd's rules, in node.
   while IFS= read -r -d '' kv; do
     k="${kv%%=*}"
     [ "$k" != . ] || { ENV_READ=1; continue; }
@@ -125,9 +157,32 @@ env_named() {
   done < <(
     if [ "$(uname -s)" = Darwin ]; then
       set +eu
-      for k in "$@"; do unset "$k"; done
-      set -a; . ./.env >/dev/null 2>&1; set +a
-      for k in "$@"; do [ -z "${!k+x}" ] || printf '%s=%s\0' "$k" "${!k}"; done
+      lj=(HOME="$HOME" PATH="$PATH")
+      for k in USER LOGNAME SHELL TMPDIR; do [ -z "${!k:-}" ] || lj+=("$k=${!k}"); done
+      env -i "${lj[@]}" /bin/bash -c 'for k in "$@"; do unset "$k"; done; set -a; . ./.env >/dev/null 2>&1; set +a
+        for k in "$@"; do [ -z "${!k+x}" ] || printf "%s=%s\0" "$k" "${!k}"; done; printf ".=\0"' launchd-job "${names[@]}" </dev/null
+    elif ! command -v node >/dev/null 2>&1; then
+      set +e
+      sp=$' \t'
+      [ -r .env ] || exit 0
+      LC_ALL=C grep -q -e $'\r' -e '\\$' .env 2>/dev/null && exit 0
+      while IFS= read -r kv || [ -n "$kv" ]; do
+        kv="${kv#"${kv%%[!$sp]*}"}"
+        [ -n "$kv" ] && [ "${kv:0:1}" != "#" ] && [ "${kv:0:1}" != ";" ] && [[ "${kv:1}" == *=* ]] || continue
+        kv="${kv:1}"; kv="${kv#*=}"; kv="${kv#"${kv%%[!$sp]*}"}"; kv="${kv%"${kv##*[!$sp]}"}"
+        [[ "$kv" == [\'\"]* ]] || continue
+        [[ "$kv" == \'*\' && "${kv:1:${#kv}-2}" != *\'* ]] || [[ "$kv" == \"*\" && "${kv:1:${#kv}-2}" != *[\"\\]* ]] || exit 0
+      done < .env
+      for k in "${names[@]}"; do
+        kv="$(LC_ALL=C grep -E "^[$sp]*$k[$sp]*=" .env 2>/dev/null | tail -n 1)"
+        [ -n "$kv" ] || continue
+        kv="${kv#*=}"; kv="${kv#"${kv%%[!$sp]*}"}"; kv="${kv%"${kv##*[!$sp]}"}"
+        if [[ "$kv" == \'*\' && "${kv:1:${#kv}-2}" != *\'* ]]; then kv="${kv:1:${#kv}-2}"
+        elif [[ "$kv" == \"*\" && "${kv:1:${#kv}-2}" != *[\"\\]* ]]; then kv="${kv:1:${#kv}-2}"
+        elif [[ "$kv" == [\'\"]* || "$kv" == *\\* ]]; then exit 0
+        fi
+        printf '%s=%s\0' "$k" "$kv"
+      done
       printf '.=\0'
     else
       node -e '
@@ -159,9 +214,39 @@ env_named() {
     };
     const out = systemd(require("node:fs").readFileSync(".env", "utf8"), process.argv[1]);
     for (const k of process.argv.slice(2)) if (Object.prototype.hasOwnProperty.call(out, k)) process.stdout.write(k + "=" + out[k] + "\0");
-    process.stdout.write(".=\0");' "${SYSTEMD_MAJOR:-}" "$@" 2>/dev/null || true
+    process.stdout.write(".=\0");' "${SYSTEMD_MAJOR:-}" "${names[@]}" 2>/dev/null || true
     fi
   )
+  for k in "$@"; do
+    case "$k" in
+      HATCHABOT_*) ;;
+      *) continue ;;
+    esac
+    kv="ENVSET_$k"; [ -z "${!kv}" ] || continue
+    kv="ENVSET_AGENTCLAW_${k#HATCHABOT_}"; [ -n "${!kv}" ] || continue
+    kv="ENV_AGENTCLAW_${k#HATCHABOT_}"
+    printf -v "ENV_$k" '%s' "${!kv}"; printf -v "ENVSET_$k" '%s' 1
+  done
+}
+# service_port VALUE: the port the service listens on with VALUE as its PORT,
+# read as the service reads it (Number(), as doctor's servicePort): 8080 when
+# it is unset, empty or no number. On Linux a " # note" after the value is
+# part of it, as systemd keeps it: the service then listens on 8080, as for
+# no PORT (before 2.193.0 it did not start), and a URL with that value in it
+# is none at all (HB-1529). With no node to ask, digits alone are a port,
+# with the ASCII white space Number takes off around them taken off too (a
+# form feed systemd keeps; review of HB-1529). The same in each script that
+# asks the listener (test/doctorServiceTargets.test.ts).
+service_port() {
+  local n ws=$' \t\n\v\f\r'
+  node -e 'process.stdout.write(String(Number(process.argv[1]) || 8080))' -- "$1" 2>/dev/null && return 0
+  n="${1#"${1%%[!$ws]*}"}"; n="${n%"${n##*[!$ws]}"}"
+  case "$n" in
+    ''|*[!0-9]*) echo 8080 ;;
+    *)
+      n="${n#"${n%%[!0]*}"}"   # the zeros it starts with dropped, as Number reads them
+      echo "${n:-8080}" ;;
+  esac
 }
 # rolled_back_note DIR: where mark_rolled_back writes, for the service in
 # DIR: beside the database it opens, `named:<note>` when .env names it,
@@ -189,7 +274,10 @@ rolled_back_note() {
       [ -e "$db" ] || [ ! -e data/agentclaw.sqlite ] || db=data/agentclaw.sqlite
     fi
     [ -n "$db" ] || { printf 'none:\n'; exit 0; }
-    case "$db" in /*) ;; *) db="$1/$db" ;; esac
+    case "$db" in
+      /*) ;;
+      *) db="$1/$db" ;;
+    esac
     printf '%s:%s\n' "$how" "$db.rolled-back" )
 }
 
@@ -220,34 +308,29 @@ onto_upgrade_target() {
 }
 
 # Wait for it to answer, so "restarted" means "actually serving".
-# .env (the unit's EnvironmentFile) is what the service runs with; its values
-# may be quoted or carry an inline comment — take the bare value, last wins.
-# systemd also takes spaces around the = (PORT = 9137): read only as PORT=,
-# that was probed on 8080 for a minute and reported down (audit, 2026-10-29).
-# The Mac's launchd job sources .env with bash (launchd-plist.sh), where only
-# NAME=value sets it: PORT = 9137 is a command, PORT= 9137 sets nothing.
-if [ "$(uname -s)" = "Darwin" ]; then
-  envlines() { sed -n -e "/^[[:space:]]*$1=[[:space:]][[:space:]]*[^#[:space:]]/d" -e "s/^[[:space:]]*$1=//p" .env; }
-else
-  envlines() { sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" .env; }
-fi
-envval() { { envlines "$1" 2>/dev/null || true; } \
-  | sed -e 's/[[:space:]]*#.*$//' -e 's/[[:space:]]*$//' -e 's/^["'\'']//' -e 's/["'\'']$//' \
-  | tail -n1; }
-PORT="$(envval PORT)"
-PORT="${PORT:-8080}"
+# .env (the unit's EnvironmentFile) is what the service runs with, read as
+# the service reads it (env_named, above): by systemd's rules on Linux, where
+# spaces around the = count (PORT = 9137, read only as PORT=, was probed on
+# 8080 for a minute and reported down; audit, 2026-10-29) and a " # ..."
+# after a value is part of it; sourced by bash on a Mac (launchd-plist.sh),
+# where only NAME=value sets it; a name from before the rename too. Read by
+# sed, a listener set under the AGENTCLAW_ names was asked over plain http on
+# localhost (HB-1529).
+env_named PORT HATCHABOT_TLS_CERT HATCHABOT_BIND
+[ -n "$ENV_READ" ] || [ ! -e .env ] || echo "⚠ Could not read .env as the service reads it (on Linux, with no node on this PATH, only plain NAME=value lines can be), so the service is asked for where it listens with none of its settings: http, port 8080, this machine."
+PORT="$(service_port "$ENV_PORT")"
 # The probe asks the listener itself, as the service is configured: https
 # when it serves TLS natively (HATCHABOT_TLS_CERT), at its HATCHABOT_BIND
 # address when that is one host. Probing plain http://localhost failed a
 # healthy native-TLS or LAN-bound listener, and an upgrade rolled back for it.
 # -k: this asks whether it is serving, not whether the certificate names
 # 127.0.0.1 (it names the machine's real address; doctor checks that one).
-SCHEME=http; [ -n "$(envval HATCHABOT_TLS_CERT)" ] && SCHEME=https
-BIND="$(envval HATCHABOT_BIND)"
+SCHEME=http; [ -z "$ENV_HATCHABOT_TLS_CERT" ] || SCHEME=https
+BIND="$ENV_HATCHABOT_BIND"
 case "$BIND" in
   ""|0.0.0.0|::|"[::]"|localhost|127.0.0.1) PROBE_HOST=localhost ;;
   \[*) PROBE_HOST="$BIND" ;;
-  *:*) PROBE_HOST="[$BIND]" ;;   # an IPv6 address goes in brackets in a URL
+  *:*) PROBE_HOST="[${BIND//[%]/%25}]" ;;   # an IPv6 address goes in brackets in a URL, a zone's % as %25 (RFC 6874; HB-1378)
   *) PROBE_HOST="$BIND" ;;
 esac
 LISTENER="${SCHEME}://${PROBE_HOST}:${PORT}"

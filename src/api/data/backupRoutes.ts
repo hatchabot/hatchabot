@@ -4,7 +4,7 @@ import { BackupBusyError, pruneBackup, RestoreError } from '../../orchestrator/b
 import { AgentBusyError } from '../../orchestrator/lifecycle/busy.js';
 import { DRILL_EVERY, type DrillEvery } from '../../orchestrator/backups/drills.js';
 import { runInBackground } from '../../orchestrator/lifecycle/operations.js';
-import { SnapshotError } from '../../orchestrator/files/snapshots.js';
+import { SnapshotError, snapshotLabel } from '../../orchestrator/files/snapshots.js';
 import { ownerIdOf } from '../principal.js';
 import { MACHINE_OWNER_ONLY, zodMessage, type RouteContext } from '../routeContext.js';
 
@@ -41,7 +41,7 @@ export function registerBackupRoutes(app: FastifyInstance, ctx: RouteContext): v
   app.get<{ Params: { id: string } }>('/v1/agents/:id/snapshots', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
-    return store.listSnapshots(agent.id);
+    return store.listSnapshots(agent.id).map((s) => ({ ...s, label: snapshotLabel(s) }));
   });
 
   app.post<{ Params: { id: string }; Body: { label?: string } }>(
@@ -67,7 +67,7 @@ export function registerBackupRoutes(app: FastifyInstance, ctx: RouteContext): v
       const agent = ownedAgent(req, req.params.id);
       const snap = agent && store.getSnapshot(agent.id, req.params.snapId);
       if (!snap) return reply.code(404).send({ error: 'Not found' });
-      return snap;
+      return { ...snap, label: snapshotLabel(snap) };
     },
   );
 

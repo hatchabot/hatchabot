@@ -70,7 +70,7 @@ done
 # line too), and that is the rule of every systemd since 2023 and of
 # Hatchabot's own readers. Never taken from the environment: one a caller
 # exported chose the rule, so it is unset here, before any reading. The same
-# in the seven scripts that read .env so (test/backupKeyLine.test.ts).
+# in every script that reads .env so (test/backupKeyLine.test.ts, READERS).
 unset SYSTEMD_MAJOR
 systemd_major() {
   [ -z "${SYSTEMD_MAJOR+x}" ] || return 0
@@ -323,13 +323,24 @@ lock_busy() {
   [ -d "$1" ] && [ -z "$(find "$1" -maxdepth 0 -mmin +1 2>/dev/null)" ]
 }
 # Whether a drill's container or volume ($1, hatchabot-restore-drill-<pid>-<n>)
-# is a drill's whose process is gone.
+# is a drill's whose process is gone. Judged as the lock is (lock_busy), by
+# the labels a drill puts on what it makes: when its process started ($2,
+# hatchabot.restore-drill.started) and when it began making them ($3,
+# seconds, hatchabot.restore-drill.at: once, as its restores begin, so the
+# same on all it makes). By the pid alone, a killed drill's container
+# and volume were kept for as long as the system gave its pid to another
+# program (HB-1373). A pid that lives and started when the drill did is the
+# drill, however old; any other that lives is one only for as long as a
+# drill runs. With no time to go by (made by an older drill), by the pid.
 drill_gone() {
   local p
   case "$1" in hatchabot-restore-drill-*) ;; *) return 1 ;; esac
   p="${1#hatchabot-restore-drill-}"; p="${p%%-*}"
   case "$p" in ''|*[!0-9]*) return 1 ;; esac
-  ! pid_alive "$p"
+  pid_alive "$p" || return 0
+  case "${3:-}" in ''|*[!0-9]*) return 1 ;; esac
+  [ -z "${2:-}" ] || [ "$(proc_start "$p")" != "$2" ] || return 1
+  [ $(( $(date +%s) - $3 )) -ge $((180 * 60)) ]
 }
 drill_locked_out() {
   echo "✗ Another restore drill${holder:+ (pid $holder)} is running — this one stops; that drill's record will say how it went." >&2
@@ -578,16 +589,24 @@ if [ -n "$order" ]; then
       mine_ct="$(dk ps -a --filter "label=hatchabot.restore-drill=$DRILL_OWNER" --format '{{.Names}}' 2>/dev/null || true)"
       mine_vol="$(dk_ls volume ls -q --filter "label=hatchabot.restore-drill=$DRILL_OWNER" 2>/dev/null || true)"
     fi
-    for c in $(dk ps -a --filter label=hatchabot.restore-drill --format '{{.Names}}' 2>/dev/null || true); do
-      if grep -qxF -- "$c" <<<"$mine_ct" || drill_gone "$c"; then dk rm -f "$c" >/dev/null 2>&1 || true; fi
-    done
-    for v in $(dk_ls volume ls -q --filter label=hatchabot.restore-drill 2>/dev/null || true); do
-      if grep -qxF -- "$v" <<<"$mine_vol" || drill_gone "$v"; then dk volume rm -f "$v" >/dev/null 2>&1 || true; fi
-    done
+    # Each with when its drill started and made it (drill_gone).
+    WHEN='|{{.Label "hatchabot.restore-drill.started"}}|{{.Label "hatchabot.restore-drill.at"}}'
+    while IFS='|' read -r c st at; do
+      [ -n "$c" ] || continue
+      if grep -qxF -- "$c" <<<"$mine_ct" || drill_gone "$c" "$st" "$at"; then dk rm -f "$c" </dev/null >/dev/null 2>&1 || true; fi
+    done <<<"$(dk ps -a --filter label=hatchabot.restore-drill --format "{{.Names}}$WHEN" 2>/dev/null || true)"
+    while IFS='|' read -r v st at; do
+      [ -n "$v" ] || continue
+      if grep -qxF -- "$v" <<<"$mine_vol" || drill_gone "$v" "$st" "$at"; then dk volume rm -f "$v" </dev/null >/dev/null 2>&1 || true; fi
+    done <<<"$(dk_ls volume ls --filter label=hatchabot.restore-drill --format "{{.Name}}$WHEN" 2>/dev/null || true)"
     for v in $(dk_ls volume ls -q 2>/dev/null | grep '^acl-restore-drill-' || true); do dk volume rm -f "$v" >/dev/null 2>&1 || true; done
     # -k: a docker client that passes the TERM on to the container and waits is killed.
     T="${TO:+$TO -k 10}"
     restore_start=$SECONDS
+    # On what this drill makes, for a later drill to judge it by (drill_gone):
+    # its start, and the time its restores begin, taken once here, not as
+    # each is made (a drill's 180 minutes count from this).
+    MADE_LABELS=(--label "hatchabot.restore-drill.started=$(proc_start "$$")" --label "hatchabot.restore-drill.at=$(date +%s)")
     n=0
     for i in $order; do
       name="${VOL_NAMES[$i]}"
@@ -600,7 +619,7 @@ if [ -n "$order" ]; then
       DRILL_VOL="hatchabot-restore-drill-$$-$n"
       DRILL_CT="hatchabot-restore-drill-$$-$n"
       rc=0; made=0
-      dk volume create --label "hatchabot.restore-drill=$DRILL_OWNER" "$DRILL_VOL" >/dev/null || made=$?
+      dk volume create --label "hatchabot.restore-drill=$DRILL_OWNER" "${MADE_LABELS[@]}" "$DRILL_VOL" >/dev/null || made=$?
       files=""
       if [ "$made" -eq 0 ]; then
         # As root, then chown — the same rules as the provider's importState:
@@ -611,7 +630,7 @@ if [ -n "$order" ]; then
         # client; passed on, the container's shell (PID 1) ignored it, and a
         # restore over its time read as a failed one (exit 137). The
         # container is removed just below, or by the trap.
-        files="$(${T:+$T $PER_RESTORE_SEC} docker run --rm --name "$DRILL_CT" --label "hatchabot.restore-drill=$DRILL_OWNER" --sig-proxy=false \
+        files="$(${T:+$T $PER_RESTORE_SEC} docker run --rm --name "$DRILL_CT" --label "hatchabot.restore-drill=$DRILL_OWNER" "${MADE_LABELS[@]}" --sig-proxy=false \
           --network none --memory "$LIM_MEMORY" --memory-swap "$LIM_MEMORY" --cpus "$LIM_CPUS" --pids-limit 256 \
           --security-opt no-new-privileges --user root --entrypoint bash \
           -v "$DRILL_VOL:/data" -v "${VOL_TGZ[$i]}:/in/vol.tgz:ro" "$IMAGE" \

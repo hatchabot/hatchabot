@@ -30,8 +30,8 @@ import { createRebuildQueue, type RebuildQueue, type RebuildQueueDeps } from './
  * other services, which are told of it as functions; on the route context as
  * `ctx.lifecycle`, and the queue's functions are the context's
  * `kickProvision`, `provisionWhenFree`, `kickRebuild`, `oweRebuild` and
- * `rebuildOrOwe` as before. `stop()` ends the sweep's interval and a setup's
- * waits. Nothing here knows HTTP: who may ask and the words of an answer are
+ * `rebuildOrOwe` as before. `stop()` ends the sweep's interval, a setup's
+ * waits and an owed start's wait. Nothing here knows HTTP: who may ask and the words of an answer are
  * src/api/agents/lifecycleRoutes.ts's.
  *
  * Not here: PATCH /v1/agents/:id, which stays in src/api/routes.ts (HB-0825).
@@ -99,6 +99,6 @@ export function createAgentLifecycle(deps: AgentLifecycleDeps): AgentLifecycle {
     queue, rebuilds, power, records, list,
     capacity: createCapacity(deps),
     operations: { recover: (opId, action) => deps.recoverOperation(opId, action) },
-    stop: () => { rebuilds.stop(); queue.stop(); },
+    stop: () => { rebuilds.stop(); queue.stop(); power.stop(); },
   };
 }

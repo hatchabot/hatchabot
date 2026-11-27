@@ -54,9 +54,20 @@ import { applySchemaSteps, checkSchemaVersion } from './schemaVersion.js';
  *  - `first-contact`: each watch for a first message under way, with what
  *    its window needs that its `pairing_windows` row does not say, as JSON
  *    (members/claim.ts `claimFirstContact`, watched again at the next start
- *    by `resumeFirstContacts`, HB-0838).
+ *    by `resumeFirstContacts`, HB-0838);
+ *  - `download-stop`: a download (its file made, transfer/copies.ts) that
+ *    stops a running agent for its copy, from before the stop until the
+ *    download ends: a restart in the copy left it stopped with no file, and
+ *    the next start starts it again unless the file was made after it
+ *    (transfer.ts `startCutOffDownloads`, HB-1479);
+ *  - `knock-door`: "Anyone can knock" turned on while a change held the
+ *    agent, its door to open once the agent is free, until it has been (or
+ *    the setting was turned off, or the agent is not running then: its next
+ *    build writes the door); the value names the ask (channels/knocks.ts
+ *    `openDoorWhenFree`, opened again at the next start by
+ *    `resumeKnockDoors`, HB-1264).
  */
-export type AgentHoldKind = 'class-detach' | 'model-waits-image' | 'model-apply' | 'embed-reindex' | 'skip-pool' | 'pending-joins' | 'budget-pause' | 'docs-sync' | 'first-contact';
+export type AgentHoldKind = 'class-detach' | 'model-waits-image' | 'model-apply' | 'embed-reindex' | 'skip-pool' | 'pending-joins' | 'budget-pause' | 'docs-sync' | 'first-contact' | 'download-stop' | 'knock-door';
 
 /** How a group section sorts itself: A→Z by name, or newest first. */
 export type SectionSort = 'name' | 'time' | 'activity';
@@ -163,6 +174,31 @@ const BASELINE_AT = `COALESCE(
   (SELECT MAX(t2.at) FROM token_samples t2 WHERE t2.agent_id = token_samples.agent_id AND t2.at < ? AND t2.total > 0),
   (SELECT MAX(t3.at) FROM token_samples t3 WHERE t3.agent_id = token_samples.agent_id AND t3.at < ?),
   ?)`;
+
+/**
+ * A deleted source's tombstone that something it is read for still names
+ * (Store.formerAIProfile, HB-1179): a reading here, a change of source from
+ * or to it, a practice run on it, or an agent not deleted that runs it.
+ * A condition on the row of ai_profile_tombstones at hand; pruneSourceUsage
+ * says why these and no others.
+ *
+ * `exceptAgentsOf`: the readings and practice runs of the agents of the
+ * account `@owner` do not count. Its removal (deleteLocalAccount) comes after
+ * its agents are deleted, and those two outlive an agent (scrubAgentResidue
+ * keeps them for the daily cost): counted, the account's own tombstones
+ * outlived it, as nobody's (review of HB-1179). The other tables are cleared
+ * with the agent.
+ */
+function tombstoneStillNamed(exceptAgentsOf = false): string {
+  const notTheirs = (t: string) => (exceptAgentsOf ? ` AND ${t}.agent_id NOT IN (SELECT id FROM agents WHERE owner_id = @owner)` : '');
+  return `(EXISTS (SELECT 1 FROM agents a WHERE a.state != 'DELETED' AND ai_profile_tombstones.id IN (a.applied_profile_id, a.ai_profile_id))
+  OR EXISTS (SELECT 1 FROM applied_source_changes c WHERE ai_profile_tombstones.id IN (c.from_profile, c.to_profile))
+  OR EXISTS (SELECT 1 FROM practice_usage p WHERE p.profile_id = ai_profile_tombstones.id${notTheirs('p')})
+  OR EXISTS (SELECT 1 FROM model_call_hours h WHERE h.profile_id = ai_profile_tombstones.id)
+  OR EXISTS (SELECT 1 FROM model_call_slots s WHERE s.profile_id = ai_profile_tombstones.id)
+  OR EXISTS (SELECT 1 FROM limit_hits l WHERE l.profile_id = ai_profile_tombstones.id)
+  OR EXISTS (SELECT 1 FROM token_samples t WHERE t.profile_id = ai_profile_tombstones.id${notTheirs('t')}))`;
+}
 
 /** The highest TCP port. */
 const MAX_PORT = 65535;
@@ -278,6 +314,7 @@ export const OWNER_COLUMNS: ReadonlyArray<{
   { table: 'spend_alerts', column: 'set_by', how: 'stays', why: 'who set it: owner, agent or default, not an id' },
   { table: 'budget_pauses', column: 'resumed_by', how: 'stays', why: 'owner or gone, not an id' },
   { table: 'first_account', column: 'owner_id', how: 'stays', why: 'names the account the hand-over is for' },
+  { table: 'ai_profile_tombstones', column: 'owner_id', how: 'stays', why: 'a deleted source, read by its id alone for its readings, and pruned with them; it counts for no hand-over' },
 ];
 
 export class Store {
@@ -524,7 +561,9 @@ export class Store {
       );
       -- A deleted AI source, as its readings above still name it: how its
       -- tokens were paid for (a plan's stay included, not billed API), its
-      -- name and model (HB-0931; formerAIProfile).
+      -- name and model (HB-0931; formerAIProfile). Kept while anything that
+      -- is read by it is, and gone with its account when nothing is
+      -- (owner_id, step 118; pruneSourceUsage, deleteLocalAccount; HB-1179).
       CREATE TABLE IF NOT EXISTS ai_profile_tombstones (
         id TEXT PRIMARY KEY, name TEXT NOT NULL, vendor TEXT NOT NULL, kind TEXT NOT NULL, model TEXT, deleted_at TEXT NOT NULL
       );
@@ -538,7 +577,8 @@ export class Store {
       CREATE TABLE IF NOT EXISTS usage_calls_through (agent_id TEXT PRIMARY KEY, slot TEXT NOT NULL);
       -- Every change of the source an agent's container runs (setAgentApplied):
       -- a rewritten hour of calls is filed under the source that made each
-      -- one, however many changes it holds (audit #056). Pruned with the usage.
+      -- one, however many changes it holds (audit #056), and a window's spend
+      -- billed by the source each hour ran on (HB-1180). Pruned after 31 days.
       CREATE TABLE IF NOT EXISTS applied_source_changes (
         agent_id TEXT NOT NULL, at TEXT NOT NULL, from_profile TEXT NOT NULL, to_profile TEXT NOT NULL,
         PRIMARY KEY (agent_id, at)
@@ -920,7 +960,9 @@ export class Store {
       -- delivery its own. The row ('*', '*') says an adopt's copies may be on
       -- the agent unrecorded: an older release made it (or adopted into it),
       -- or an adopt carried tasks from a store that gives them no ids. The
-      -- row ('+', '+') says this release made it (Store.insertAgent).
+      -- row ('+', '+') says this release made it (Store.insertAgent). Its
+      -- fingerprint, what the source task held when carried (HB-1200), is
+      -- schema step 117's.
       CREATE TABLE IF NOT EXISTS adopt_carried_tasks (
         agent_id TEXT NOT NULL, source_agent TEXT NOT NULL, source_id TEXT NOT NULL,
         copy_id TEXT, at TEXT NOT NULL,
@@ -1249,6 +1291,18 @@ export class Store {
             AND CASE WHEN json_valid(e.detail) THEN json_extract(e.detail, '$.alreadyStopped') END = 1
             AND e.at >= budget_pauses.paused_at AND julianday(e.at) - julianday(budget_pauses.paused_at) < 10.0 / 1440)`);
     });
+    // Before 2.191.0 the quality guard claimed a worse model change and wrote
+    // its card in two writes, and a process that ended between them left the
+    // change claimed for a card never written: no later pass filed it (HB-0956
+    // made them one write). Such a claim is let go of, for the next pass to
+    // file, where its card cannot have been pruned: a card is written after
+    // the verdict and kept a week after it is answered, so the card of a
+    // verdict less than a week old is still there if it was ever written.
+    // Checked at every start, not once: a rollback to an older release can
+    // leave one again (HB-1178).
+    this.db.prepare(`UPDATE model_changes SET guard_proposal_id = NULL
+      WHERE outcome = 'worse' AND guard_proposal_id LIKE 'c\\_%' ESCAPE '\\' AND outcome_at > ?
+        AND NOT EXISTS (SELECT 1 FROM mgmt_proposals p WHERE p.id = model_changes.guard_proposal_id)`).run(new Date(Date.now() - 7 * 86_400_000).toISOString());
     this.runOnce('2026-09-29-dm-policy-unchanged', () => {
       this.db.exec(`DELETE FROM agent_events WHERE event = 'channel.dm_policy' AND CASE WHEN json_valid(detail) THEN json_extract(detail, '$.result') END = 'unchanged'`);
     });
@@ -1632,9 +1686,10 @@ export class Store {
 
   deleteAIProfile(id: string): void {
     this.db.transaction(() => {
-      // Its readings still name it: kept as they were paid for (HB-0931).
-      this.db.prepare(`INSERT OR REPLACE INTO ai_profile_tombstones (id, name, vendor, kind, model, deleted_at)
-        SELECT id, name, vendor, kind, model, ? FROM ai_profiles WHERE id = ?`).run(new Date().toISOString(), id);
+      // Its readings still name it: kept as they were paid for (HB-0931),
+      // with its account, whose removal takes it (HB-1179).
+      this.db.prepare(`INSERT OR REPLACE INTO ai_profile_tombstones (id, name, vendor, kind, model, deleted_at, owner_id)
+        SELECT id, name, vendor, kind, model, ?, owner_id FROM ai_profiles WHERE id = ?`).run(new Date().toISOString(), id);
       this.db.prepare(`DELETE FROM ai_profiles WHERE id = ?`).run(id);
       // A class naming it keeps its agents' own sources (night review).
       this.db.prepare(`UPDATE agent_classes SET ai_profile_id = NULL WHERE ai_profile_id = ?`).run(id);
@@ -2708,6 +2763,20 @@ export class Store {
       this.db.prepare(`DELETE FROM second_factors WHERE owner_id = ?`).run(id);
       this.db.prepare(`DELETE FROM known_devices WHERE owner_id = ?`).run(id);
       this.db.prepare(`DELETE FROM security_notices WHERE owner_id = ?`).run(id);
+      // Their notices of Google access to remove by hand: nobody is left to read them (HB-1336).
+      this.db.prepare(`DELETE FROM connection_cleanups WHERE owner_id = ? AND given_up_at IS NOT NULL`).run(id);
+      // Their tokens still being ended: the pass goes on asking Google, with
+      // nobody to tell or to show it to when it gives up (REMOVED_OWNER), so
+      // such a one is then dropped, not kept as a notice.
+      this.db.prepare(`UPDATE connection_cleanups SET owner_id = ? WHERE owner_id = ?`).run(REMOVED_OWNER, id);
+      // The names and kinds of the sources they deleted (HB-1179), but for
+      // one that another account's usage still names: a source they shared
+      // that another account's agent ran on is billed by it there (as a
+      // plan's, not API) until that usage goes. That one is nobody's now, and
+      // the prune gives it up with that usage (review). Their own deleted
+      // agents' readings keep none (review).
+      this.db.prepare(`DELETE FROM ai_profile_tombstones WHERE owner_id = @owner AND NOT ${tombstoneStillNamed(true)}`).run({ owner: id });
+      this.db.prepare(`UPDATE ai_profile_tombstones SET owner_id = NULL WHERE owner_id = ?`).run(id);
       this.db.prepare(`DELETE FROM local_accounts WHERE id = ?`).run(id);
     })();
   }
@@ -2813,21 +2882,33 @@ export class Store {
   }
 
   /**
-   * Pending shares addressed to this owner (by bound owner OR their email).
-   * `parameters`: its template's setup fields where they were kept (none
-   * kept, or unreadable: undefined). Never the file.
+   * Pending shares addressed to this owner (by bound owner OR their email),
+   * newest first. `parameters`: its template's setup fields where they were
+   * kept (none kept, or unreadable: undefined). Never the file.
+   * `page`: no more than `limit` of them, from just after `after`, the last
+   * one of the page before by its created_at and id (HB-1167). A position,
+   * not a count of rows: a share sent or settled meanwhile makes the next page
+   * neither repeat one nor skip one. Left out: every one.
    */
-  listInbox(ownerId: string, email?: string): Array<{
+  listInbox(ownerId: string, email?: string, page?: { limit: number; after?: { createdAt: string; id: string } }): Array<{
     id: string; fromEmail?: string; agentName: string; message?: string; createdAt: string; parameters?: TemplateParam[];
   }> {
     if (!ownerId.startsWith('user-')) return [];
+    // Found through the two indexes (INBOX_ROWS), never a walk of every share:
+    // each row's blob comes before its status, so a scan reads every file.
     const rows = this.db
       .prepare(
         `SELECT id, from_email, agent_name, message, created_at, parameters FROM agent_shares
-         WHERE status = 'pending' AND (to_owner = ? OR (to_owner IS NULL AND to_email = ? COLLATE NOCASE))
-         ORDER BY created_at DESC`,
+         WHERE rowid IN (${INBOX_ROWS})
+           AND (@at IS NULL OR created_at < @at OR (created_at = @at AND id < @id))
+         ORDER BY created_at DESC, id DESC
+         LIMIT @limit`,
       )
-      .all(ownerId, email ?? '\u0000') as Array<any>;
+      .all({
+        owner: ownerId, email: email ?? '\u0000',
+        at: page?.after?.createdAt ?? null, id: page?.after?.id ?? null,
+        limit: page ? Math.max(0, Math.floor(page.limit)) : -1,
+      }) as Array<any>;
     const kept = (text: string | null): TemplateParam[] | undefined => {
       if (text == null) return undefined;
       try { const v: unknown = JSON.parse(text); return Array.isArray(v) ? v as TemplateParam[] : undefined; } catch { return undefined; }
@@ -2839,6 +2920,21 @@ export class Store {
         message: r.message ?? undefined, createdAt: r.created_at, ...(parameters ? { parameters } : {}),
       };
     });
+  }
+
+  /**
+   * How many shares wait in this owner's inbox (listInbox's, all of them): the
+   * inbox's badge (HB-1167). Each half counted on its own index, as
+   * INBOX_ROWS finds them; the two never hold the same share.
+   */
+  countInbox(ownerId: string, email?: string): number {
+    if (!ownerId.startsWith('user-')) return 0;
+    return (this.db
+      .prepare(
+        `SELECT (SELECT COUNT(*) FROM agent_shares WHERE to_owner = @owner AND status = 'pending')
+              + (SELECT COUNT(*) FROM agent_shares WHERE to_owner IS NULL AND to_email = @email COLLATE NOCASE AND status = 'pending') AS n`,
+      )
+      .get({ owner: ownerId, email: email ?? '\u0000' }) as { n: number }).n;
   }
 
   /** A share the given owner may act on (theirs by owner or unclaimed email). */
@@ -3867,7 +3963,7 @@ export class Store {
         `INSERT INTO invites (id, agent_id, code, role, created_by, created_at, expires_at, expect_handle, web_chat)
          VALUES (@id, @agentId, @code, @role, @createdBy, @createdAt, @expiresAt, @expectHandle, @webChat)`,
       )
-      .run({ ...i, expectHandle: normalizeHandle(i.expectHandle) ?? null, webChat: i.webChat ? 1 : 0 });
+      .run({ ...i, expectHandle: expectedHandle(i.expectHandle) ?? null, webChat: i.webChat ? 1 : 0 });
   }
 
   getInviteByCode(code: string):
@@ -3890,7 +3986,8 @@ export class Store {
       code: r.code,
       role: r.role,
       expiresAt: r.expires_at,
-      expectHandle: r.expect_handle ?? undefined,
+      // Read as it is matched: one kept by an older release as typed (a link) is its name, or names nobody.
+      expectHandle: expectedHandle(r.expect_handle),
       redeemedAt: r.redeemed_at ?? undefined,
       webChat: r.web_chat === 1,
     };
@@ -3909,6 +4006,11 @@ export class Store {
       )
       .run(at, redeemedBy, code);
     return res.changes === 1;
+  }
+
+  /** The ids of the invites to this agent that this person joined by (its knock windows are `knock:<id>`). */
+  inviteIdsRedeemedBy(agentId: string, userId: string): string[] {
+    return (this.db.prepare(`SELECT id FROM invites WHERE agent_id = ? AND redeemed_by = ?`).all(agentId, userId) as Array<{ id: string }>).map((r) => r.id);
   }
 
   /** Burn every outstanding invite for an agent (used on delete). */
@@ -4484,10 +4586,6 @@ export class Store {
   moveModelChangeGuard(id: string, from: string, to: string): boolean {
     return this.db.prepare(`UPDATE model_changes SET guard_proposal_id = ? WHERE id = ? AND guard_proposal_id = ?`).run(to, id, from).changes === 1;
   }
-  /** Give back a claim whose card could not be written, so the next pass files it. */
-  releaseModelChangeGuard(id: string, proposalId: string): void {
-    this.db.prepare(`UPDATE model_changes SET guard_proposal_id = NULL WHERE id = ? AND guard_proposal_id = ?`).run(id, proposalId);
-  }
   /** Confirmed set_model cards (the start-up backfill reads them; a week is all the table keeps). */
   confirmedModelProposals(): Array<{ id: string; ownerId: string; record: unknown; outcome?: string; resolvedAtMs?: number }> {
     const rows = this.db.prepare(`SELECT id, owner_id, record, outcome, resolved_at_ms FROM mgmt_proposals WHERE status = 'confirmed' ORDER BY resolved_at_ms`)
@@ -4502,34 +4600,42 @@ export class Store {
     return this.db.prepare(`DELETE FROM model_changes WHERE at < ?`).run(beforeIso).changes;
   }
 
-  managedCron(agentId: string, name: string): { jobId?: string; at: string; messageHash?: string } | undefined {
-    const r = this.db.prepare(`SELECT job_id, at, message_hash FROM managed_crons WHERE agent_id = ? AND name = ?`).get(agentId, name) as { job_id: string | null; at: string; message_hash: string | null } | undefined;
-    return r ? { jobId: r.job_id ?? undefined, at: r.at, ...(r.message_hash ? { messageHash: r.message_hash } : {}) } : undefined;
+  /** `afterCopy`: recorded after the copy its volume was last replaced by, and not looked for since (matchManagedCronsToCopy). */
+  managedCron(agentId: string, name: string): { jobId?: string; at: string; messageHash?: string; afterCopy?: true } | undefined {
+    const r = this.db.prepare(`SELECT job_id, at, message_hash, after_copy FROM managed_crons WHERE agent_id = ? AND name = ?`).get(agentId, name) as { job_id: string | null; at: string; message_hash: string | null; after_copy: number } | undefined;
+    return r ? { jobId: r.job_id ?? undefined, at: r.at, ...(r.message_hash ? { messageHash: r.message_hash } : {}), ...(r.after_copy ? { afterCopy: true as const } : {}) } : undefined;
   }
   setManagedCron(agentId: string, name: string, jobId: string | undefined, at: string, messageHash?: string): void {
-    this.db.prepare(`INSERT INTO managed_crons (agent_id, name, job_id, at, message_hash) VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(agent_id, name) DO UPDATE SET job_id = excluded.job_id, at = excluded.at, message_hash = excluded.message_hash`).run(agentId, name, jobId ?? null, at, messageHash ?? null);
+    this.db.prepare(`INSERT INTO managed_crons (agent_id, name, job_id, at, message_hash, after_copy) VALUES (?, ?, ?, ?, ?, 0)
+      ON CONFLICT(agent_id, name) DO UPDATE SET job_id = excluded.job_id, at = excluded.at, message_hash = excluded.message_hash, after_copy = 0`).run(agentId, name, jobId ?? null, at, messageHash ?? null);
   }
   /**
    * Its volume was replaced by a copy made at `copiedAt` (ms): its tasks are
-   * the copy's now. One recorded after the copy was made cannot be in it, so
-   * its record goes and the next build makes it again (or finds it by its
-   * name). One recorded before keeps its record, so one the owner deleted by
-   * hand before the copy stays deleted, but not its wording mark: the copy's
-   * may be older, and the next build writes it again. Before, the records
-   * stayed as they were and the next build kept a task the restore had taken
-   * away, or its old wording, for good (HB-1123).
+   * the copy's now. One recorded after the copy was made may not be in it,
+   * so its record is marked (after_copy) and the next build looks for the
+   * task by its id, then by its name, and makes it again only when neither
+   * is there (modelReview.ts syncModelReviewCron). Its record was dropped
+   * before, and one recorded after the copy that the copy held all the same
+   * (recorded when a build found it by its name), renamed by hand since,
+   * got a second one (HB-1317). One recorded before keeps its record, so
+   * one the owner deleted by hand before the copy stays deleted, but not
+   * its wording mark: the copy's may be older, and the next build writes it
+   * again. Before HB-1123 the records stayed as they were and the next
+   * build kept a task the restore had taken away, or its old wording, for
+   * good.
    */
-  matchManagedCronsToCopy(agentId: string, copiedAt: number): { dropped: string[]; rewritten: string[] } {
+  matchManagedCronsToCopy(agentId: string, copiedAt: number): { unsure: string[]; rewritten: string[] } {
     const rows = this.db.prepare(`SELECT name, at FROM managed_crons WHERE agent_id = ?`).all(agentId) as Array<{ name: string; at: string }>;
     const after = (at: string) => { const t = Date.parse(at); return !Number.isFinite(t) || t > copiedAt; };
-    const dropped = rows.filter((r) => after(r.at)).map((r) => r.name);
+    const unsure = rows.filter((r) => after(r.at)).map((r) => r.name);
     const rewritten = rows.filter((r) => !after(r.at)).map((r) => r.name);
     this.db.transaction(() => {
-      for (const name of dropped) this.db.prepare(`DELETE FROM managed_crons WHERE agent_id = ? AND name = ?`).run(agentId, name);
-      this.db.prepare(`UPDATE managed_crons SET message_hash = NULL WHERE agent_id = ?`).run(agentId);
+      // Each by this copy: one marked by an older copy's restore, recorded before this one, is in it or was deleted by hand.
+      const mark = this.db.prepare(`UPDATE managed_crons SET message_hash = NULL, after_copy = ? WHERE agent_id = ? AND name = ?`);
+      for (const name of unsure) mark.run(1, agentId, name);
+      for (const name of rewritten) mark.run(0, agentId, name);
     })();
-    return { dropped, rewritten };
+    return { unsure, rewritten };
   }
 
   /** An adopt to re-point once its agent is running; the newest adopt replaces an older one. */
@@ -4761,10 +4867,10 @@ export class Store {
   // ---- what skill practice spent (practice_usage, HB-0933) ----------------
   /** One practice run's calls, a row per model; a run written twice keeps its first. */
   addPracticeUsage(rows: PracticeUsageRow[]): void {
-    const put = this.db.prepare(`INSERT OR IGNORE INTO practice_usage (agent_id, run, model, profile_id, at, day, skill, status, calls, input, output, cache_read, cache_write, usd, unpriced_tokens)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    const put = this.db.prepare(`INSERT OR IGNORE INTO practice_usage (agent_id, run, model, profile_id, at, day, skill, status, calls, input, output, cache_read, cache_write, usd, unpriced_tokens, refused)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     this.db.transaction(() => {
-      for (const r of rows) put.run(r.agentId, r.run, r.model, r.profileId ?? null, r.at, r.day, r.skill, r.status, r.calls, r.input, r.output, r.cacheRead, r.cacheWrite, r.usd, r.unpricedTokens);
+      for (const r of rows) put.run(r.agentId, r.run, r.model, r.profileId ?? null, r.at, r.day, r.skill, r.status, r.calls, r.input, r.output, r.cacheRead, r.cacheWrite, r.usd, r.unpricedTokens, r.refused ?? 0);
     })();
   }
   /** Practice runs' rows for these agents from `fromIso` (every one kept, when omitted), oldest first. */
@@ -4773,9 +4879,9 @@ export class Store {
     if (!ids.length) return [];
     return (this.db.prepare(`SELECT * FROM practice_usage WHERE at >= ? AND agent_id IN (SELECT value FROM json_each(?)) ORDER BY agent_id, at, run, model`).all(fromIso, JSON.stringify(ids)) as Array<{
       agent_id: string; run: string; model: string; profile_id: string | null; at: string; day: string; skill: string; status: string;
-      calls: number; input: number; output: number; cache_read: number; cache_write: number; usd: number; unpriced_tokens: number;
+      calls: number; input: number; output: number; cache_read: number; cache_write: number; usd: number; unpriced_tokens: number; refused: number;
     }>).map((r) => ({ agentId: r.agent_id, run: r.run, model: r.model, ...(r.profile_id ? { profileId: r.profile_id } : {}), at: r.at, day: r.day, skill: r.skill, status: r.status,
-      calls: r.calls, input: r.input, output: r.output, cacheRead: r.cache_read, cacheWrite: r.cache_write, usd: r.usd, unpricedTokens: r.unpriced_tokens }));
+      calls: r.calls, input: r.input, output: r.output, cacheRead: r.cache_read, cacheWrite: r.cache_write, usd: r.usd, unpricedTokens: r.unpriced_tokens, ...(r.refused > 0 ? { refused: r.refused } : {}) }));
   }
   /** True when the mark is new. */
   addBudgetMark(scope: string, month: string, level: number, usd: number, at: string): boolean {
@@ -4801,14 +4907,7 @@ export class Store {
     if (opts.open) where.push('resumed_at IS NULL');
     if (opts.month) { where.push('month = ?'); args.push(opts.month); }
     return (this.db.prepare(`SELECT * FROM budget_pauses ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY paused_at`).all(...args) as any[])
-      .map((r) => this.#pauseRow(r));
-  }
-  #pauseRow(r: any): BudgetPauseRow {
-    return { agentId: r.agent_id, month: r.month, scope: r.scope, pausedAt: r.paused_at, kind: r.kind === 'cheaper' ? 'cheaper' as const : 'pause' as const,
-      ...(r.already_stopped ? { alreadyStopped: true } : {}),
-      ...(r.kind === 'cheaper' ? { fromModel: r.from_model ?? null } : {}), ...(r.to_model ? { toModel: r.to_model } : {}),
-      ...(r.replies ? { replies: safeParse(r.replies) as Record<string, { u: number; at: number }> } : {}),
-      ...(r.resumed_at ? { resumedAt: r.resumed_at } : {}), ...(r.resumed_by ? { resumedBy: r.resumed_by } : {}) };
+      .map(rowToBudgetPause);
   }
   getBudgetPause(agentId: string, month: string): BudgetPauseRow | undefined {
     return this.listBudgetPauses({ month }).find((p) => p.agentId === agentId);
@@ -4816,7 +4915,7 @@ export class Store {
   /** Its open pauses and switches, of any month, oldest first: one stays open until a pass (or Start) ends it (HB-1011). */
   openBudgetPauses(agentId: string): BudgetPauseRow[] {
     return (this.db.prepare(`SELECT * FROM budget_pauses WHERE agent_id = ? AND resumed_at IS NULL ORDER BY month, paused_at`).all(agentId) as any[])
-      .map((r) => this.#pauseRow(r));
+      .map(rowToBudgetPause);
   }
   /**
    * Paused (again) this month: an earlier resume that was not the owner's own is replaced.
@@ -4888,14 +4987,18 @@ export class Store {
   disownBudgetPause(agentId: string): boolean {
     return this.db.prepare(`UPDATE budget_pauses SET already_stopped = 1 WHERE agent_id = ? AND kind = 'pause' AND resumed_at IS NULL AND already_stopped = 0`).run(agentId).changes > 0;
   }
-  /** An open switch to a cheaper model that did not take (its runtime refused it): as if it was never made. */
-  dropCheaperPause(agentId: string, month: string): void {
-    this.db.prepare(`DELETE FROM budget_pauses WHERE agent_id = ? AND month = ? AND kind = 'cheaper' AND resumed_at IS NULL`).run(agentId, month);
+  /**
+   * An open switch to a cheaper model that did not take (its runtime refused
+   * it): as if it was never made. Only the one `scope`'s budget made: another
+   * budget's switch of that month was dropped with it (HB-1444).
+   */
+  dropCheaperPause(agentId: string, month: string, scope: string): void {
+    this.db.prepare(`DELETE FROM budget_pauses WHERE agent_id = ? AND month = ? AND scope = ? AND kind = 'cheaper' AND resumed_at IS NULL`).run(agentId, month, scope);
   }
   /** Its open switch to a cheaper model, if any (any month: one stays open until a pass ends it). */
   openCheaperPause(agentId: string): BudgetPauseRow | undefined {
     const r = this.db.prepare(`SELECT * FROM budget_pauses WHERE agent_id = ? AND kind = 'cheaper' AND resumed_at IS NULL ORDER BY paused_at DESC LIMIT 1`).get(agentId);
-    return r ? this.#pauseRow(r) : undefined;
+    return r ? rowToBudgetPause(r) : undefined;
   }
   /**
    * The model an open switch to a cheaper model puts back when it ends
@@ -4904,6 +5007,14 @@ export class Store {
    */
   setCheaperPauseFrom(agentId: string, onModel: string, fromModel: string | null): boolean {
     return this.db.prepare(`UPDATE budget_pauses SET from_model = ? WHERE agent_id = ? AND kind = 'cheaper' AND resumed_at IS NULL AND to_model = ?`).run(fromModel, agentId, onModel).changes > 0;
+  }
+  /**
+   * A month's row already closed for one reason, put down to another
+   * (budgets.ts ownModelOverClass: a class's ending taken over by its
+   * owner). True when there was one.
+   */
+  retagBudgetPause(agentId: string, month: string, from: string, to: string): boolean {
+    return this.db.prepare(`UPDATE budget_pauses SET resumed_by = ? WHERE agent_id = ? AND month = ? AND resumed_at IS NOT NULL AND resumed_by = ?`).run(to, agentId, month, from).changes > 0;
   }
   resumeBudgetPause(agentId: string, month: string, at: string, by: string): void {
     this.db.prepare(`UPDATE budget_pauses SET resumed_at = ?, resumed_by = ? WHERE agent_id = ? AND month = ? AND resumed_at IS NULL`).run(at, by, agentId, month);
@@ -5067,13 +5178,28 @@ export class Store {
       .get(profileId, ...agentIds) as { at: string | null };
     return r.at ?? undefined;
   }
-  pruneSourceUsage(beforeIso: string): void {
+  /**
+   * `changesBeforeIso`: the changes of source an agent ran on, kept as long
+   * as the hour buckets its spend is charted from (HB-1180).
+   *
+   * Then a deleted source's tombstone goes once nothing it is read for is
+   * left (formerAIProfile, HB-1179): no reading here (8 days), no change of
+   * source from or to it (31 days), no practice run on it (100 days, pruned
+   * with the cost days), and no agent not deleted that runs it (one
+   * archived, or not rebuilt since its switch: tokenHealth.ts
+   * runningModelOf). An agent's record of the source before its last
+   * change is not one: the change is in applied_source_changes as long as
+   * any hour it splits is charted. Never before `beforeIso`: kept at least
+   * as long as the readings. Before, every tombstone was kept for ever.
+   */
+  pruneSourceUsage(beforeIso: string, changesBeforeIso = beforeIso): void {
     this.db.transaction(() => {
       this.db.prepare(`DELETE FROM model_call_hours WHERE hour < ?`).run(beforeIso.slice(0, 13));
       this.db.prepare(`DELETE FROM model_call_slots WHERE slot < ?`).run(beforeIso.slice(0, 16));
       this.db.prepare(`DELETE FROM limit_hits WHERE at < ?`).run(beforeIso);
       this.db.prepare(`DELETE FROM token_samples WHERE at < ?`).run(beforeIso);
-      this.db.prepare(`DELETE FROM applied_source_changes WHERE at < ?`).run(beforeIso);
+      this.db.prepare(`DELETE FROM applied_source_changes WHERE at < ?`).run(changesBeforeIso);
+      this.db.prepare(`DELETE FROM ai_profile_tombstones WHERE deleted_at < @before AND NOT ${tombstoneStillNamed()}`).run({ before: beforeIso });
     })();
   }
 
@@ -5366,15 +5492,42 @@ export class Store {
       return this.connectionCleanup(c.secretRef);
     })();
   }
-  /** One token still to end, or undefined once it has. */
+  /**
+   * A token to end that is not a deleted connection's: the one a reconnect
+   * with another Google Cloud project's client replaced (HB-1396), under a
+   * secret ref of its own. Recorded before the reconnect's own revoke, which
+   * settles it or counts as its first try (`connectionCleanupFailed`).
+   */
+  recordConnectionCleanup(c: { secretRef: string; kind: string; ownerId: string; email: string; clientId: string | null }): void {
+    this.db.prepare(
+      `INSERT OR IGNORE INTO connection_cleanups (secret_ref, kind, owner_id, email, client_id, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(c.secretRef, c.kind, c.ownerId, c.email, c.clientId, new Date().toISOString());
+  }
+  /** One token still to end, or undefined once it has (or once the pass gave it up). */
   connectionCleanup(secretRef: string): ConnectionCleanup | undefined {
-    const r = this.db.prepare(`SELECT * FROM connection_cleanups WHERE secret_ref = ?`).get(secretRef) as any;
-    return r ? { secretRef: r.secret_ref, kind: r.kind, ownerId: r.owner_id, email: r.email, clientId: r.client_id ?? null, createdAt: r.created_at, tries: r.tries, triedAt: r.tried_at ?? null, error: r.error ?? null } : undefined;
+    const r = this.db.prepare(`SELECT * FROM connection_cleanups WHERE secret_ref = ? AND given_up_at IS NULL`).get(secretRef) as any;
+    return r ? cleanupOf(r) : undefined;
   }
   /** Every token still to end, the oldest first. */
   connectionCleanups(): ConnectionCleanup[] {
-    return (this.db.prepare(`SELECT secret_ref FROM connection_cleanups ORDER BY created_at, secret_ref`).all() as Array<{ secret_ref: string }>)
+    return (this.db.prepare(`SELECT secret_ref FROM connection_cleanups WHERE given_up_at IS NULL ORDER BY created_at, secret_ref`).all() as Array<{ secret_ref: string }>)
       .flatMap((r) => this.connectionCleanup(r.secret_ref) ?? []);
+  }
+  /**
+   * An account's tokens still to end and those the pass gave up (`givenUpAt`),
+   * the oldest first: the Connections page's list of access still being
+   * removed (HB-1336).
+   */
+  connectionCleanupsOf(ownerId: string): ConnectionCleanup[] {
+    return (this.db.prepare(`SELECT * FROM connection_cleanups WHERE owner_id = ? ORDER BY created_at, secret_ref`).all(ownerId) as any[]).map(cleanupOf);
+  }
+  /** The pass stopped asking: its token is deleted, the row kept as its owner's notice until they mark it done (HB-1336). */
+  giveUpConnectionCleanup(secretRef: string, error: string, at = new Date().toISOString()): void {
+    this.db.prepare(`UPDATE connection_cleanups SET given_up_at = ?, tries = tries + 1, tried_at = ?, error = ? WHERE secret_ref = ?`).run(at, at, error.slice(0, 300), secretRef);
+  }
+  /** Its owner marked a given-up one done. False: no such notice of theirs (one still being asked is not theirs to drop). */
+  dismissGivenUpCleanup(ownerId: string, secretRef: string): boolean {
+    return this.db.prepare(`DELETE FROM connection_cleanups WHERE owner_id = ? AND secret_ref = ? AND given_up_at IS NOT NULL`).run(ownerId, secretRef).changes === 1;
   }
   /** A try at ending it that did not finish, and why. */
   connectionCleanupFailed(secretRef: string, error: string, at = new Date().toISOString()): void {
@@ -5972,6 +6125,18 @@ export class Store {
     })();
   }
 
+  /**
+   * An imported agent ran on another AI source before it came here (the other
+   * machine's, or an earlier one there), and its transcripts came with it: its
+   * lifetime totals include that time, so it is marked as one whose container
+   * ran on an earlier source is (usageReadings' ranOnAnEarlierSource, HB-1551).
+   * Only a record that has run on no source here: what is kept from then on is
+   * this machine's, as setAgentApplied keeps it.
+   */
+  markRanOnAnotherSource(id: string, sourceId: string): void {
+    this.db.prepare(`UPDATE agents SET applied_profile_prev = ? WHERE id = ? AND applied_profile_id IS NULL`).run(sourceId, id);
+  }
+
   /** The agent's changes of applied source the usage history still covers, oldest first. */
   appliedSourceChanges(agentId: string): Array<{ at: string; from: string; to: string }> {
     return (this.db.prepare(`SELECT at, from_profile, to_profile FROM applied_source_changes WHERE agent_id = ? ORDER BY at`).all(agentId) as Array<{ at: string; from_profile: string; to_profile: string }>)
@@ -6091,18 +6256,27 @@ export class Store {
 
   // ---- the tasks an adopt carried (adopt_carried_tasks, HB-0985) ----------
 
-  /** Every source task an adopt gave this agent, and the copy each became (undefined: not known). */
-  carriedTasks(agentId: string): Array<{ sourceAgent: string; sourceId: string; copyId?: string }> {
-    return (this.db.prepare(`SELECT source_agent, source_id, copy_id FROM adopt_carried_tasks WHERE agent_id = ? AND source_agent NOT IN ('*', '+')`)
-      .all(agentId) as Array<{ source_agent: string; source_id: string; copy_id: string | null }>)
-      .map((r) => ({ sourceAgent: r.source_agent, sourceId: r.source_id, ...(r.copy_id ? { copyId: r.copy_id } : {}) }));
+  /**
+   * Every source task an adopt gave this agent, the copy each became
+   * (undefined: not known), and `fingerprint`, what the source task held
+   * then (cronImport.ts carriedFingerprint; undefined: carried before it was
+   * kept, HB-1200).
+   */
+  carriedTasks(agentId: string): Array<{ sourceAgent: string; sourceId: string; copyId?: string; fingerprint?: string }> {
+    return (this.db.prepare(`SELECT source_agent, source_id, copy_id, fingerprint FROM adopt_carried_tasks WHERE agent_id = ? AND source_agent NOT IN ('*', '+')`)
+      .all(agentId) as Array<{ source_agent: string; source_id: string; copy_id: string | null; fingerprint: string | null }>)
+      .map((r) => ({ sourceAgent: r.source_agent, sourceId: r.source_id, ...(r.copy_id ? { copyId: r.copy_id } : {}), ...(r.fingerprint ? { fingerprint: r.fingerprint } : {}) }));
   }
 
-  /** An adopt gave this agent that source task, as `copyId` (undefined: the gateway did not say). The newest copy replaces an older one. */
-  recordCarriedTask(agentId: string, sourceAgent: string, sourceId: string, copyId: string | undefined): void {
-    this.db.prepare(`INSERT INTO adopt_carried_tasks (agent_id, source_agent, source_id, copy_id, at) VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(agent_id, source_agent, source_id) DO UPDATE SET copy_id = excluded.copy_id, at = excluded.at`)
-      .run(agentId, sourceAgent, sourceId, copyId ?? null, new Date().toISOString());
+  /**
+   * An adopt gave this agent that source task, as `copyId` (undefined: the
+   * gateway did not say), holding what `fingerprint` says. The newest copy
+   * replaces an older one, its fingerprint with it.
+   */
+  recordCarriedTask(agentId: string, sourceAgent: string, sourceId: string, copyId: string | undefined, fingerprint?: string): void {
+    this.db.prepare(`INSERT INTO adopt_carried_tasks (agent_id, source_agent, source_id, copy_id, at, fingerprint) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(agent_id, source_agent, source_id) DO UPDATE SET copy_id = excluded.copy_id, at = excluded.at, fingerprint = excluded.fingerprint`)
+      .run(agentId, sourceAgent, sourceId, copyId ?? null, new Date().toISOString(), fingerprint ?? null);
   }
 
   /** An adopt's copies may be on this agent unrecorded: an older release made it, or an adopt carried tasks that had no ids. */
@@ -6142,6 +6316,16 @@ export class Store {
   agentHold(agentId: string, kind: AgentHoldKind): string | undefined {
     const row = this.db.prepare(`SELECT value, at FROM agent_holds WHERE agent_id = ? AND kind = ?`).get(agentId, kind) as { value: string; at: string } | undefined;
     return row && !this.#hidden(kind, row.at) ? row.value : undefined;
+  }
+  /**
+   * Keep `to` in place of `from`, only while `from` is what is kept: true
+   * when it was. A read, a change and this, so that two processes at once
+   * (a deploy's overlap) never both take the same thing out of one list
+   * (HB-1520): the second finds it changed, and reads it again.
+   */
+  replaceAgentHold(agentId: string, kind: AgentHoldKind, from: string, to: string): boolean {
+    return this.db.prepare(`UPDATE agent_holds SET value = ?, at = ? WHERE agent_id = ? AND kind = ? AND value = ?`)
+      .run(to, new Date().toISOString(), agentId, kind, from).changes > 0;
   }
   /** Let it go. `onlyIf`: only while it is still this value (one kept since is another's). True when a row went. */
   clearAgentHold(agentId: string, kind: AgentHoldKind, onlyIf?: string): boolean {
@@ -6543,7 +6727,7 @@ export class Store {
       )
       .get(agentId, userId) as { h: string | null; v: string | null } | undefined;
     // `byAppInvite`: there is one, even when it names neither (joined before either was recorded).
-    return r ? { handle: r.h ?? undefined, via: r.v ?? undefined, byAppInvite: true } : {};
+    return r ? { handle: expectedHandle(r.h), via: r.v ?? undefined, byAppInvite: true } : {};
   }
 
   /** Anyone who finds the bot may knock, instead of invitees and people the
@@ -6608,7 +6792,7 @@ export class Store {
            ON CONFLICT(agent_id, seat) DO UPDATE SET until = excluded.until,
              opened_for = excluded.opened_for, expect = excluded.expect, generation = excluded.generation, exclude_ids = excluded.exclude_ids`,
       )
-      .run(agentId, Store.pairingSeat(opts?.kind, openedFor), until, openedFor ?? null, normalizeHandle(opts?.expect) ?? null, generation,
+      .run(agentId, Store.pairingSeat(opts?.kind, openedFor), until, openedFor ?? null, expectedHandle(opts?.expect) ?? null, generation,
         opts?.excludeIds?.length ? JSON.stringify({ generation, ids: opts.excludeIds }) : null);
     return generation;
   }
@@ -6631,7 +6815,7 @@ export class Store {
       .filter((r) => Date.parse(r.until) > now.getTime())
       .map((r) => {
         const excludeIds = ids(r.exclude_ids, r.generation);
-        return { seat: r.seat, until: r.until, openedFor: r.opened_for ?? undefined, expect: r.expect ?? undefined, generation: r.generation ?? undefined, ...(excludeIds?.length ? { excludeIds } : {}) };
+        return { seat: r.seat, until: r.until, openedFor: r.opened_for ?? undefined, expect: expectedHandle(r.expect), generation: r.generation ?? undefined, ...(excludeIds?.length ? { excludeIds } : {}) };
       });
   }
 
@@ -7033,7 +7217,15 @@ export interface StoredSnapshot {
 export interface ConnectionCleanup {
   secretRef: string; kind: string; ownerId: string; email: string; clientId: string | null; createdAt: string;
   tries: number; triedAt: string | null; error: string | null;
+  /** When the pass gave up asking Google (its token deleted): a notice only (HB-1336). */
+  givenUpAt: string | null;
 }
+/** The owner of a token still to end whose account was removed (deleteLocalAccount): nobody signs in as it. */
+export const REMOVED_OWNER = '';
+const cleanupOf = (r: any): ConnectionCleanup => ({
+  secretRef: r.secret_ref, kind: r.kind, ownerId: r.owner_id, email: r.email, clientId: r.client_id ?? null, createdAt: r.created_at,
+  tries: r.tries, triedAt: r.tried_at ?? null, error: r.error ?? null, givenUpAt: r.given_up_at ?? null,
+});
 
 /** One row of `operations` (orchestrator/lifecycle/operations.ts has the meaning of each field). */
 export interface OperationRow {
@@ -7096,10 +7288,64 @@ function safeJson<T>(raw: unknown, fallback: T): T {
   }
 }
 
-/** A Telegram handle or numeric id, in one comparable shape: lower-case, no @. */
+/**
+ * The rowids of the shares waiting in one owner's inbox (listInbox, HB-1167):
+ * the ones bound to them, by shares_to_owner, and the ones to their address
+ * that no one has claimed yet, by shares_to_email_nocase. Two halves that
+ * never hold the same share (to_owner is set or it is not), each on its index.
+ * As one OR the planner walked the whole table.
+ */
+const INBOX_ROWS = `SELECT rowid FROM agent_shares WHERE to_owner = @owner AND status = 'pending'
+  UNION ALL
+  SELECT rowid FROM agent_shares WHERE to_owner IS NULL AND to_email = @email COLLATE NOCASE AND status = 'pending'`;
+
+/** A link to someone on Telegram (https://t.me/name, t.me/name, telegram.me/name): the name is after it. */
+const HANDLE_LINK = /^(?:https?:\/\/)?(?:www\.)?(?:t|telegram)\.me\//i;
+
+/** A handle's longest, without its @ or the link it was pasted as (handleText): longer is refused (memberRoutes.ts). */
+export const HANDLE_MAX = 64;
+
+/**
+ * A handle as it was given, without its @s (and the spaces among them) or the
+ * Telegram link it was pasted as (and what follows the name in the link:
+ * `/…`, `?start=…`, `#…`), its case kept (an answer's `for`). Nothing left:
+ * an empty string. Never starts with an @ (NAMES_NOBODY does), and the same
+ * read again gives the same (HB-1439 review: `@@name` was kept as `@name` and
+ * expected as `name`; `@ @ @x` was `@x`, then `x`).
+ */
+export function handleText(v: string | undefined | null): string {
+  let t = String(v ?? '').replace(/^[@\s]+/, '');
+  const link = HANDLE_LINK.exec(t);
+  if (link) t = t.slice(link[0].length).split(/[/?#]/, 1)[0]!;
+  return t.replace(/^[@\s]+/, '').trim();
+}
+
+/** A Telegram handle or numeric id, in one comparable shape: lower-case, no @, no t.me/ link before it. */
 export function normalizeHandle(v: string | undefined | null): string | undefined {
-  const t = String(v ?? '').trim().replace(/^@/, '').toLowerCase();
+  const t = handleText(v).toLowerCase();
   return t || undefined;
+}
+
+/**
+ * What a window or an invite expects when the handle it was given names
+ * nobody: a bare `t.me/` an older release kept as typed. Unmatchable by
+ * construction: what anyone's name or id is compared as (normalizeHandle)
+ * never starts with an @, and this does; read again (expectedHandle) it is
+ * itself. Two of them, not one: v2.192.0 strips one @ before it compares, so
+ * after a downgrade this is the name `@`, which matches nobody there either,
+ * where a lone `@` would be none there, and anyone (HB-1439 review).
+ */
+export const NAMES_NOBODY = '@@';
+
+/**
+ * The handle a window or an invite expects, as it is kept and as it is read
+ * back: none when none was given; its name (normalizeHandle) when it names
+ * someone; NAMES_NOBODY when one was given that names nobody. Never none for
+ * one given: that let in whoever wrote first (HB-1439 review).
+ */
+export function expectedHandle(v: string | undefined | null): string | undefined {
+  if (!String(v ?? '').trim()) return undefined;
+  return normalizeHandle(v) ?? NAMES_NOBODY;
 }
 
 /**
@@ -7145,6 +7391,15 @@ function rowToIncident(r: any): TokenIncidentRow {
   };
 }
 
+/** A module function, not a private method: tests wrap a store with Object.create(store), where a private method throws (HB-1274, as rowToIncident since HB-1004). */
+function rowToBudgetPause(r: any): BudgetPauseRow {
+  return { agentId: r.agent_id, month: r.month, scope: r.scope, pausedAt: r.paused_at, kind: r.kind === 'cheaper' ? 'cheaper' as const : 'pause' as const,
+    ...(r.already_stopped ? { alreadyStopped: true } : {}),
+    ...(r.kind === 'cheaper' ? { fromModel: r.from_model ?? null } : {}), ...(r.to_model ? { toModel: r.to_model } : {}),
+    ...(r.replies ? { replies: safeParse(r.replies) as Record<string, { u: number; at: number }> } : {}),
+    ...(r.resumed_at ? { resumedAt: r.resumed_at } : {}), ...(r.resumed_by ? { resumedBy: r.resumed_by } : {}) };
+}
+
 function budgetRow(r: any): BudgetRow {
   return {
     scope: r.scope, ownerId: r.owner_id, usd: r.usd, atLimit: r.at_limit === 'pause' || r.at_limit === 'cheaper' ? r.at_limit : 'warn', setAt: r.set_at, ...(r.set_by ? { setBy: r.set_by } : {}),
@@ -7172,6 +7427,8 @@ export interface PracticeUsageRow {
   cacheWrite: number;
   usd: number;
   unpricedTokens: number;
+  /** Calls its source refused (a rate limit), which answered nothing (HB-1497); none when 0. */
+  refused?: number;
 }
 
 /** A monthly budget (budgets.ts): scope is an agent's id, or 'machine'. */
@@ -7193,7 +7450,7 @@ export interface SpendAlertRow {
 }
 /**
  * An agent a budget paused, or moved to a cheaper model (budgets.ts).
- * resumedBy: owner | new-month | budget-raised | budget-changed | started | gone.
+ * resumedBy: owner | new-month | budget-raised | budget-changed | started | gone | class-source (its class moved it to another source, budgets.ts CLASS_SOURCE) | class-source-cheapest (and judged there, nothing cheaper: CLASS_SOURCE_CHEAPEST).
  */
 export interface BudgetPauseRow {
   agentId: string;

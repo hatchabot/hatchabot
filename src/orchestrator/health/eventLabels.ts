@@ -170,7 +170,11 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   // ---- the rest of the trail (review 2026-09-25: every emitted event has words) ----
   'a2a.consult': (d) => `asked ${String(d.peer ?? d.target ?? 'another agent')}`,
   'a2a.consulted': (d) => `answered ${String(d.from ?? d.peer ?? 'another agent')}`,
-  'adopt.deferred_done': (d) => `the adopted workspace's paths and tasks were brought over once it was running (${Number(d.carried ?? 0)} of ${Number(d.total ?? 0)} tasks)`,
+  // `carried` counts the ones changed in the old workspace too (their copies are there), said apart (HB-1200).
+  'adopt.deferred_done': (d) => {
+    const changed = Number(d.changed) > 0 ? Number(d.changed) : 0;
+    return `the adopted workspace's paths and tasks were brought over once it was running (${Math.max(0, Number(d.carried ?? 0) - changed)} of ${Number(d.total ?? 0)} tasks${changed ? `; ${changed} changed in the old workspace since ${changed > 1 ? 'they were' : 'it was'} carried — not brought` : ''})`;
+  },
   'adopt.deferred_waiting': 'the adopted tasks wait for the agent\'s gateway to answer; it is tried again within the hour, for a day',
   'adopt.deferred_failed': (d) => `${Number(d.failed ?? 0)} of ${Number(d.total ?? 0)} adopted tasks could not be brought over${d.notReady ? ' (the gateway did not answer for a day)' : ''}`,
   'adopt.import_failed': (d) => `adopting the workspace failed: ${String(d.error ?? '')}`.trim(),
@@ -237,15 +241,16 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'access.verified': (d) => d.notCheckable ? `what it can reach not checked: ${String(d.notCheckable)}` : 'checked what it can reach',
   'connection.linked': (d) => `${String(d.kind ?? 'a')} account connected`,
   'connection.removed': (d) => `${String(d.kind ?? 'a')} account removed`,
-  'connection.revoke_given_up': (d) => `Google never confirmed the revoke of a disconnected account's token in ${String(d.tries ?? 'many')} tries over ${String(d.days ?? 7)} days: Hatchabot deleted it, and its access is to be removed by hand in the Google Account${d.told ? ' (the owner was told)' : ''}`,
+  'connection.revoke_given_up': (d) => `Google never confirmed the revoke of ${d.replaced ? "a reconnected account's earlier token" : "a disconnected account's token"} in ${String(d.tries ?? 'many')} tries over ${String(d.days ?? 7)} days: Hatchabot deleted it, and its access is to be removed by hand in the Google Account${d.told ? ' (the owner was told)' : ''}`,
   'connection.token_ended': (d) => d.alreadyGone
-    ? "a disconnected account's token, left by an earlier try, is now removed: Google had ended it already"
-    : `a disconnected account's token, left by an earlier try, is now ${d.revoked ? 'revoked at Google and ' : ''}removed`,
+    ? `${d.replaced ? "a reconnected account's earlier token" : "a disconnected account's token"}, left by an earlier try, is now removed: Google had ended it already`
+    : `${d.replaced ? "a reconnected account's earlier token" : "a disconnected account's token"}, left by an earlier try, is now ${d.revoked ? 'revoked at Google and ' : ''}removed`,
   'connection.unlinked': (d) => `${String(d.kind ?? 'a')} account disconnected`,
+  'context.recover_offered_after_switch': (d) => `Recover context offered: the earlier conversation was not restored after the source switch${d.lost ? ` (${String(d.lost)} messages)` : ''}`,
   'context.reset_after_rebuild': 'started a fresh conversation after the rebuild',
   'cron.created': (d) => `task “${String(d.name ?? '')}” created`,
   'cron.edited': (d) => `task “${String(d.name ?? '')}” changed`,
-  'cron.migrate_already_present': 'a task was already brought over, so it was not added again',
+  'cron.migrate_already_present': (d) => (d.changed ? 'a task was already brought over and has changed in the old workspace since, so it was not brought again' : 'a task was already brought over, so it was not added again'),
   'cron.migrate_error': 'a task could not be brought over',
   'cron.migrate_failed': 'a task could not be brought over',
   'cron.migrate_gateway_not_ready': 'tasks not brought over yet — the gateway was not ready',
@@ -265,6 +270,11 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
     : 'the memory search service was turned on for this agent',
   'embed.move_all': 'every agent moved to the shared memory search',
   'export.restart_failed': 'did not restart after the export',
+  'export.cut_off': (d) => d.started
+    ? `started again${d.rebuilding ? ', by the rebuild it was owed' : ''}: a restart cut off its download, and no file was made`
+    : d.rebuilding
+      ? 'a restart cut off its download, and no file was made: its rebuild starts it'
+      : `a restart cut off its download, and it could not be started again: ${String(d.error ?? '')}`.trim(),
   'host.drain_stop_failed': 'an agent would not stop for the drain',
   'image.ensure': 'runtime image checked',
   'image.rebuilt_from_recipe': 'image rebuilt from its recipe',
@@ -287,6 +297,7 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'member.revoked': (d) => `${String(d.displayName ?? d.name ?? 'someone')} removed`,
   'member.telegram_linked': 'a member linked their Telegram',
   'member.welcome_failed': 'the welcome message did not send',
+  'member.windows_closed': 'the door stopped waiting for a removed member',
   'memory.checkpoint_failed': 'the conversation could not be written to memory',
   'memory.checkpoint_notified': 'told about the memory checkpoint',
   'migrate.done': 'moved to the other server',
@@ -451,8 +462,10 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'channel.name_abandoned': "its Telegram bot will not be named: Telegram refuses the bot's token (Settings → Messaging → Telegram)",
   'connection.materialize_failed': (d) => `a Google account could not be put into it${d.error ? ` — ${String(d.error)}` : ''}`,
   'connection.materialized': 'a Google account put into it',
-  'connection.removed_from_agent': (d) => d.alreadyGone ? 'a Google account was already gone from it' : 'a Google account taken out of it',
-  'connection.remove_failed': (d) => `a Google account could not be taken out of it${d.error ? ` — ${String(d.error)}` : ''}`,
+  'connection.removed_from_agent': (d) => d.beforeStart
+    ? 'a Google account taken out of it before it started (its start takes it out again and confirms it)'
+    : d.alreadyGone ? 'a Google account was already gone from it' : 'a Google account taken out of it',
+  'connection.remove_failed': (d) => `a Google account could not be taken out of it${d.beforeStart ? ' before it started (its start tries again)' : ''}${d.error ? ` — ${String(d.error)}` : ''}`,
   'embedder.keys_push_failed': "the agents' keys could not be copied to a runner's memory search service; the next change copies them again",
   'embedder.limit_restart': 'the memory search service restarted to take its new memory limit',
   'embedder.memory_restart': 'the memory search service restarted: it held most of its memory while idle',
@@ -465,6 +478,7 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'invite.knock_window': (d) => `an invite's half hour for a knock opened${d.named ? ' for the person it names' : ''}`,
   'member.room_grant_failed': (d) => `${String(d.kind ?? 'group chat')}: someone let in could not be added to its room now; the next rebuild adds them`,
   'member.room_granted': (d) => `${String(d.kind ?? 'group chat')}: someone let in added to its room`,
+  'member.grant_skipped': (d) => `${String(d.kind ?? 'chat app')}: someone no longer let in by the time their turn came was not added${d.what === 'rooms' ? ' to its rooms' : ''}`,
   'ops.drift_check_failed': "the managers' lockdown could not be checked this time",
   'ops.lockdown_drift': (d) => `the manager's lockdown was loosened (${String(d.problem ?? 'its tools changed')}): its key is suspended until a rebuild`,
   'ops.lockdown_revoke_failed': "the manager's lockdown was loosened, and its key could not be suspended; tried again next check",

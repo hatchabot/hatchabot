@@ -49,6 +49,9 @@ const MoveHost = z.object({ hostId: z.unknown().optional(), dropPin: z.boolean()
 const Rehost = z.object({ peerId: z.string().nullish(), allowDroppedPin: z.boolean().nullish(), aiProfileId: z.unknown().optional() }).nullish();
 /** POST /v1/agents/:id/send (HB-0814): the recipient's address and a note. */
 const SendShare = z.object({ toEmail: z.string().nullish(), message: z.string().nullish() }).nullish();
+/** GET /v1/inbox (HB-1167): `after`, the `next` of the page before; none, the newest page. */
+const InboxQuery = z.object({ after: z.string().max(512).optional() });
+const NOT_A_PAGE = 'That is not a page of your inbox: open the inbox again.';
 /** Answers to a template's setup fields ({{key}} → value). */
 const SetupValues = z
   .record(z.string().max(64), z.string().max(2000))
@@ -98,6 +101,9 @@ export function registerTransferRoutes(app: FastifyInstance, ctx: RouteContext):
     recipe: e.recipe ? { base: e.recipe.base, packages: e.recipe.packages, lines: e.recipe.lines ?? '' } : undefined,
     problem: e.problem,
     mayBuild: e.mayBuild && !e.problem,
+    // Whether an image of that name is here: none, the agent's own, or
+    // another; a move from another server words its refusal by it (HB-1515 review).
+    has: e.has ?? 'none',
   });
 
   // ---- peers & migration ---------------------------------------------------
@@ -196,13 +202,17 @@ export function registerTransferRoutes(app: FastifyInstance, ctx: RouteContext):
           if (busyNow(agent, reply)) return reply;
           const got = await moves.ensurePinnedImage(agent, agent.image, host);
           if (!got.ok) {
-            // Another image of that name there is not replaced under whoever runs it (HB-1325).
+            // Another image of that name there is not replaced under whoever runs it (HB-1325). The problem is
+            // put in brackets without its own full stop ("….)."), and a move back here is to this machine's
+            // default image, not a runner's (HB-1451).
+            let problem = got.problem.trimEnd();
+            while (problem.endsWith('.')) problem = problem.slice(0, -1).trimEnd();
             const why = got.differs
-              ? `"${agent.name}" is pinned to the image ${agent.image}, and ${host.name} has a different image of that name (${got.problem}), which is left as it is. `
-              : `"${agent.name}" is pinned to the image ${agent.image}, which ${host.name} does not have, and it couldn't be rebuilt there (${got.problem}). `;
+              ? `"${agent.name}" is pinned to the image ${agent.image}, and ${host.name} has a different image of that name (${problem}), which is left as it is. `
+              : `"${agent.name}" is pinned to the image ${agent.image}, which ${host.name} does not have, and it couldn't be rebuilt there (${problem}). `;
             return reply.code(409).send({
               error: why +
-                'Move it on that runner\'s default image instead — its extra packages will be missing there.',
+                `Move it on ${host.kind === 'local' ? 'this machine' : 'that runner'}'s default image instead — its extra packages will be missing there.`,
               code: 'pinned_image_missing',
               image: agent.image,
             });
@@ -517,11 +527,18 @@ export function registerTransferRoutes(app: FastifyInstance, ctx: RouteContext):
     },
   );
 
-  /** Agents waiting in my inbox. */
-  app.get('/v1/inbox', async (req) => {
+  /**
+   * Agents waiting in my inbox, newest first, a page at a time (HB-1167): `shares`, as
+   * before, now no more than a page of them; `total`, how many wait; and `next` while
+   * more follow, to ask for as `?after=`. No `after`: the newest page.
+   */
+  app.get<{ Querystring: { after?: string } }>('/v1/inbox', async (req, reply) => {
     const me = principalOf(req);
-    const shares = await inbox.list(me);
-    return { shares };
+    const q = InboxQuery.safeParse(req.query ?? {});
+    if (!q.success) return reply.code(400).send({ error: NOT_A_PAGE });
+    const page = await inbox.list(me, { after: q.data.after });
+    if (page === 'bad-place') return reply.code(400).send({ error: NOT_A_PAGE });
+    return page;
   });
 
   /** Import a received agent — stands up a fresh agent I own (my bot, my people). */

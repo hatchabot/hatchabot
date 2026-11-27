@@ -257,6 +257,7 @@ export const COVERAGE: Record<string, string> = {
   'DELETE /v1/google-oauth/client': 'app: later — remove the OAuth client',
   'POST /v1/connections/google/start': 'app: browser — Google consent',
   'DELETE /v1/connections/:id': 'app: later — disconnect a Google account',
+  'DELETE /v1/connections/ending/:id': 'app: later — mark done a disconnected account\'s access removed by hand',
 
   // ---- the management agent itself ----
   'POST /v1/ops-agent': 'app: browser — setting up the account’s own management agent',

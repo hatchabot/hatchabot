@@ -4,6 +4,8 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { EMBED_MODEL_PATH, EMBED_PLUGIN_DIR } from '../src/openclaw/configWriter.js';
 import { readPage } from '../scripts/page-source.mjs';
+import { runInNewContext } from 'node:vm';
+import { HANDLE_MAX, handleText } from '../src/store/store.js';
 
 /**
  * Cross-file drift guards (audit 2026-09-02). Each pair here is two files that
@@ -308,5 +310,45 @@ describe('the installer and upgrade never close a pipe early', () => {
     expect(src).toContain("sed -n 's/^ARG OPENCLAW_VERSION=//p' docker/Dockerfile.runtime");
     expect(src).toContain('org.agentclaw.openclaw-version');
     expect(src).toContain('./scripts/build-runtime-image.sh || echo');
+  });
+});
+
+// HB-1427: a bot hand-over's read after its last unanswered post waits out the
+// server's bound on one post (its look at the bot's poll, then its token check
+// with Telegram), so the CLI and the web app wait at least that, and the same.
+describe('a bot hand-over waits out the server\'s bound on a post', () => {
+  it('the CLI\'s wait covers the poll and the token check, and the web app\'s is the same', async () => {
+    const { HANDOVER_POST_BOUND_MS } = await import('../src/cli.js');
+    const { POLL_STATE_DEADLINE_MS } = await import('../src/orchestrator/transfer/adopt.js');
+    const { VERIFY_DEADLINE_MS } = await import('../src/channels/telegramManual.js');
+    expect(HANDOVER_POST_BOUND_MS).toBeGreaterThan(POLL_STATE_DEADLINE_MS + VERIFY_DEADLINE_MS);
+    const web = /const HANDOVER_POST_BOUND_MS = (\d+);/.exec(readFileSync('web/app/create.js', 'utf8'));
+    expect(Number(web?.[1])).toBe(HANDOVER_POST_BOUND_MS);
+  });
+
+  it("a source's limit of models is the service's in its routes, and the editor's is the same (HB-1341)", async () => {
+    const { SOURCE_MODELS_MAX } = await import('../src/orchestrator/sources/aiSources.js');
+    // Every list of models the create and edit routes take is capped by it, not by a number of their own.
+    const caps = [...readFileSync('src/api/usage/aiSourceRoutes.ts', 'utf8').matchAll(/models: z\.array\(z\.string\(\)\.min\(1\)\)\.max\(([^)]+)\)/g)].map((m) => m[1]);
+    expect(caps.length).toBeGreaterThanOrEqual(5);
+    expect(new Set(caps)).toEqual(new Set(['SOURCE_MODELS_MAX']));
+    const web = /const MAX_SOURCE_MODELS = (\d+);/.exec(readFileSync('web/app/usage.js', 'utf8'));
+    expect(Number(web?.[1])).toBe(SOURCE_MODELS_MAX);
+  });
+});
+
+describe('a handle as typed: the page\'s copy ↔ the server\'s (HB-1439 review)', () => {
+  // The page asks again for a handle the server would refuse (askHandle), and
+  // sends it as the server reads it: the two must agree, or the page sends one
+  // the server refuses, or asks again for one it would take.
+  it('handleTyped reads every handle as handleText does, and HANDLE_MAX is the same', () => {
+    const page = read('web/app/panels.js');
+    const piece = (re: RegExp) => { const m = re.exec(page); expect(m, String(re)).toBeTruthy(); return m![0]; };
+    const web = runInNewContext(`${piece(/^const HANDLE_LINK = .*;$/m)}\n${piece(/^const HANDLE_MAX = .*;$/m)}\n${piece(/^function handleTyped\(v\) \{[\s\S]*?^\}$/m)}\n({ handleTyped, HANDLE_MAX })`, {});
+    expect(web.HANDLE_MAX).toBe(HANDLE_MAX);
+    for (const v of ['', '  ', '@', '@@', ' @ @Maria_K ', '@ @ @x', '@ @ @', 'https://t.me/@ @x', 'maria_k', 'maria_k/', 't.me/', 'T.ME/Maria_K', 'https://t.me/@', 'https://www.t.me/maria_k/',
+      'http://telegram.me/maria_k?start=x', 'telegram.me/@maria_k#top', '@t.me/maria_k', 't.me/t.me/maria_k', 'Maria K', '123456789', 'maria.t.me/x']) {
+      expect(web.handleTyped(v), JSON.stringify(v)).toBe(handleText(v));
+    }
   });
 });

@@ -3,6 +3,7 @@
  * is wired at launch. Everything the control plane knows about a runtime goes
  * through here — no provider-specific types leak into the orchestrator.
  */
+import { createHash } from 'node:crypto';
 import type { GroupAccess } from '../domain/types.js';
 
 export interface RuntimeSpec {
@@ -690,7 +691,58 @@ export interface ImageTagInfo {
   recipe?: string;
   /** Its layers (RootFS diff IDs), lowest first: the same list is the same files, however it is named. */
   layers?: string[];
+  /** How it runs, as one id (runConfigId): its user, entrypoint, command, environment, volumes, working folder and the rest of its config docker runs by. Absent when its listing did not say (HB-1330). */
+  config?: string;
 }
+
+/** The version of runConfigId's ids this release makes and compares. */
+export const RUN_CONFIG_VERSION = 'v1';
+/**
+ * One id for how image config `c` (docker's `.Config`) runs a container
+ * (HB-1330): its User, Entrypoint, Cmd and Env (in any order), its Volumes
+ * (in any order), WorkingDir, OnBuild, Shell and StopSignal. An image built
+ * FROM another that adds no layer (only a USER, ENV, ENTRYPOINT, VOLUME,
+ * ONBUILD…) has that one's layers and labels, and this alone tells it
+ * apart: a VOLUME at ~/.openclaw shadows an agent's workspace, and an ONBUILD
+ * runs inside a recipe's build on it. The same id is the same settings, on
+ * any machine, by any builder (none said, as podman leaves one out, is
+ * none; no working folder is `/`, where a container then runs). The Node
+ * image's own version stamps (NODE_VERSION, YARN_VERSION) are left out of
+ * Env: a Node patch may differ between images that stand for one another
+ * (its name and major version are compared, inputsDiffer), and a published
+ * image on another patch would stand for nothing.
+ *
+ * It is `v1:` and a digest: the id files carry from 2.193.0 on (a recipe's
+ * `config`). A release that reads more of the config makes another
+ * version, and one that does not know an id's version compares nothing
+ * by it (configIdKnown). A change to the runtime Dockerfile's USER, ENV,
+ * ENTRYPOINT or CMD (or a WORKDIR, VOLUME, SHELL, STOPSIGNAL or ONBUILD
+ * added) changes every stock image's id: images built before it and after
+ * would stand for each other no more, refused in words that blame a hand-made
+ * image. test/buildInputs.test.ts holds those lines as they are, and says
+ * what to do. Undefined when `c` is not a config docker gives.
+ */
+export function runConfigId(c: unknown): string | undefined {
+  if (!c || typeof c !== 'object' || Array.isArray(c)) return undefined;
+  const o = c as Record<string, unknown>;
+  const none = (v: unknown) => v === undefined || v === null;
+  const list = (v: unknown): string[] | undefined => (none(v) ? [] : Array.isArray(v) && v.every((x) => typeof x === 'string') ? v as string[] : undefined);
+  const text = (v: unknown): string | undefined => (none(v) ? '' : typeof v === 'string' ? v : undefined);
+  // Docker's Volumes are a map of paths to {}: the paths are what it mounts.
+  const volumes = none(o.Volumes) ? [] : o.Volumes && typeof o.Volumes === 'object' && !Array.isArray(o.Volumes) ? Object.keys(o.Volumes).sort() : undefined;
+  const user = text(o.User), entrypoint = list(o.Entrypoint), cmd = list(o.Cmd), env = list(o.Env);
+  const wd = text(o.WorkingDir), onbuild = list(o.OnBuild), shell = list(o.Shell), stop = text(o.StopSignal);
+  const workdir = wd === '' ? '/' : wd;
+  if ([user, entrypoint, cmd, env, volumes, workdir, onbuild, shell, stop].some((x) => x === undefined)) return undefined;
+  const own = env!.filter((e) => !/^(NODE_VERSION|YARN_VERSION)=/.test(e)).sort();
+  return `${RUN_CONFIG_VERSION}:sha256:${createHash('sha256').update(JSON.stringify([user, entrypoint, cmd, own, volumes, workdir, onbuild, shell, stop])).digest('hex')}`;
+}
+/** An id runConfigId of this release makes: one of another version (a later release's) is compared by nothing here. */
+export function configIdKnown(id: string): boolean {
+  return new RegExp(`^${RUN_CONFIG_VERSION}:sha256:[a-f0-9]{64}$`).test(id);
+}
+/** The form any release's run-settings id has: a version, then what that version makes (a file's is held to it). */
+export const CONFIG_ID_FORM = /^v[1-9][0-9]{0,3}:[A-Za-z0-9:._-]{1,74}$/;
 
 export type EmbedEngine = 'baked' | 'none';
 /** Parse the org.hatchabot.embed-engine label: only an explicit `none` means none (older images have no label). */

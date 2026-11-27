@@ -22,14 +22,15 @@ import { createTokenSteward, type TokenSteward, type TokenStewardDeps } from './
  * its routes are in src/api/chat/memoryRoutes.ts. The checkpoint, the ask and
  * the distillation take the agent's one turn, the consult service's
  * `turns` (`a2aInFlight`), so none of them interleaves with a consult.
- * Nothing here knows HTTP. `stop()` ends the recovery slots' timers.
+ * Nothing here knows HTTP. `stop()` ends the recovery slots' timers, and
+ * puts back to waiting a proposal whose merge the shutdown cuts off.
  */
 export interface AgentMemory {
   turns: MemoryTurns;
   history: ContextRecovery;
   steward: TokenSteward;
   proposals: Proposals;
-  /** End the timers (the recovery slots'): at shutdown. */
+  /** At shutdown: end the timers (the recovery slots'), and put back a merge under way (HB-1171). */
   stop(): void;
 }
 
@@ -43,6 +44,6 @@ export function createAgentMemory(deps: AgentMemoryDeps): AgentMemory {
   const proposals = createProposals(deps);
   return {
     turns, history, steward, proposals,
-    stop: () => { history.stop(); },
+    stop: () => { history.stop(); proposals.stop(); },
   };
 }

@@ -120,6 +120,13 @@ function consoleUnloadAll() {
   if (!$('consoleFrame')) $('consoleFrames').insertAdjacentHTML('afterbegin', '<iframe id="consoleFrame" title="Agent console" src="about:blank"></iframe>');
   else $('consoleFrame').src = 'about:blank';
 }
+/** The console bar's icon-only links to the chat apps that reach agent `a` (agentChannelLinks, in home.js). */
+function renderConsoleChannels(a) {
+  const box = $('consoleChans');
+  if (!box) return;
+  box.innerHTML = agentChannelLinks(a).map((l) =>
+    `<button class="cbtn" title="Open this agent in ${V2_CHAN_LABEL[l.kind]}" aria-label="Open this agent in ${V2_CHAN_LABEL[l.kind]}" ${onAction('click', 'openInNewTab', [`${l.url ?? ''}`])}>${chanIcon(l.kind)}</button>`).join('');
+}
 /**
  * Switch to an agent already loaded in a tab. False when it has to be opened. `view`: a named
  * destination (openGateway's), which navigates even a loaded tab, before what is shown counts as read.
@@ -506,6 +513,8 @@ function consoleViewUrl(id, slug, view, existing = '') {
   return view === 'voice-settings' ? `/v1/agents/${id}/ui/settings/talk${fragment}`
     : `/v1/agents/${id}/ui/chat?session=${session}${fragment}`;
 }
+/** The console's wait for its page to load (openGateway): one at a time. */
+let consoleLoadWait = 0;
 async function openGateway(id, slug, view) {
   if (view !== undefined && view !== 'voice-settings' && view !== 'chat') return toast('That console view is not available.');
   const epoch = voiceEpoch, person = pagePerson;
@@ -608,10 +617,17 @@ async function openGateway(id, slug, view) {
     // The spinner stays until the console's page has loaded (or 15 s): a blank
     // frame for several seconds looked like nothing had happened.
     consoleCoverSay('Opening the console…');
-    // Shown: what its chat shows is read then, not while it is covered (HB-1147).
-    const loaded = () => { if (consoleAgentId === id && $('consoleCover').lastElementChild.textContent === 'Opening the console…') { $('consoleCover').hidden = true; markConsoleSeen(id); } };
+    // Shown: what its chat shows is read then, not while it is covered (HB-1147). Its 15 s wait goes once the page has
+    // loaded, another open starts, or the console closes: left to run, it took down a later open's cover early (HB-1403).
+    let wait = 0;
+    const loaded = () => {
+      clearTimeout(wait); fr.removeEventListener('load', loaded);
+      if (consoleLoadWait === wait) consoleLoadWait = 0;
+      if (consoleAgentId === id && $('consoleCover').lastElementChild.textContent === 'Opening the console…') { $('consoleCover').hidden = true; markConsoleSeen(id); }
+    };
     fr.addEventListener('load', loaded, { once: true });
-    setTimeout(loaded, 15000);
+    clearTimeout(consoleLoadWait);
+    wait = consoleLoadWait = setTimeout(loaded, 15000);
     fr.src = url;
     const tab = consoleTabs.find(t => t.id === id); if (tab) tab.url = url;
     $('consoleApproveBtn').hidden = true;
@@ -641,6 +657,7 @@ function consoleCoverSay(text) {
 
 function closeConsole() {
   consoleTicket++;
+  clearTimeout(consoleLoadWait); consoleLoadWait = 0;
   markConsoleSeen(consoleSeenAgent()); // what it showed, before its frames go (the close event comes after)
   // Drop the frames so their WebSockets close and the tokens leave the DOM.
   consoleUnloadAll();

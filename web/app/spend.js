@@ -9,7 +9,10 @@
 // machine and whether it answers, the latest backup, the OpenClaw version —
 // what Status → Health showed that the home screen did not. A machine that
 // is not answering, or backups that are late, are also Alerts on the
-// Hatchabot agent's tile (agentAttention).
+// Hatchabot agent's tile (agentAttention); with no such tile, the machine's
+// other alerts are on this line (HB-1463).
+
+/** An event in plain words, for Activity and the full log; one not here shows the server's label, or its own name. */
 const EVENT_WORDS = {
   'runtime.provisioned': 'runtime created', 'runtime.started': 'started',
   'runtime.healthy': 'came online', 'runtime.rebuilt': 'rebuilt',
@@ -97,26 +100,34 @@ async function v2LoadMachine(force = false) {
     const [hs, b, rt] = await Promise.all([api('/v1/hosts').catch(() => null), api('/v1/backups?latest=1').catch(() => null), api('/v1/runtime').catch(() => null)]);
     // This install's own newest: one made by another install, or under an earlier key, would hide a stale or broken own set.
     const latest = (b?.backups ?? []).find(x => !x.foreign);
-    let backup = null;
-    if (b) {
-      if (!latest) backup = { warn: 'none yet — the nightly job runs at 03:30' };
-      else {
-        const ageDays = Math.floor((Date.now() - Date.parse(latest.date + 'T00:00:00')) / 86400000);
-        const miss = b.missing ?? [];
-        const { why, key } = v2BackupWarn(latest, ageDays, miss);
-        // latest and miss stay for the alert, which folds in each agent's own (v2MachineAlerts).
-        backup = { date: latest.date, ageDays, latest, miss, ...(why ? { warn: why, key } : {}) };
-      }
-    }
+    const backup = b ? v2BackupOf(latest, b.missing ?? []) : null;
     // A read that failed keeps what the last one that worked said: an offline runner or a late backup
     // vanished from the line and the Alerts for a minute on a failed read, as if it were fine (HB-1043).
-    const was = v2Machine;
-    v2Machine = { hosts: Array.isArray(hs) ? hs : hs === null ? was?.hosts ?? [] : [], backup: b ? backup : was?.backup ?? null, runtime: rt ?? was?.runtime ?? null };
+    // What is kept says when it was read, and the kept backup ages: its days and its warning are worked out
+    // again from its date, as a read would (HB-1304).
+    const was = v2Machine, now = new Date().toISOString();
+    const keptBackup = was?.backup?.latest ? v2BackupOf(was.backup.latest, was.backup.miss ?? []) : was?.backup ?? null;
+    v2Machine = {
+      hosts: Array.isArray(hs) ? hs : hs === null ? was?.hosts ?? [] : [], backup: b ? backup : keptBackup, runtime: rt ?? was?.runtime ?? null,
+      // When each part was last read, and which are kept from an earlier read.
+      at: { hosts: hs === null ? was?.at?.hosts : now, backup: b ? now : was?.at?.backup, runtime: rt ? now : was?.at?.runtime },
+      kept: { hosts: hs === null && !!was?.hosts?.length, backup: !b && !!was?.backup, runtime: !rt && !!was?.runtime },
+    };
     v2PaintMachine();
     renderV2(); // the Hatchabot agent's tile carries the machine's alerts
   } catch { /* the line stays as it was */ }
   finally { v2MachineBusy = false; v2MachineAt = Date.now(); }
 }
+/** The machine line's backup, from this install's newest set (`latest`, none yet when absent) and who it left out. */
+function v2BackupOf(latest, miss) {
+  if (!latest) return { warn: 'none yet — the nightly job runs at 03:30' };
+  const ageDays = Math.floor((Date.now() - Date.parse(latest.date + 'T00:00:00')) / 86400000);
+  const { why, key } = v2BackupWarn(latest, ageDays, miss);
+  // latest and miss stay for the alert, which folds in each agent's own (v2MachineAlerts).
+  return { date: latest.date, ageDays, latest, miss, ...(why ? { warn: why, key } : {}) };
+}
+/** What a part of the machine line kept from an earlier read says: when that read was (HB-1304). */
+const v2KeptSince = (part) => v2Machine?.kept?.[part] && v2Machine.at?.[part] ? `from the last good read, ${ago(v2Machine.at[part])}` : '';
 /** The machine's backup warning: late, broken, or agents the newest set left out. */
 function v2BackupWarn(latest, ageDays, miss) {
   // Named when few: "1 agent not covered" sent people hunting (2026-10-06).
@@ -135,26 +146,37 @@ function v2BackupWarn(latest, ageDays, miss) {
 function v2PaintMachine() {
   const el = $('v2Machine'); if (!el) return;
   if (!v2Machine) { el.hidden = true; return; }
+  // A part kept from an earlier read says so, at its end (HB-1304).
+  const kept = (part) => { const k = v2KeptSince(part); return k ? ` · <span class="sub">${esc(k)}</span>` : ''; };
   const parts = v2Machine.hosts.map(h => {
     const n = `${h.agentCount ?? 0} agent${h.agentCount === 1 ? '' : 's'}`;
-    if (h.kind === 'local') return `<span>🖥 ${esc(h.hostname || h.name)} · ${n}</span>`;
-    return `<span>💻 ${esc(h.name)} · ${n} · ${h.reachable === false ? '<span class="warn">not answering</span>' : h.reachable ? 'answering' : 'not checked'}</span>`;
+    if (h.kind === 'local') return `<span>🖥 ${esc(h.hostname || h.name)} · ${n}${kept('hosts')}</span>`;
+    return `<span>💻 ${esc(h.name)} · ${n} · ${h.reachable === false ? '<span class="warn">not answering</span>' : h.reachable ? 'answering' : 'not checked'}${kept('hosts')}</span>`;
   });
   const bk = v2Machine.backup;
-  if (bk) parts.push(bk.date ? `<span>💾 Backup ${esc(bk.date)}${bk.ageDays ? ` (${bk.ageDays}d ago)` : ''}${bk.warn ? ` · <span class="warn">${esc(bk.warn)}</span>` : ''}</span>` : `<span>💾 Backups: <span class="warn">${esc(bk.warn)}</span></span>`);
+  if (bk) parts.push(bk.date ? `<span>💾 Backup ${esc(bk.date)}${bk.ageDays ? ` (${bk.ageDays}d ago)` : ''}${bk.warn ? ` · <span class="warn">${esc(bk.warn)}</span>` : ''}${kept('backup')}</span>` : `<span>💾 Backups: <span class="warn">${esc(bk.warn)}</span>${kept('backup')}</span>`);
   const rt = v2Machine.runtime;
-  if (rt?.imageVersion) parts.push(`<span>OpenClaw ${esc(rt.imageVersion)}${rt.upgradeAvailable && rt.npmLatest ? ` · ${esc(rt.npmLatest)} out` : ''}</span>`);
+  if (rt?.imageVersion) parts.push(`<span>OpenClaw ${esc(rt.imageVersion)}${rt.upgradeAvailable && rt.npmLatest ? ` · ${esc(rt.npmLatest)} out` : ''}${kept('runtime')}</span>`);
+  // The machine's alerts are the Hatchabot agent's tile's: with none to carry them, they are here (HB-1463), those this
+  // line does not say already (a runner not answering and the backups are its own parts, above).
+  if (agentsLoaded && !liveAgents().some(a => a.ops && v2Mine(a))) {
+    for (const x of v2MachineAlerts()) if (!/^(runner-down|backup):/.test(x.key)) parts.push(`<span>${x.icon} <span class="warn">${esc(x.why.charAt(0).toUpperCase() + x.why.slice(1))}</span></span>`);
+  }
   // A health check on every running agent (also at the foot of Bulk actions).
   if (parts.length) parts.push('<button type="button" class="v2more" id="v2MachineCheckAll" ' + onAction('click', 'v2CheckAll') + ' title="Ask each running agent whether it answers, and check its settings — what it finds shows under Alerts">❤️ Check all agents</button>');
-  el.innerHTML = parts.join('');
+  // renderV2 paints it on every refresh (HB-1463): identical markup is left alone, so the button keeps keyboard focus
+  // and its tooltip (as #v2groups and the hub do).
+  const html = parts.join('');
+  if (el.__html !== html) { el.innerHTML = html; el.__html = html; }
   el.hidden = !parts.length;
 }
-/** The machine's alerts, on the Hatchabot agent's tile (its owner's, who owns the machine). */
+/** The machine's alerts, on the Hatchabot agent's tile (its owner's, who owns the machine), else on the machine line (HB-1463). */
 function v2MachineAlerts() {
   if (!v2Machine) return [];
   const out = [];
+  const kept = (part) => { const k = v2KeptSince(part); return k ? ` (${k})` : ''; };
   for (const h of v2Machine.hosts) if (h.kind !== 'local' && h.reachable === false && (h.agentCount ?? 0) > 0) {
-    out.push({ key: 'runner-down:' + h.id, icon: '💻', why: `${h.name} isn't answering (asleep or offline?) — its ${h.agentCount} agent${h.agentCount === 1 ? '' : 's'} can't be reached until it is back` });
+    out.push({ key: 'runner-down:' + h.id, icon: '💻', why: `${h.name} isn't answering (asleep or offline?) — its ${h.agentCount} agent${h.agentCount === 1 ? '' : 's'} can't be reached until it is back${kept('hosts')}` });
   }
   const bk = v2Machine.backup;
   // The fold (recovery readiness): an agent whose own tile carries its
@@ -163,7 +185,7 @@ function v2MachineAlerts() {
   const own = new Set((v2Readiness?.agents || []).filter(r => r.alert && v2Find(r.agentId) && v2Mine(v2Find(r.agentId))).map(r => r.agentId));
   const w = bk?.latest && own.size ? v2BackupWarn(bk.latest, bk.ageDays, (bk.miss || []).filter(m => !own.has(m.agentId))) : null;
   const warn = w ? w.why : bk?.warn, key = w ? w.key : bk?.key;
-  if (warn) out.push({ key: `backup:${key ?? bk.date ?? 'none'}`, icon: '💾', why: `backups: ${warn} (⚙ Settings → Backups)` });
+  if (warn) out.push({ key: `backup:${key ?? bk.date ?? 'none'}`, icon: '💾', why: `backups: ${warn}${kept('backup')} (⚙ Settings → Backups)` });
   // A reverse proxy still pointed at the app's own port (HB-1239): everyone behind it shares one sign-in limit.
   const pa = myAccount?.proxyOnAppPort;
   if (pa) out.push({ key: 'proxy-on-app-port:' + pa.at, icon: '🔀', why: `a proxy on this machine sends visitors to port ${pa.port}, where they all share one sign-in limit: one person's wrong passwords lock out everyone. Point it at 127.0.0.1:${pa.proxyPort} instead (in a Caddyfile: reverse_proxy 127.0.0.1:${pa.proxyPort})` });
@@ -227,14 +249,13 @@ function renderAudit(evs) {
   }).join('');
 }
 
-let usageAgentId = null;
+// ---- Model prices (Settings → AI sources) ---------------------------------------
 // Per-1M-token list price [input, output], USD — only used to show API-key
 // agents the model's rate so they can judge; never multiplied into a fake total.
 const MODEL_PRICES = {
   'claude-opus-5-5': [4, 20], 'claude-opus-5': [5, 25], 'claude-opus-4-8': [5, 25], 'claude-opus-4-7': [5, 25], 'claude-opus-4-6': [5, 25],
   'claude-sonnet-5-5': [2, 10], 'claude-sonnet-5': [2, 10], 'claude-sonnet-4-6': [3, 15], 'claude-haiku-4-5': [1, 5], 'claude-fable-5-2': [8, 40], 'claude-fable-5-1': [10, 50], 'claude-fable-5': [10, 50],
 };
-// ---- Model prices (Settings → AI sources) ---------------------------------------
 // GET /v1/model-prices: the server's own price list (pricing.ts), so the panel
 // and every cost the app shows can never disagree. Opening it also refreshes
 // MODEL_PRICES above from the server.
@@ -253,6 +274,52 @@ function openModelPrices() {
   if (!d) return;
   if (d.open) void loadModelPrices(); else d.open = true; // opening fires its toggle, which loads
   d.scrollIntoView({ block: 'start' });
+}
+/**
+ * A wide table (.mp-tbl) is built from one list of its columns, [heading,
+ * th attributes]: mpHead draws the headings, mpRow a row, each cell after the
+ * first named after its column (data-label), which a phone shows as a card per
+ * row with the values named (HB-0613). A cell is its HTML, or [HTML, td attributes].
+ */
+// The wide tables' alignments: a name to the left, a figure to the right in even digits on one line.
+const mpLeft = ' style="text-align:left"';
+const mpNum = 'text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap';
+const mpHead = (cols) => `<thead><tr>${cols.map(([h, a = '']) => `<th${a}>${esc(h)}</th>`).join('')}</tr></thead>`;
+const mpRow = (cols, cells, attrs = '') => `<tr${attrs}>${cells.map((c, i) => {
+  const [html, a = ''] = Array.isArray(c) ? c : [c];
+  // A phone names each value after its column (data-label); an empty cell is left unnamed.
+  return `<td${a}${i && cols[i] && String(html ?? '').trim() ? ` data-label="${esc(cols[i][0])}"` : ''}>${html}</td>`;
+}).join('')}</tr>`;
+/** $5, $6.25, $0.50, $0.025: as many places as the price has, at least two after a point. */
+const mpUsd = (x) => '$' + (Number.isInteger(x) ? String(x) : (Math.round(x * 100) === x * 100 ? x.toFixed(2) : String(+x.toFixed(4))));
+const mpShare = (x) => `${+x.toFixed(4)}×`;
+function renderModelPrices(d) {
+  const cols = [['Model'], ['Input'], ['Output'], ['Cache read'], ['Cache write (5 min)']];
+  const rows = (d.models || []).map((m) => mpRow(cols, [`${esc(m.label)}${m.legacy ? ' <span class="sub">(older)</span>' : ''}${m.limited ? ' <span class="sub">(invitation only)</span>' : ''}`,
+    mpUsd(m.input), mpUsd(m.output), mpUsd(m.cacheRead), mpUsd(m.cacheWrite)], ` class="${m.legacy ? 'mp-old' : ''}"`)).join('');
+  const odd = (d.models || []).filter((m) => !m.legacy && m.cacheReadShare !== d.cacheReadDefault).map((m) => `${mpShare(m.cacheReadShare)} on ${esc(m.label)}`);
+  const when = (() => { const t = Date.parse(d.checked + 'T12:00:00Z'); return Number.isFinite(t) ? new Date(t).toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric' }) : esc(d.checked); })();
+  const link = /^https:\/\//.test(d.source || '') ? `<a href="${esc(d.source)}" target="_blank" rel="noopener">Anthropic's pricing page</a>` : "Anthropic's pricing page";
+  // The worked example, figured from the list itself.
+  const ex = (d.models || []).find((m) => m.id === 'claude-opus-4-8');
+  const conv = 300_000, answer = 1_000;
+  const c2 = (x) => '$' + x.toFixed(2);
+  const example = ex ? `<p class="sub mp-note">For example, on ${esc(ex.label)} with a 300,000-token conversation: the part read from the cache costs about <b>${c2(conv * ex.cacheRead / 1e6)}</b> a message;
+    written again after a pause, about <b>${c2(conv * ex.cacheWrite / 1e6)}</b>; an answer of 1,000 tokens about <b>${c2(answer * ex.output / 1e6)}</b>.</p>` : '';
+  const unpriced = (d.unpriced || []).length
+    ? `<p class="sub mp-note">No price known: ${d.unpriced.map((m) => `<code>${esc(m)}</code>`).join(', ')} — their use shows as "no price known", never as $0.</p>`
+    : '<p class="sub mp-note">A model not on this list has no price known: its use shows as "no price known", never as $0.</p>';
+  return `<div class="mp-wrap"><table class="mp-tbl">${mpHead(cols)}<tbody>${rows}</tbody></table></div>
+    <p class="sub mp-note">US dollars per million tokens. Cache read = ${mpShare(d.cacheReadDefault)} the input price${odd.length ? ` (${odd.join(', ')})` : ''}; cache write = ${mpShare(d.cacheWrite)} input.
+      Checked against ${link} on ${esc(when)}. Every cost in Hatchabot (Usage, the home screen's $/wk badges, Right-size) is figured from this list.</p>
+    <h4 class="v2sec" style="margin:12px 0 4px">How caching changes the price</h4>
+    <p class="sub mp-note">Every message re-sends the whole conversation to the model. Within about 5 minutes of the last one, the part it has already seen is
+      <b>read from Anthropic's cache</b> at a tenth of the input price (less on the models above). After a longer pause — or when the start of the prompt changes —
+      the whole conversation is <b>written to the cache again</b>, at 1.25× the input price. So quick back-and-forth is cheap, a message after a long pause in a
+      very long conversation is the expensive moment, and long conversations cost more on every turn.</p>
+    ${example}
+    <p class="sub mp-note">Local models${(d.local || []).length ? ` (${d.local.map((m) => `<code>${esc(m)}</code>`).join(', ')})` : ''}: $0 — their calls run on your own machine.</p>
+    ${unpriced}`;
 }
 // ---- Budgets (Settings → AI sources → Budgets; orchestrator/usage/budgets.ts) -------
 // GET /v1/budgets: each of your agents' spend this month against its budget,
@@ -315,7 +382,7 @@ function bgState(v) {
   if (!v) return '';
   const pace = v.onPace && v.onPace > v.spent ? ` · on pace for ${bgMoney(v.onPace)}` : '';
   const cls = v.level ? ' class="bg-hi"' : '';
-  return `<span${cls}>${bgMoney(v.spent)} of ${bgMoney(v.usd)} (${v.pct}%)</span>${pace}${v.paused?.staysStopped ? ' · <b>stopped</b>' : v.paused ? ' · <b>paused</b>' : v.downgraded ? ` · <b>on ${esc(v.downgraded.to.replace(/^.*\//, ''))}</b> until ${esc(v.resetsOn)}` : ''}`;
+  return `<span${cls}>${bgMoney(v.spent)} of ${bgMoney(v.usd)} (${v.pct}%)</span>${pace}${v.paused?.staysStopped ? ' · <b>stopped</b>' : v.paused ? ' · <b>paused</b>' : v.downgraded ? ` · <b>on ${esc(v.downgraded.to.replace(/^.*\//, ''))}</b>${v.downgraded.ended ? `: its budget's switch ended on ${esc(v.downgraded.ended.on)}, and its own model is not back yet` : v.downgraded.classModel ? ", its class's model" : ` until ${esc(v.resetsOn)}`}` : ''}`;
 }
 function bgControls(key, b, suggested, manager) {
   const usd = b ? b.usd : '';
@@ -384,14 +451,24 @@ async function saveBudget(key, btn) {
     await refresh(false);
   } catch (e) { toast(e.message, 8000); }
 }
-/** The agent sheet's Usage tab: its budget, editable in place. `saved`: as loadBudgets. */
+/**
+ * The agent sheet's Usage tab: its budget, editable in place. `saved`: as loadBudgets. Its reads are numbered as
+ * loadBudgets' are, and only the newest is drawn: the step saved, then the limit, and the first read landing last
+ * showed the limit's old value (HB-1308). The rows saved by the reads the newest replaced show what the server keeps too.
+ */
+let v2BudgetRowSeq = 0, v2BudgetRowSaved = [];
 async function v2LoadBudgetRow(id, saved = []) {
   const el = $('v2BudgetRow'); if (!el || el.dataset.agent !== id) return;
+  const mine = ++v2BudgetRowSeq;
+  v2BudgetRowSaved = [...new Set([...v2BudgetRowSaved, ...saved])];
   try {
     const d = await api('/v1/budgets');
+    if (mine !== v2BudgetRowSeq) return;
     const a = (d.agents || []).find((x) => x.id === id);
+    const was = v2BudgetRowSaved;
+    v2BudgetRowSaved = [];
     if (!a || $('v2BudgetRow')?.dataset.agent !== id) return;
-    const keep = bgDrafts(el, saved);
+    const keep = bgDrafts(el, was);
     el.innerHTML = `<div class="bg-rows">
         <span class="sub">Tell me</span><div class="bg-form">${bgStepControls(id, a.alertEvery)}${a.alertEvery ? `<span class="sub">${bgStepState(a.alertEvery)}</span>` : ''}</div>
         <span class="sub">Limit</span><div class="bg-form">${bgControls(id, a.budget, a.unpriced?.model ? 0 : a.suggested, a.manager)}</div>
@@ -400,7 +477,11 @@ async function v2LoadBudgetRow(id, saved = []) {
       ${a.chatNote && (a.budget || a.alertEvery) ? `<div class="sub bg-hi" style="margin-top:8px;font-weight:400">${esc(a.chatNote)}</div>` : ''}
       <div class="sub" style="margin-top:8px">${a.budget && !(a.unpriced?.model && !a.spent) ? bgState(a.budget) + ' · ' : ''}${bgSpentCost(a)} in ${esc(bgMonthName(d.month))} so far, ${bgLastCost(a)} last month, about ${bgRateCost(a)} a month at its pace now (API prices${a.billing === 'plan' ? '; on your Claude plan an equivalent' : ''}).${a.alertEvery || a.budget || a.unpriced?.model ? '' : ` Every $${Math.max(1, Math.round(a.suggested / 4))} would tell you a few times a month.`} <a href="#" ${onAction('click', 'openBudgets', [], 'prevent')}>All budgets</a></div>`;
     keep(el);
-  } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+  } catch (e) {
+    if (mine !== v2BudgetRowSeq) return;
+    v2BudgetRowSaved = [];
+    el.innerHTML = `<div class="sub">${esc(e.message)}</div>`;
+  }
 }
 /** Settings → AI sources, with Budgets open. */
 function openBudgets() {
@@ -409,53 +490,8 @@ function openBudgets() {
   if (d.open) void loadBudgets(); else d.open = true;
   d.scrollIntoView({ block: 'start' });
 }
-/**
- * A wide table (.mp-tbl) is built from one list of its columns, [heading,
- * th attributes]: mpHead draws the headings, mpRow a row, each cell after the
- * first named after its column (data-label), which a phone shows as a card per
- * row with the values named (HB-0613). A cell is its HTML, or [HTML, td attributes].
- */
-// The wide tables' alignments: a name to the left, a figure to the right in even digits on one line.
-const mpLeft = ' style="text-align:left"';
-const mpNum = 'text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap';
-const mpHead = (cols) => `<thead><tr>${cols.map(([h, a = '']) => `<th${a}>${esc(h)}</th>`).join('')}</tr></thead>`;
-const mpRow = (cols, cells, attrs = '') => `<tr${attrs}>${cells.map((c, i) => {
-  const [html, a = ''] = Array.isArray(c) ? c : [c];
-  // A phone names each value after its column (data-label); an empty cell is left unnamed.
-  return `<td${a}${i && cols[i] && String(html ?? '').trim() ? ` data-label="${esc(cols[i][0])}"` : ''}>${html}</td>`;
-}).join('')}</tr>`;
-/** $5, $6.25, $0.50, $0.025: as many places as the price has, at least two after a point. */
-const mpUsd = (x) => '$' + (Number.isInteger(x) ? String(x) : (Math.round(x * 100) === x * 100 ? x.toFixed(2) : String(+x.toFixed(4))));
-const mpShare = (x) => `${+x.toFixed(4)}×`;
-function renderModelPrices(d) {
-  const cols = [['Model'], ['Input'], ['Output'], ['Cache read'], ['Cache write (5 min)']];
-  const rows = (d.models || []).map((m) => mpRow(cols, [`${esc(m.label)}${m.legacy ? ' <span class="sub">(older)</span>' : ''}${m.limited ? ' <span class="sub">(invitation only)</span>' : ''}`,
-    mpUsd(m.input), mpUsd(m.output), mpUsd(m.cacheRead), mpUsd(m.cacheWrite)], ` class="${m.legacy ? 'mp-old' : ''}"`)).join('');
-  const odd = (d.models || []).filter((m) => !m.legacy && m.cacheReadShare !== d.cacheReadDefault).map((m) => `${mpShare(m.cacheReadShare)} on ${esc(m.label)}`);
-  const when = (() => { const t = Date.parse(d.checked + 'T12:00:00Z'); return Number.isFinite(t) ? new Date(t).toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric' }) : esc(d.checked); })();
-  const link = /^https:\/\//.test(d.source || '') ? `<a href="${esc(d.source)}" target="_blank" rel="noopener">Anthropic's pricing page</a>` : "Anthropic's pricing page";
-  // The worked example, figured from the list itself.
-  const ex = (d.models || []).find((m) => m.id === 'claude-opus-4-8');
-  const conv = 300_000, answer = 1_000;
-  const c2 = (x) => '$' + x.toFixed(2);
-  const example = ex ? `<p class="sub mp-note">For example, on ${esc(ex.label)} with a 300,000-token conversation: the part read from the cache costs about <b>${c2(conv * ex.cacheRead / 1e6)}</b> a message;
-    written again after a pause, about <b>${c2(conv * ex.cacheWrite / 1e6)}</b>; an answer of 1,000 tokens about <b>${c2(answer * ex.output / 1e6)}</b>.</p>` : '';
-  const unpriced = (d.unpriced || []).length
-    ? `<p class="sub mp-note">No price known: ${d.unpriced.map((m) => `<code>${esc(m)}</code>`).join(', ')} — their use shows as "no price known", never as $0.</p>`
-    : '<p class="sub mp-note">A model not on this list has no price known: its use shows as "no price known", never as $0.</p>';
-  return `<div class="mp-wrap"><table class="mp-tbl">${mpHead(cols)}<tbody>${rows}</tbody></table></div>
-    <p class="sub mp-note">US dollars per million tokens. Cache read = ${mpShare(d.cacheReadDefault)} the input price${odd.length ? ` (${odd.join(', ')})` : ''}; cache write = ${mpShare(d.cacheWrite)} input.
-      Checked against ${link} on ${esc(when)}. Every cost in Hatchabot (Usage, the home screen's $/wk badges, Right-size) is figured from this list.</p>
-    <h4 class="v2sec" style="margin:12px 0 4px">How caching changes the price</h4>
-    <p class="sub mp-note">Every message re-sends the whole conversation to the model. Within about 5 minutes of the last one, the part it has already seen is
-      <b>read from Anthropic's cache</b> at a tenth of the input price (less on the models above). After a longer pause — or when the start of the prompt changes —
-      the whole conversation is <b>written to the cache again</b>, at 1.25× the input price. So quick back-and-forth is cheap, a message after a long pause in a
-      very long conversation is the expensive moment, and long conversations cost more on every turn.</p>
-    ${example}
-    <p class="sub mp-note">Local models${(d.local || []).length ? ` (${d.local.map((m) => `<code>${esc(m)}</code>`).join(', ')})` : ''}: $0 — their calls run on your own machine.</p>
-    ${unpriced}`;
-}
 
+// ---- an agent's usage (its Usage window), and the numbers every usage view writes --------
 const fmtN = (n) => n >= 1e6 ? (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + 'M' : n >= 1e4 ? Math.round(n / 1e3) + 'k' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(n);
 function fmtTokens(n) {
   const v = Number(n) || 0; // guard undefined/NaN/string → "0" not "undefined"
@@ -467,7 +503,9 @@ function fmtTokens(n) {
 function fmtUsd(n) { return '$' + (n < 10 ? n.toFixed(2) : n < 100 ? n.toFixed(1) : Math.round(n)); }
 function billingLine(agentId, models) {
   const a = (agents ?? []).find(x => x.id === agentId);
-  const p = (profiles ?? []).find(x => x.id === a?.aiProfileId);
+  // The source its container runs: a switch saved but not rebuilt yet still runs on the old one (HB-1009), and the
+  // line says it is the source it runs now (HB-1272).
+  const p = (profiles ?? []).find(x => x.id === (a?.appliedProfileId ?? a?.aiProfileId)) ?? (profiles ?? []).find(x => x.id === a?.aiProfileId);
   if (!p) return '';
   if (p.vendor === 'local') return 'local model — no API cost';
   if (p.kind === 'subscription') return `included (${esc(p.name)})`;
@@ -476,6 +514,15 @@ function billingLine(agentId, models) {
   const priced = models.map(m => MODEL_PRICES[modelKeyOf(m)] ? `${esc(m)} at $${MODEL_PRICES[modelKeyOf(m)][0]}/$${MODEL_PRICES[modelKeyOf(m)][1]} per 1M in/out` : null).filter(Boolean);
   return priced.length ? priced.join(' · ') : 'API key';
 }
+/**
+ * Its lifetime totals are billed by the source it runs now, which is said; when its container ran on an earlier
+ * source, the total includes that time, which is said too (HB-1272): the history to split it is not kept.
+ */
+function billedNow(line, u) {
+  if (!line) return '';
+  return `${line} — by the source it runs now${u.earlierSource ? ', though its total includes time on an earlier AI source' : ''}`;
+}
+let usageAgentId = null; // whose Usage window is open
 async function openUsage(id, name) {
   usageAgentId = id;
   $('usageAgent').textContent = name;
@@ -800,7 +847,7 @@ function usageHTML(u, agentId) {
   const alerts = (u.alerts || []).filter(recEarlierSpike).map(x => `<div class="sub" style="display:flex;gap:6px;align-items:baseline"><span class="grow">⚠️ ${fmtTokens(x.tokens)} tokens in 24 hours${x.usual >= 1e6 ? ` — about ${Math.round(x.tokens / x.usual)}× its usual day` : ''} · ${esc(ago(x.at))}</span>`
     + `<button class="hbtn" style="padding:0 6px;font-size:12px" title="Clear this warning" aria-label="Clear this warning" ${onAction('click', 'dismissSpikeRow', [`${(x.agentId || agentId) ?? ''}`, `${x.at ?? ''}`, { $: 'el' }])}>✕</button></div>`).join('');
   return `<div style="font-size:22px;font-weight:700">${fmtTokens(u.totalTokens)} tokens <span class="sub" style="font-size:13px;font-weight:400">in all</span></div>
-     <div class="sub" style="margin:2px 0 8px">${fmtN(n(u.calls))} call${u.calls === 1 ? '' : 's'} · ${n(u.sessions)} session${u.sessions === 1 ? '' : 's'}${practice ? ` · ${fmtN(practice.runs)} practice run${practice.runs === 1 ? '' : 's'} (${fmtTokens(practice.tokens)})` : ''}${u.lastActive ? ' · last active ' + ago(u.lastActive) : ''} · ${billingLine(agentId, models)}</div>
+     <div class="sub" style="margin:2px 0 8px">${fmtN(n(u.calls))} call${u.calls === 1 ? '' : 's'} · ${n(u.sessions)} session${u.sessions === 1 ? '' : 's'}${practice ? ` · ${fmtN(practice.runs)} practice run${practice.runs === 1 ? '' : 's'} (${fmtTokens(practice.tokens)})` : ''}${u.lastActive ? ' · last active ' + ago(u.lastActive) : ''} · ${billedNow(billingLine(agentId, models), u)}</div>
      ${alerts ? `<div style="margin:0 0 8px;padding:6px 10px;border-radius:8px;background:color-mix(in srgb, var(--warn) 12%, transparent)">${alerts}</div>` : ''}
      ${agentId ? `<h4 class="v2sec" style="margin-top:6px">At API prices</h4>${spendChartBox(agentId)}` : ''}
      ${day || ctx ? `<div class="ucard">${day}${ctx}</div>` : ''}${split}
@@ -943,9 +990,13 @@ function renderFleetUsage(f) {
   const lim = f.totals?.limited || 0, fail = f.totals?.failed || 0;
   const failLine = lim + fail ? `<div class="sub" id="usageFailed" style="margin:0 0 10px">⛔ Last 24 hours: ${[lim ? `<b style="color:var(--bad)">${fmtN(lim)}</b> refused (rate limits)` : '', fail ? `<b style="color:var(--bad)">${fmtN(fail)}</b> failed` : ''].filter(Boolean).join(' · ')}`
     + `${worst.length ? ` — ${worst.slice(0, 3).map((a) => `${esc(a.name)} ${fmtN(bad(a))}`).join(' · ')}${worst.length > 3 ? ` · ${worst.length - 3} more` : ''}` : ''}</div>` : '';
+  // Skill practice of the last 24 hours, counted in the figures here, said apart as an agent's Usage says its own (HB-1275).
+  const pr = f.practice && f.practice.runs > 0 ? f.practice : null;
+  const practiceLine = pr ? `<div class="sub" id="usagePractice" style="margin:0 0 10px">🧪 Last 24 hours: ${fmtN(pr.runs)} practice run${pr.runs === 1 ? '' : 's'}`
+    + `${pr.agents > 1 ? ` by ${fmtN(pr.agents)} agents` : ''} · ${fmtTokens(pr.tokens)} tokens${pr.calls ? ` · ${fmtN(pr.calls)} call${pr.calls === 1 ? '' : 's'}` : ''} — counted in the figures here.</div>` : '';
   $('fleetUsageBody').innerHTML = `
     ${alerts ? `<div style="margin:0 0 10px;padding:6px 10px;border-radius:8px;background:color-mix(in srgb, var(--warn) 12%, transparent)">${alerts}</div>` : ''}
-    ${failLine}
+    ${failLine}${practiceLine}
     <h4 class="v2sec" style="margin-top:4px">Context now</h4>
     <div id="fleetContextNow"><div class="sub">Loading…</div></div>
     <h4 class="v2sec" style="margin-top:14px;display:flex;justify-content:space-between;align-items:baseline">At API prices <a href="#" id="fleetUsagePrices" style="text-transform:none;letter-spacing:0;font-weight:400" ${onAction('click', 'openModelPrices', [], 'prevent')}>model prices</a></h4>

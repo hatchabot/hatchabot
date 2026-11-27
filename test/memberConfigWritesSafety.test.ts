@@ -11,7 +11,7 @@ const STATE = '/home/node/.openclaw';
 async function scriptFor(action: string): Promise<{ script: string; target: string }> {
   let script = '';
   const deps = {
-    store: {} as never,
+    store: { listAllowedChannelUserIds: () => ['555'] } as never,
     provider: { execShellOnVolume: async (_ref: string, emitted: string) => {
       script = emitted;
       return { code: 0, stdout: 'set', stderr: '' };

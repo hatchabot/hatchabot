@@ -8,6 +8,9 @@ import { createMembersAndInvites, type MembersAndInvites } from '../src/orchestr
 import { checkInvite, createInvite } from '../src/orchestrator/members/invite.js';
 import { revokeMember } from '../src/orchestrator/members/members.js';
 import { claimFirstContact, resumeFirstContacts } from '../src/orchestrator/members/claim.js';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join as joinPath } from 'node:path';
 import { MemSecrets } from './support/world.js';
 
 /**
@@ -39,10 +42,12 @@ const MIN = 60_000;
 /** The owner's word when a join's window ended unanswered (members/invitations.ts neverMessaged). */
 const NEVER_MESSAGED = '⏳ Someone opened your invite to "Homework Helper" but never messaged it.';
 /** The same when its time ran out while Hatchabot was not running: they may have written then (HB-0838 review). */
-const RAN_OUT_WHILE_DOWN = '⏳ Someone opened your invite to "Homework Helper", but its time to message it ran out while Hatchabot was restarting.';
+const RAN_OUT_WHILE_DOWN = '⏳ Someone opened your invite to "Homework Helper", but its time to message it ran out while Hatchabot was not watching for their message.';
 /** The same when its window passed over who had written to the bot before the join: that may have been them (HB-1221 review). */
 const PASSED_OVER = '⏳ Someone opened your invite to "Homework Helper", but no message from them was let in.';
-const PASSED_OVER_DETAIL = 'Anyone who had already written to its bot when the invite was opened was passed over, as they might have got in first. If that was the person you invited, open that agent → Telegram → Members, press "Let them in again" and ask them to write again. To be sure only they get in, invite them by their @handle.';
+/** A join whose window was still stored, and its agent failed, while nothing watched (HB-1523 review). */
+const FAILED_UNWATCHED = '⏳ Someone opened your invite to "Homework Helper", but it was not watched while the agent had failed, so it was closed unused.';
+const PASSED_OVER_DETAIL = 'Anyone who had already written to its bot when the invite was opened was passed over, as they might have got in first. If that was the person you invited, open that agent → Sharing → Members, press "Let them in again" and ask them to write again. To be sure only they get in, invite them by their @handle.';
 
 interface Life { store: Store; members: MembersAndInvites; told: string[]; details: string[]; woken: string[] }
 
@@ -214,6 +219,36 @@ describe('a join to an agent that is not running (HB-0992)', () => {
     expect(next.store.getMembership('a1', member.userId)?.channelUserId).toBeUndefined();
   });
 
+  it('HB-1222: naming its person, restarted 20 minutes in, its agent up all along: its window ends at its half hour of up time, not 30 minutes after the restart', async () => {
+    const { m, t0, member } = await restartedWhileRunning(20 * MIN, '@made_up_guest');
+    const next = m.boot();
+    next.members.invites.resumePendingJoins();
+    await settle(() => next.store.agentHold('a1', 'pending-joins') === undefined, 200_000);
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(30 * MIN);
+    expect(Date.now() - t0).toBeLessThan(30 * MIN + 10_000);
+    expect(next.told).toEqual([NEVER_MESSAGED]);
+    expect(next.store.getMembership('a1', member.userId)?.channelUserId).toBeUndefined();
+  });
+
+  it('HB-1222: naming its person, to a stopped agent that then ran 20 minutes before a restart: the time it was up counts, the time it was down does not', async () => {
+    const m = machine();
+    let ref = '';
+    let startedAt = 0;
+    const t0 = Date.now();
+    // Stopped for two hours, then started; the process ends 20 minutes after the start.
+    const first = m.boot({ onWait: (store) => { if (!startedAt && Date.now() >= t0 + 2 * 60 * MIN) { m.start(store, ref); startedAt = Date.now(); } },
+      gate: () => (startedAt && Date.now() >= startedAt + 20 * MIN ? new Promise<void>(() => {}) : Promise.resolve()) });
+    ref = await m.agent(first.store);
+    await m.join(first, '@made_up_guest');
+    await settle(() => !!startedAt && Date.now() >= startedAt + 20 * MIN, 400_000);
+    const next = m.boot();
+    next.members.invites.resumePendingJoins();
+    await settle(() => next.store.agentHold('a1', 'pending-joins') === undefined, 200_000);
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(30 * MIN);
+    expect(Date.now() - startedAt).toBeLessThan(31 * MIN);
+    expect(next.told).toEqual([NEVER_MESSAGED]);
+  });
+
   it('HB-0838: open to anyone, its half hour run out while Hatchabot was down: not opened again, and a stranger who writes is not let in', async () => {
     const { m, member } = await restartedWhileRunning(45 * MIN);
     m.theyWrite('5550000099', 'someone_else');
@@ -276,7 +311,7 @@ describe('a join to an agent that is not running (HB-0992)', () => {
     expect(next.store.getMembership('a1', member.userId)?.channelUserId).toBeUndefined();
     // Was: "never messaged it", which was not true.
     expect(next.told).toEqual([RAN_OUT_WHILE_DOWN]);
-    expect(next.details).toEqual(['They may have written meanwhile; if so, their message was not let in. If it is waiting under "Alerts", let them in there; if not, open that agent → Telegram → Members, press "Let them in again" and ask them to write again.']);
+    expect(next.details).toEqual(['They may have written meanwhile; if so, their message was not let in. If it is waiting under "Alerts", let them in there; if not, open that agent → Sharing → Members, press "Let them in again" and ask them to write again.']);
   });
 
   it('HB-0838 review: Hatchabot restarts just as a join\'s window ends unanswered (its window closed, the door being put back): the owner is told, once', async () => {
@@ -451,6 +486,20 @@ describe('a join to an agent that is not running (HB-0992)', () => {
     expect(m.provider.execLog.filter((c) => c[0] === 'pairing').map((c) => c[3])).toEqual(['CODE0002']);
     await settle(() => life.store.agentHold('a1', 'pending-joins') === undefined);
     expect(life.told).toEqual([]);
+  });
+
+  it('HB-1441: a message to a Telegram Business account the bot is connected to, sent before the join, passes its sender over too', async () => {
+    const STRANGER = '5550000099';
+    const m = machine();
+    const t0 = Date.now();
+    const life = m.boot({ dead: true, waiting: () => [{ update_id: 700, business_message: {
+      business_connection_id: 'made-up-connection', message_id: 700, date: Math.floor(t0 / 1000) - 10,
+      chat: { id: Number(STRANGER), type: 'private' }, from: { id: Number(STRANGER), is_bot: false, first_name: 'Someone' }, text: 'hello' } }] });
+    await m.agent(life.store, { asleep: true });
+    const { joined, member } = await m.join(life);
+    expect(joined).toMatchObject({ notRunning: true });
+    // Was: only message and edited_message were read, and the sender was not passed over.
+    expect(m.kept(life.store)).toMatchObject([{ userId: member.userId, excludeIds: [STRANGER] }]);
   });
 
   it('HB-1221: restarted before the wake, the next process still passes over who wrote while it slept', async () => {
@@ -702,6 +751,37 @@ describe('a join to an agent that is not running (HB-0992)', () => {
     expect(next.told).toEqual([]);
   });
 
+  it('HB-1224: in a deploy\'s overlap the newer process takes a kept join up while the older one still watches it: the older one, taken over, leaves it to the newer, and a later restart still has it', async () => {
+    const m = machine();
+    const events: string[] = [];
+    let looks = 0;
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => { release = r; });
+    // The older process's watch takes a couple of looks, then is held there while the newer one boots.
+    const older = m.boot({ trace: (e) => events.push(e), gate: async () => { if (++looks > 2) await held; } });
+    const ref = await m.agent(older.store);
+    m.start(older.store, ref);
+    const { member } = await m.join(older, '@made_up_guest');
+    await settle(() => looks > 2);
+    // The newer process takes the join up at its boot, with a window of its own; it is stopped before it looks again.
+    const newer = m.boot({ dead: true });
+    newer.members.invites.resumePendingJoins();
+    const theirs = newer.store.pairingWindows('a1')[0]!.generation;
+    expect(m.kept(newer.store)).toMatchObject([{ userId: member.userId, generation: theirs }]);
+    release();
+    await settle(() => events.includes('claim.window_superseded'));
+    for (let i = 0; i < 50; i++) await new Promise((r) => setImmediate(r));
+    // Was: the older watch, taken over with the same join time, let the join go, and nothing watched it after the next restart.
+    expect(m.kept(newer.store)).toMatchObject([{ userId: member.userId, generation: theirs }]);
+    expect(older.told).toEqual([]);
+    m.theyWrite();
+    const next = m.boot();
+    next.members.invites.resumePendingJoins();
+    await settle(() => next.store.getMembership('a1', member.userId)?.channelUserId === JOINER_TG);
+    await settle(() => next.store.agentHold('a1', 'pending-joins') === undefined);
+    expect(next.told).toEqual([]);
+  });
+
   it('a join to a running agent opens its window at once, and is kept for a restart all the same (HB-0838); one to a sleeping agent asks for a wake', async () => {
     const m = machine();
     const life = m.boot({ dead: true });
@@ -719,6 +799,261 @@ describe('a join to an agent that is not running (HB-0992)', () => {
     life.store.setHibernated('a1', new Date().toISOString(), 0);
     life.members.invites.wakeForJoin('a1');
     expect(life.woken).toEqual(['a1']);
+  });
+});
+
+describe('what the owner is told when a join ends (HB-1219, HB-1223, HB-1412)', () => {
+  it('HB-1219: a Discord join nobody wrote to points the owner to the agent\'s Members, under Sharing, not to its Telegram tab', async () => {
+    const m = machine();
+    const life = m.boot();
+    const ref = await m.agent(life.store);
+    life.store.insertChannel({ id: 'ch-a1-d', agentId: 'a1', kind: 'discord', accountId: 'hatchabot', secretRef: 'channel/a1/discord', deepLink: 'https://discord.com/users/100000000000000001', createdAt: 'now' });
+    m.start(life.store, ref);
+    const { code } = createInvite(life.store, 'a1', OWNER, '@made_up_guest');
+    await life.members.invites.joinOnApp({ code, name: 'Guest', accountId: undefined, joinKind: 'discord', pre: checkInvite(life.store, code) });
+    await settle(() => life.told.length > 0, 200_000);
+    expect(life.told).toEqual([NEVER_MESSAGED]);
+    // Was: "Open that agent → Telegram → Members", a tab with no Members, for every app.
+    expect(life.details).toEqual(['Open that agent → Sharing → Members and press "Let them in again" when they are ready.']);
+  });
+
+  it('HB-1223: a member removed while their window waits: its end, unanswered or with a stranger knocking, tells the owner nothing', async () => {
+    for (const knock of [false, true]) {
+      const m = machine();
+      const events: string[] = [];
+      let member: { userId: string } | undefined;
+      let removed = false;
+      // Ten minutes into the window the owner removes them; with `knock`, a stranger writes after that.
+      const life = m.boot({ trace: (e) => events.push(e), onWait: (store) => {
+        if (removed || !member || Date.now() < t0 + 10 * MIN) return;
+        removed = true;
+        store.revokeMembership('a1', member.userId);
+        if (knock) m.theyWrite('5550000099', 'someone_else');
+      } });
+      const ref = await m.agent(life.store);
+      m.start(life.store, ref);
+      const t0 = Date.now();
+      ({ member } = await m.join(life, knock ? undefined : '@made_up_guest'));
+      await settle(() => life.store.agentHold('a1', 'pending-joins') === undefined, 200_000);
+      expect(removed).toBe(true);
+      expect(events).toContain(knock ? 'claim.seat_gone' : 'claim.window_closed');
+      // Was: "Someone opened your invite … but never messaged it", for someone the owner had removed.
+      expect(life.told, `knock: ${knock}`).toEqual([]);
+      vi.useRealTimers();
+    }
+  });
+
+  it('HB-1412 review: a join that passed someone over, its window run out and closed just before a restart: the next start says no message from them was let in, as the watch would have', async () => {
+    const STRANGER = '5550000099';
+    const m = machine();
+    let ref = '';
+    const t0 = Date.now();
+    // Asleep, someone had written first; woken two minutes on, and nobody writes.
+    const first = m.boot({
+      waiting: () => [{ update_id: 700, message: { message_id: 700, date: Math.floor(t0 / 1000) - 10, chat: { id: Number(STRANGER), type: 'private' },
+        from: { id: Number(STRANGER), is_bot: false, first_name: 'Someone' }, text: 'hello' } }],
+      onWait: (store) => { if (store.getAgent('a1')!.state === 'STOPPED' && Date.now() >= t0 + 2 * MIN) m.start(store, ref); },
+    });
+    ref = await m.agent(first.store, { asleep: true });
+    // The door's write back to the allowlist, as its window ends, never answers: the process ends there.
+    const vol = m.provider.execShellOnVolume.bind(m.provider);
+    let hung = false;
+    m.provider.execShellOnVolume = async (r, script, opts) => { if (script.includes('"policy":"allowlist"')) { hung = true; return new Promise(() => {}); } return vol(r, script, opts); };
+    await m.join(first);
+    expect(m.kept(first.store)).toMatchObject([{ excludeIds: [STRANGER] }]);
+    await settle(() => hung, 400_000);
+    expect(first.store.pairingWindows('a1', new Date(0))).toEqual([]);
+    expect(first.told).toEqual([]);
+    m.provider.execShellOnVolume = vol;
+    const next = m.boot();
+    next.members.invites.resumePendingJoins();
+    // Was: "never messaged it", untrue if the one passed over was them.
+    expect(next.told).toEqual([PASSED_OVER]);
+    expect(next.details).toEqual([PASSED_OVER_DETAIL]);
+  });
+
+  it('HB-1412: a join whose window its watch gave up (the agent moved, or failed), Hatchabot restarting before the watch told the owner: the next start tells them, once', async () => {
+    for (const end of ['moved', 'failed'] as const) {
+      const m = machine();
+      const events: string[] = [];
+      let ended = false;
+      // After the watch's first look (nobody has written), the agent moves to another machine and is up there, or fails.
+      const first = m.boot({ trace: (e) => events.push(e), onWait: (store) => {
+        if (ended) return;
+        ended = true;
+        if (end === 'moved') store.setAgentHost('a1', 'h2');
+        else store.setAgentState('a1', 'FAILED');
+      } });
+      const ref = await m.agent(first.store);
+      first.store.insertHost({ id: 'h2', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'other box', settings: {}, createdAt: 'now' });
+      m.start(first.store, ref);
+      // The door's write back to the allowlist, once the window is given up, never answers: the process ends there.
+      const vol = m.provider.execShellOnVolume.bind(m.provider);
+      let hung = false;
+      m.provider.execShellOnVolume = async (r, script, opts) => { if (script.includes('"policy":"allowlist"')) { hung = true; return new Promise(() => {}); } return vol(r, script, opts); };
+      await m.join(first, '@made_up_guest');
+      await settle(() => hung, 400_000);
+      expect(events, end).toContain('claim.window_abandoned');
+      expect(first.store.pairingWindows('a1', new Date(0))).toEqual([]);
+      expect(m.held(first.store)).toHaveLength(1);
+      expect(first.told).toEqual([]);
+      m.provider.execShellOnVolume = vol;
+      const next = m.boot();
+      next.members.invites.resumePendingJoins();
+      for (let i = 0; i < 200; i++) await new Promise((r) => setImmediate(r));
+      // Was: let go with nothing said, though the watch, had it not been cut off, said it.
+      expect(next.told, end).toEqual([NEVER_MESSAGED]);
+      expect(m.held(next.store)).toEqual([]);
+      const again = m.boot();
+      again.members.invites.resumePendingJoins();
+      expect(again.told).toEqual([]);
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('two processes at once, in a deploy\'s overlap: one note per join (HB-1520)', () => {
+  it('the older watch gives the window up as its agent fails, and the newer process boots before it says so: the owner is told once', async () => {
+    const m = machine();
+    let failed = false;
+    // After the watch's first look the agent fails; its write of the door back to rest is slow.
+    const older = m.boot({ onWait: (store) => { if (!failed) { failed = true; store.setAgentState('a1', 'FAILED'); } } });
+    const ref = await m.agent(older.store);
+    m.start(older.store, ref);
+    const vol = m.provider.execShellOnVolume.bind(m.provider);
+    let resting = false;
+    let letRestLand: () => void = () => {};
+    const restHeld = new Promise<void>((r) => { letRestLand = r; });
+    m.provider.execShellOnVolume = async (r, script, opts) => { if (script.includes('"policy":"allowlist"')) { resting = true; await restHeld; } return vol(r, script, opts); };
+    await m.join(older, '@made_up_guest');
+    await settle(() => resting, 400_000);
+    // The newer process boots meanwhile, and says it.
+    const newer = m.boot();
+    newer.members.invites.resumePendingJoins();
+    expect(newer.told).toEqual([NEVER_MESSAGED]);
+    // The older one's write lands, and its watch ends.
+    letRestLand();
+    for (let i = 0; i < 500; i++) await new Promise((r) => setImmediate(r));
+    // Was: the older process said it too.
+    expect(older.told).toEqual([]);
+    expect(m.held(newer.store)).toEqual([]);
+  });
+
+  it("the newer process's window for a kept join ends first, unanswered: the older watch, finding it gone, says nothing", async () => {
+    const m = machine();
+    let looks = 0;
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => { release = r; });
+    const older = m.boot({ gate: async () => { if (++looks > 2) await held; } });
+    const ref = await m.agent(older.store);
+    m.start(older.store, ref);
+    await m.join(older, '@made_up_guest');
+    await settle(() => looks > 2);
+    // The newer process takes the join up at its boot and watches it to its end; nobody writes.
+    const newer = m.boot();
+    newer.members.invites.resumePendingJoins();
+    await settle(() => newer.told.length > 0, 400_000);
+    expect(newer.told).toEqual([NEVER_MESSAGED]);
+    expect(newer.store.pairingWindows('a1', new Date(0))).toEqual([]);
+    // The older watch looks again: its window is gone.
+    release();
+    for (let i = 0; i < 500; i++) await new Promise((r) => setImmediate(r));
+    // Was: "never messaged" from the older process too.
+    expect(older.told).toEqual([]);
+  });
+
+  it('a window and where its watch stands are written in one go: another process never reads the window without them', async () => {
+    const dir = mkdtempSync(joinPath(tmpdir(), 'hb-overlap-'));
+    const dbs = [new Database(joinPath(dir, 'hatchabot.db')), new Database(joinPath(dir, 'hatchabot.db'))];
+    try {
+      // Two processes' connections to one database file.
+      const mine = new Store(dbs[0]!);
+      const theirs = new Store(dbs[1]!);
+      const provider = new MockProvider();
+      mine.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
+      mine.insertAIProfile({ id: 'p1', ownerId: OWNER, name: 'AI', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p1', createdAt: 'now' });
+      const { runtimeRef } = await provider.provision({ agentId: 'a1', slug: 'a1', workspace: { files: {}, configPatch: { agentId: 'a1', authMode: 'api-key' } }, env: {} } as never);
+      mine.insertAgent({ id: 'a1', ownerId: OWNER, name: 'Homework Helper', slug: 'a1', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1',
+        persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now', runtimeRef } as never);
+      // What the other process reads the moment the window is written.
+      const read: Array<{ windows: number; watch: boolean }> = [];
+      const open = mine.openPairingWindow.bind(mine);
+      mine.openPairingWindow = (...args: Parameters<Store['openPairingWindow']>) => {
+        const generation = open(...args);
+        read.push({ windows: theirs.pairingWindows('a1', new Date(0)).length, watch: theirs.agentHold('a1', 'first-contact') !== undefined });
+        return generation;
+      };
+      // The watch is let look once, and then waits for good (the database is closed after it).
+      let waiting = false;
+      void claimFirstContact({ store: mine, provider, sleep: () => { waiting = true; return new Promise<void>(() => {}); } },
+        { agentId: 'a1', runtimeRef, accountId: BOT, forUserId: OWNER, timeoutMs: 30 * MIN });
+      await settle(() => waiting);
+      // Was: the window was there for the other process before what its watch keeps of it.
+      expect(read[0]).toEqual({ windows: 0, watch: false });
+      expect(theirs.pairingWindows('a1')).toHaveLength(1);
+      expect(theirs.agentHold('a1', 'first-contact')).toBeDefined();
+    } finally {
+      for (const db of dbs) db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a list of joins changed since it was read is not written over: the second of two processes reads it again', () => {
+    const store = new Store(new Database(':memory:'));
+    store.setAgentHold('a1', 'pending-joins', '["first"]');
+    expect(store.replaceAgentHold('a1', 'pending-joins', '["stale"]', '[]')).toBe(false);
+    expect(store.agentHold('a1', 'pending-joins')).toBe('["first"]');
+    expect(store.replaceAgentHold('a1', 'pending-joins', '["first"]', '["second"]')).toBe(true);
+    expect(store.agentHold('a1', 'pending-joins')).toBe('["second"]');
+  });
+});
+
+describe('a join whose agent failed while nothing watched it (HB-1523)', () => {
+  it('its window still stored at the next start: closed, and the owner told once; a Reopen\'s window since is left to the Reopen; one another process let go is left to it', async () => {
+    for (const how of ['alone', 'reopened', 'let go by another'] as const) {
+      const reopened = how === 'reopened';
+      const m = machine();
+      const events: string[] = [];
+      // The process stops right after the watch's first look: it never sees what comes next.
+      const first = m.boot({ dead: true });
+      const ref = await m.agent(first.store);
+      m.start(first.store, ref);
+      const { member } = await m.join(first, '@made_up_guest');
+      await settle(() => m.kept(first.store)[0]?.generation !== undefined);
+      expect(first.store.pairingWindows('a1')).toHaveLength(1);
+      // The agent fails while Hatchabot is down.
+      first.store.setAgentState('a1', 'FAILED');
+      // With `reopened`, the owner's Reopen wrote the seat's window again before the failure (another watch's now).
+      if (reopened) first.store.openPairingWindow('a1', new Date(Date.now() + 30 * MIN).toISOString(), member.userId, { kind: 'telegram', expect: '@made_up_guest' });
+      const next = m.boot({ trace: (e) => events.push(e) });
+      if (how === 'let go by another') {
+        // The other process in a deploy's overlap lets the join go between this one's read of it and its own let-go.
+        const read = next.store.agentHold.bind(next.store);
+        let reads = 0;
+        next.store.agentHold = ((agentId: string, kind: string) => {
+          if (kind === 'pending-joins' && ++reads === 2) next.store.clearAgentHold(agentId, 'pending-joins');
+          return read(agentId, kind as never);
+        }) as never;
+      }
+      next.members.invites.resumePendingJoins();
+      expect(m.held(next.store), how).toEqual([]);
+      if (how === 'alone') {
+        // Was: let go with nothing said, and its window kept until its time ran out.
+        expect(next.store.pairingWindows('a1', new Date(0))).toEqual([]);
+        expect(events).toContain('claim.window_abandoned');
+        // Was: "never messaged it", though nothing watched for their message.
+        expect(next.told).toEqual([FAILED_UNWATCHED]);
+      } else {
+        // The Reopen's window, or the other process's to close: left, and nothing said here.
+        expect(next.store.pairingWindows('a1', new Date(0)), how).toHaveLength(1);
+        expect(events, how).not.toContain('claim.window_abandoned');
+        expect(next.told, how).toEqual([]);
+      }
+      const again = m.boot();
+      again.members.invites.resumePendingJoins();
+      expect(again.told).toEqual([]);
+      vi.useRealTimers();
+    }
   });
 });
 

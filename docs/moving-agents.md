@@ -72,7 +72,8 @@ takes that bot over. It costs no new slot, and everyone who already messages
 `@MealPlannerBot` keeps the same conversation instead of being handed a stranger.
 The people on its allowlist come across as members too, so nobody — including
 you — has to pair with an agent they were already talking to. (In the web
-adopt flow this is the **"Take over its bot @…"** checkbox, on by default.)
+adopt flow this is the **"Take over its bot, Telegram account “…”"** checkbox, on by
+default: the account as OpenClaw's config names it, which need not be the bot's @name.)
 
 Because a Telegram bot may only be polled by one process, adopt refuses while
 the old instance still has that bot switched on, and tells you how to hand it
@@ -294,6 +295,14 @@ line and the Hatchabot agent can read them: `hatchabot ops`, `GET
 - **AI doesn't travel.** The import binds the agent to an AI profile on the
   target (vendor-matched by default, `--profile <id>` to choose). Model
   config is re-applied from the target's profile; memory is untouched.
+  Budgets don't travel either: the file carries the model you chose, never
+  the cheaper one a monthly budget switched it to, so the copy runs on your
+  model (if the AI source there offers it, else that source's default; with
+  no model of your own, that source's default) until you set a budget on
+  that machine.
+  The download's and the move's
+  confirmation (and `hatchabot download` and `rehost`) say so when a budget
+  has it on a cheaper model.
 - **The owner seat transfers.** Whoever imports owns the copy. Other
   members ride along with their Telegram bindings intact.
 - Importing where a same-slug agent already *lives* is refused; a previously

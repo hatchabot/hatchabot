@@ -3,7 +3,7 @@ import type { Store } from '../../store/store.js';
 import { UP_TRIES, sleepUnref, upEveryMs, type UpWait } from './afterRestart.js';
 import { createClassChanges, type ClassChanges } from './classChanges.js';
 import { createMemoryLimits, type MemoryLimits } from './memoryLimits.js';
-import { createModelRuntime, type ModelRuntime } from './modelRuntime.js';
+import { createModelRuntime, type ModelRuntime, type OwedRefusal } from './modelRuntime.js';
 import { createSourceHolds, type SourceHolds } from './sourceHolds.js';
 
 /**
@@ -79,12 +79,10 @@ export interface AgentSettingsDeps {
   agentGone: (id: string) => boolean;
   /** One write of an agent's AGENTS.md at a time: the turn a save of it takes. */
   withAgentsMdTurn: <T>(agentId: string, fn: () => Promise<T>) => Promise<T>;
-  /** How long a hold on an AI source counts for (the API's HOLD_MS). */
-  sourceHoldMs: number;
   /** Tests: the pause between two looks for a container that is not up yet after a restart (afterRestart.ts). */
   sleep?: (ms: number) => Promise<void>;
   /** After a restart: a model ask an earlier process left that its runtime refused (modelRuntime.ts, HB-1404). */
-  owedRefused?: (agentId: string, ask: string) => void;
+  owedRefused?: (agentId: string, ask: string, how: OwedRefusal) => void;
 }
 
 export function createAgentSettings(deps: AgentSettingsDeps): AgentSettings {
@@ -94,7 +92,7 @@ export function createAgentSettings(deps: AgentSettingsDeps): AgentSettings {
   const models = createModelRuntime({ store, providerFor, trace, inFlight, upWait, ...(deps.owedRefused ? { owedRefused: deps.owedRefused } : {}) });
   const limits = createMemoryLimits({ store, providerFor, trace, inFlight, withAgentsMdTurn: deps.withAgentsMdTurn, upWait });
   const classes = createClassChanges({ store, trace, inFlight, agentGone: deps.agentGone, models, limits });
-  const sourceHolds = createSourceHolds({ holdMs: deps.sourceHoldMs, warn: deps.warn });
+  const sourceHolds = createSourceHolds();
   return {
     models, limits, classes, sourceHolds,
     forgetAgent: (agentId) => classes.forgetAgent(agentId),

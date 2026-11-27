@@ -7,11 +7,6 @@
 // It can only propose; each change arrives here with its full content and
 // executes on Confirm, with the auth of whoever pressed it.
 
-
-
-
-
-
 /** A confirmation card: summary + the FULL spec (expandable) + Confirm/Cancel.
  *  Built with createElement/textContent — file bodies never touch innerHTML. */
 function mgmtProposalCard(p, into) {
@@ -140,7 +135,6 @@ function mgmtCardPlace(p) {
 /** Changes the assistant prepared, waiting for Confirm. Survives reloads and
  *  restarts; whatever prepared them (today the chat, later an agent). */
 let v2PropSig = '';
-let v2PendingCount = 0;
 async function loadProposals() {
   let r; try { r = await api('/v1/proposals'); } catch { return; }
   if (!Array.isArray(r?.pending)) r = { pending: [] }; // an older server mid-deploy
@@ -154,10 +148,11 @@ async function loadProposals() {
   // Cost and model cards (recommended: true) are Usage → Recommended items now, marked as the agent's (v2.158.0); the console still shows every card.
   const cards = r.pending.filter(p => !p.recommended);
   // A card filed again elsewhere (another tab, the phone) changes no id, but loses File it again: in the signature too.
-  const sig = [...r.pending.map(p => p.confirmId), ...failed.map(f => `f:${f.confirmId}${f.refiled ? ':refiled' : ''}`)].join(',');
+  // So does a card that leaves Usage → Recommended (its agent archived, Not now): its id stays, and it was added to
+  // Alerts only when something else changed, while its count said it was there (HB-1458).
+  const sig = [...r.pending.map(p => `${p.confirmId}${p.recommended ? ':rec' : ''}`), ...failed.map(f => `f:${f.confirmId}${f.refiled ? ':refiled' : ''}`)].join(',');
   $('v2Proposals').hidden = !(cards.length || failed.length || renderV2Joins());
   $('v2PropCount').textContent = cards.length || '';
-  v2PendingCount = cards.length;
   // While you talk to your management agent, what it prepares shows right
   // above the conversation — in Hatchabot's frame, which the agent can't draw in.
   const inConsole = $('consoleDlg').open && v2Find(consoleAgentId)?.ops;
@@ -285,15 +280,7 @@ async function denyPair(id, code, who, kind = 'telegram') {
   } catch (e) { toast(e.message); }
 }
 
-
-
-
 // ---- polling ------------------------------------------------------------------
-
-// ---- management-bot presence card --------------------------------------------
-// The mgmt bot is a separate process; it heartbeats to the control plane and
-// this strip is that heartbeat made visible. Deliberately NOT an agent card —
-// it has no container, no volume, no members — just a slim always-on rail.
 let mgmtTick = 0; // counts polls, so the heavier meta reads run every 4th
 
 let pollTimer, pairTick = 0, pollPaused = false;
@@ -367,28 +354,38 @@ async function refreshNow(withMeta, seq) {
     // Activity, at the foot of the home screen, with the machine line.
     void v2LoadActivity(); void v2LoadMachine();
     void v2LoadReadinessPaint(); // each agent's recovery readiness (its Alerts), at most once a minute
-    // Presence strip: cheap single-row read, but 30s staleness is fine —
-    // refresh it on the meta pass and every 4th poll.
+    // The sources' use, the agent's cards, the backup's age, the keys and the security notices: 30 s staleness is
+    // fine, so they are read on the meta pass and every 4th poll.
     if (withMeta || mgmtTick++ % 4 === 0) { void loadSourceUsage(); void loadProposals(); void loadBackupAge(); loadFleetKeys(); void loadSecurityNotices(); }
     // Tailscale set-up is the private address's business (the public one refuses it).
     if (withMeta && tailnet === null && !appConfig.publicAddress) void loadTailnet();
     // Pairing checks hit docker exec — do them on a slower cadence. Every knock on this account's running agents
     // in one read (/v1/pending: the server's half-minute cache, six agents at a time), kept by agent as the per-agent
     // read gave them. The page read each agent's at once, beside the bounded read that was there (HB-1142).
+    // The list is drawn first, and the knocks when their read lands: on a cold cache that read is as slow as the
+    // slowest agent of each six, and the whole page waited for it (HB-1303). The refresh still ends with it.
+    let knocks = null;
     if (pairTick++ % 3 === 0) {
       // Only agents in a chat app can be knocked on: with none running, there is nothing to read.
       const pairMine = ++pairSeq;
-      const all = agents.some(a => a.state === 'RUNNING' && v2ChannelKinds(a).length) ? await api('/v1/pending').catch(() => null) : [];
-      if (pairMine === pairSeq && Array.isArray(all)) { // a failed read keeps the knocks the last one found
-        pairings = {};
-        for (const p of all) {
-          (pairings[p.agentId] ??= []).push({ kind: p.kind, code: p.code, id: p.channelUserId ?? p.telegramId,
-            meta: { username: p.username, firstName: p.firstName, lastName: p.lastName } });
-        }
-      }
+      knocks = (agents.some(a => a.state === 'RUNNING' && v2ChannelKinds(a).length) ? api('/v1/pending').catch(() => null) : Promise.resolve([]))
+        .then((all) => {
+          if (pairMine !== pairSeq || !Array.isArray(all)) return false; // a failed read keeps the knocks the last one found
+          const was = JSON.stringify(pairings);
+          pairings = {};
+          for (const p of all) {
+            (pairings[p.agentId] ??= []).push({ kind: p.kind, code: p.code, id: p.channelUserId ?? p.telegramId,
+              meta: { username: p.username, firstName: p.firstName, lastName: p.lastName } });
+          }
+          return JSON.stringify(pairings) !== was;
+        })
+        // Handled where it is made: a draw below that throws leaves it unawaited, and a rejection then went unhandled.
+        .catch(() => false);
       // Members are read when an agent's sheet opens (renderEditMembers).
     }
     renderSetup(); renderV2(); // renderV2 itself waits out a drag
+    // The knocks drawn as they land, when they changed: on the home screen, their agents' tiles and an open sheet.
+    if (knocks && await knocks) renderV2();
   } catch (e) {
     console.error(e);
     // A failed refresh with a stale shell showing is silent and misleading (the

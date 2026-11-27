@@ -5,7 +5,7 @@ dist/
 
 # Local state — never commit
 .env
-data/
+/data/
 *.sqlite
 *.sqlite-journal
 *.sqlite-wal

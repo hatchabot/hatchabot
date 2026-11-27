@@ -9,6 +9,7 @@ import type { StoredProfile } from '../src/orchestrator/usage/modelScorecard.js'
 import { agentCost, COST_BANDS, COST_PERIODS, costsFor, priceParts, SPEND_RANGES, spendSeries, tierOf, TtlCache, windowPricing } from '../src/orchestrator/usage/agentCosts.js';
 import { priceMix } from '../src/orchestrator/sources/modelOptions.js';
 import { publicClassFor } from '../src/api/publicRoutes.js';
+import { sampleSourceUsage } from '../src/orchestrator/usage/sourceUsage.js';
 
 /** The home screen's cost badges: GET /v1/costs and what it is figured from (made-up agents and numbers). */
 
@@ -287,6 +288,92 @@ describe('spend made before a switch to a local model (HB-0955)', () => {
     expect(chart.choices.some((c) => c.id === 'c-local')).toBe(false);
     expect(spendSeries(w.store, OWNER, 'day', { now, agentId: 'c-local' }).totals).toMatchObject({ cost: 0, tokens: 0 });
     expect(window.agents['c-local']).toBeUndefined();
+  });
+});
+
+describe('during a switch of source, the badges and the chart go by the source its container runs (HB-1498)', () => {
+  it('a badge says plan or local by the source it was built with until its rebuild, and its refusals stay on the chart', async () => {
+    const w = await world();
+    const now = Date.parse('2026-10-05T12:30:00Z');
+    // Saved onto the plan, still running on the key until its rebuild.
+    w.store.setAgentApplied('c-big', 'key', 'claude-opus-4-8');
+    w.store.setAgentAIProfile('c-big', 'plan');
+    // Was: "included" on the plan chosen, though the key it runs is billed.
+    expect(costsFor(w.store, OWNER, 7, now)['c-big']).not.toHaveProperty('plan');
+    // Saved onto the local model, still running on the key: its refusals are still on the chart.
+    w.store.setAgentAIProfile('c-big', 'oll');
+    const hourAgo = new Date(now - 2 * HOUR).toISOString().slice(0, 13);
+    w.store.addModelCallHours('c-big', 'key', new Map([[hourAgo, { ok: 3, limited: 2, failed: 0 }]]));
+    expect(costsFor(w.store, OWNER, 7, now)['c-big']).not.toHaveProperty('local');
+    expect(spendSeries(w.store, OWNER, 'day', { now }).refused).toBe(2);
+    // Rebuilt onto it: local, as before.
+    w.store.setAgentApplied('c-big', 'oll', 'qwen3:8b');
+    expect(costsFor(w.store, OWNER, 7, now)['c-big']).toMatchObject({ local: true });
+    expect(spendSeries(w.store, OWNER, 'day', { now }).refused).toBe(0);
+  });
+});
+
+describe('spend made on a Claude plan before a move to another source (HB-1180)', () => {
+  it('stays plan spend in the window\'s billing and the chart\'s plan share, hour by hour, after the move and once its change is weeks old', async () => {
+    const w = await world();
+    const now = Date.parse('2026-10-20T12:30:00Z');
+    // On the plan until 3 days ago (its container rebuilt onto the key then), on the key since.
+    w.store.setAgentApplied('c-plan', 'plan', 'claude-sonnet-5', iso(now - 20 * DAY));
+    w.store.setModelProfile('c-plan', profile({
+      'claude-sonnet-5': model({ [now - 4 * DAY]: { input: 2.5e6 } }), // $5, on the plan
+      'claude-opus-4-8': model({ [now - 2 * DAY]: { input: 2e6 } }), // $10, on the key
+    }), iso(now));
+    w.store.setAgentAIProfile('c-plan', 'key');
+    w.store.setAgentApplied('c-plan', 'key', 'claude-opus-4-8', iso(now - 3 * DAY));
+    // Its practice on the plan, the day before the move.
+    w.store.addPracticeUsage([{ agentId: 'c-plan', run: 'r1', model: 'claude-sonnet-5', profileId: 'plan', at: iso(now - 3.5 * DAY), day: '2026-10-17', skill: 's', status: 'completed', calls: 1, input: 1e6, output: 0, cacheRead: 0, cacheWrite: 0, usd: 2, unpricedTokens: 0 }]);
+    const week = () => windowPricing(w.store, OWNER, 168, now);
+    // Was: all of it API spend, the source it is on now.
+    expect(week().billing).toEqual({ api: 10, plan: 7 });
+    const chart = () => spendSeries(w.store, OWNER, 'week', { now, agentId: 'c-plan' });
+    expect(chart().totals.cost).toBe(17);
+    expect(chart().planShare).toBeCloseTo(7 / 17, 3);
+    // The usage pass's prune a week and more on keeps the change while the month's chart covers it.
+    w.store.pruneSourceUsage(iso(now - 3 * DAY + 1), iso(now - 31 * DAY));
+    expect(week().billing).toEqual({ api: 10, plan: 7 });
+    // From a release that pruned it at a week: its record's last change says the same.
+    w.store.pruneSourceUsage(iso(now));
+    expect(w.store.appliedSourceChanges('c-plan')).toEqual([]);
+    expect(week().billing).toEqual({ api: 10, plan: 7 });
+    expect(chart().planShare).toBeCloseTo(7 / 17, 3);
+  });
+
+  it('an hour of calls that carried no tokens on a model with no price leaves nothing out', async () => {
+    const w = await world();
+    const now = Date.parse('2026-10-20T12:30:00Z');
+    // Its calls in the window all failed: counted, with no tokens.
+    w.store.setModelProfile('c-gem', profile({ 'gemini-9-pro': model({ [now - HOUR]: { calls: 3 } }) }), iso(now));
+    w.store.setModelProfile('c-big', profile({ 'claude-opus-4-8': model({ [now - 2 * HOUR]: { input: 2e6 } }) }), iso(now));
+    const pr = windowPricing(w.store, OWNER, 24, now);
+    expect(pr.total).toBe(10);
+    // Was: "Tokens on models with no known price were left out", though none were.
+    expect(pr.unpriced).toBeUndefined();
+    // One that did carry tokens still says so.
+    w.store.setModelProfile('c-gem', profile({ 'gemini-9-pro': model({ [now - HOUR]: { calls: 3, input: 1000 } }) }), iso(now));
+    expect(windowPricing(w.store, OWNER, 24, now).unpriced).toBe(true);
+  });
+
+  it('a month with two moves: each hour by its source, once the first move is more than a week old', async () => {
+    const w = await world();
+    const now = Date.parse('2026-10-20T12:30:00Z');
+    w.store.setAgentApplied('c-plan', 'plan', 'claude-sonnet-5', iso(now - 20 * DAY));
+    w.store.setModelProfile('c-plan', profile({
+      'claude-sonnet-5': model({ [now - 12 * DAY]: { input: 2.5e6 }, [now - 2 * DAY]: { input: 2.5e6 } }), // $5 + $5, on the plan
+      'claude-opus-4-8': model({ [now - 6 * DAY]: { input: 2e6 } }), // $10, on the key
+    }), iso(now));
+    w.store.setAgentApplied('c-plan', 'key', 'claude-opus-4-8', iso(now - 10 * DAY));
+    w.store.setAgentApplied('c-plan', 'plan', 'claude-sonnet-5', iso(now - 4 * DAY));
+    // The usage pass, as it prunes.
+    await sampleSourceUsage({ store: w.store, providerFor: () => new MockProvider() }, now);
+    expect(w.store.appliedSourceChanges('c-plan').map((c) => `${c.from}>${c.to}`)).toEqual(['plan>key', 'key>plan']);
+    // Was: the plan's first $5 billed as the key's, the first change pruned with the week's usage.
+    expect(windowPricing(w.store, OWNER, 720, now).billing).toEqual({ api: 10, plan: 10 });
+    expect(spendSeries(w.store, OWNER, 'month', { now, agentId: 'c-plan' }).planShare).toBeCloseTo(0.5, 3);
   });
 });
 

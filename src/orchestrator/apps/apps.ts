@@ -466,16 +466,19 @@ export function secretValues(m: AppManifest, config: Record<string, unknown>): s
 
 /**
  * What an install masks in its tests' output and its errors: the values under
- * the secret fields of the release going in and of the releases it replaces
- * (`earlier`), and every value the config keeps under a key the new release
- * does not declare at all. The config keeps an old field's value when the
+ * the secret fields of the release going in and of the releases it knows
+ * before it (`earlier`), and every value the config keeps under a key none of
+ * those releases declares. The config keeps an old field's value when the
  * next release drops the field, and the field's `secret` went with it: an
  * update printed an older release's key unmasked (HB-1081). A key no release
- * declares now may have been secret in any earlier one, so it is masked too.
+ * known here declares may have been secret in one before them, so it is
+ * masked too; one a known release declared, not secret (a timezone, a
+ * number), is not: every such value was masked throughout (HB-1198).
  */
 export function maskedValues(m: AppManifest, earlier: Array<AppManifest | undefined>, ...configs: Array<Record<string, unknown>>): string[] {
-  const declared = new Set((m.config?.fields ?? []).map((f) => f.key));
-  const keys = new Set([m, ...earlier].flatMap((x) => (x?.app === m.app ? x.config?.fields ?? [] : []).filter((f) => f.secret).map((f) => f.key)));
+  const fields = [m, ...earlier].flatMap((x) => (x?.app === m.app ? x.config?.fields ?? [] : []));
+  const declared = new Set(fields.map((f) => f.key));
+  const keys = new Set(fields.filter((f) => f.secret).map((f) => f.key));
   for (const c of configs) for (const k of Object.keys(c)) if (!declared.has(k)) keys.add(k);
   return [...new Set(configs.flatMap((c) => valuesUnder([...keys], c)))].sort((a, b) => b.length - a.length);
 }
@@ -546,8 +549,12 @@ export interface InstallDeps {
    * file as it was. Throwing stops the install before anything live changes.
    */
   checkConfig?: (config: Record<string, unknown>, existing: Record<string, unknown>) => void | Promise<void>;
-  /** The app record's release (agent_apps): its manifest stands in when the live release's copy cannot be read. */
-  recorded?: { app: string; sha: string; manifest: unknown };
+  /**
+   * The app record's release (agent_apps): its manifest stands in when the
+   * live release's copy cannot be read; with the one before it, they say
+   * which settings were secret (maskedValues).
+   */
+  recorded?: { app: string; sha: string; manifest: unknown; previousManifest?: unknown };
 }
 
 async function sh(d: InstallDeps, script: string, timeoutMs = 60_000) {
@@ -595,7 +602,7 @@ export async function staleFilledFields(d: InstallDeps, m: AppManifest): Promise
   const unread = (why: string) => new AppError(`Could not read ${live} in the agent (${why}), so whether the settings Hatchabot fills in it are up to date could not be told. Nothing was changed; check it, then try again.`);
   const read = await sh(d, `if [ -e ${sq(live)} ]; then cat ${sq(live)}; fi`)
     .catch((e: unknown) => { if (e instanceof SimulatedCrash) throw e; throw unread((e as Error)?.message ?? String(e)); });
-  if (read.code !== 0) throw unread(errText(read) || 'no output');
+  if (read.code !== 0) throw unread(readFailure(read));
   const had = configFileValues(live, read.stdout);
   // A value Hatchabot fills that is not of its field's type throws here, as at the install.
   const { config } = mergeConfig(m, d.facts, had, {});
@@ -622,6 +629,22 @@ export async function releaseManifest(d: InstallDeps, dir: string): Promise<AppM
   try { return parseManifest(r.stdout); } catch { return undefined; }
 }
 
+/**
+ * A release's manifest on the volume, with a folder that is not there told
+ * apart from one that cannot be read (HB-1199): read as the same undefined,
+ * "Put its scheduled tasks back" held over a release folder that was really
+ * gone, its tasks unnamed. `unreadable`: the folder is there (or something
+ * else is, in its place), its manifest missing, unreadable or not one.
+ * A call that cannot reach the agent throws.
+ */
+export async function releaseManifestState(d: InstallDeps, dir: string): Promise<{ manifest: AppManifest } | { gone: true } | { unreadable: string }> {
+  const r = await sh(d, `if [ -d ${sq(dir)} ]; then printf 'present\\n'; cat ${sq(`${dir}/${MANIFEST_FILE}`)}; `
+    + `elif [ -e ${sq(dir)} ] || [ -L ${sq(dir)} ]; then echo "it is not a folder" >&2; exit 1; else printf 'gone\\n'; fi`);
+  if (r.code === 0 && r.stdout === 'gone\n') return { gone: true };
+  if (r.code !== 0 || !r.stdout.startsWith('present\n')) return { unreadable: errText(r) || 'no output' };
+  try { return { manifest: parseManifest(r.stdout.slice('present\n'.length)) }; } catch (e) { return { unreadable: String((e as Error)?.message ?? e).slice(0, 200) }; }
+}
+
 /** The live release's manifest: its file on the volume, else the app record's when it is that release. */
 async function liveManifest(d: InstallDeps, app: string, short: string): Promise<AppManifest | undefined> {
   const onVolume = await releaseManifest(d, `${appPaths(app).releases}/${short}`);
@@ -633,6 +656,13 @@ async function liveManifest(d: InstallDeps, app: string, short: string): Promise
 }
 
 const errText = (r: { stdout: string; stderr: string }) => (r.stderr || r.stdout).trim().slice(0, 300);
+/**
+ * Why a read of an App's config file failed, for its error: what it said on
+ * stderr, never its stdout, which is the file's own text (a read cut off
+ * part way, with nothing on stderr, quoted the settings, secret ones too:
+ * HB-1196).
+ */
+const readFailure = (r: { code: number; stderr: string }) => r.stderr.trim().slice(0, 300) || `it ended with code ${r.code}, saying nothing`;
 
 /**
  * How a failed install or update left the agent, on its error for the routes
@@ -648,8 +678,8 @@ export function outcome<E>(e: E, o: AppOutcome): E {
 }
 
 /**
- * Install or update: unpack the release, stage its config, run its tests
- * against the staged config, then switch: the config and `current` together,
+ * Install or update: judge its config, unpack the release, stage the config,
+ * run its tests against the staged config, then switch: the config and `current` together,
  * then the tasks. Until the switch nothing live changes; a failure in the
  * switch or the tasks puts back the previous release, its config (to the
  * byte) and its tasks, so the agent, its jobs and the record agree. A
@@ -687,7 +717,44 @@ export async function installRelease(d: InstallDeps, rel: Resolved, values: Reco
   /** The secret fields' values, masked in the tests' output before it is kept anywhere. */
   let secrets: string[] = [];
   try {
-    // 1. the code, and an empty staging folder for its data while it is tested.
+    // 1. the config, read and judged before anything is unpacked: one refused
+    // (a value missing, a mailbox shared) left the new commit's code, up to
+    // 100 MB, in releases/ until a later prune (HB-1312). The live file is
+    // not touched until the switch.
+    let stagedConfig: Buffer | undefined;
+    if (m.config) {
+      // The record's manifests too: the live release's file may be gone, and
+      // the one before it may have declared a field the live one dropped.
+      const recorded = (x: unknown): AppManifest | undefined => {
+        if (d.recorded?.app !== m.app || !x) return undefined;
+        const r = manifestSchema.safeParse(x);
+        return r.success ? r.data : undefined;
+      };
+      const earlier = [before, recorded(d.recorded?.manifest), recorded(d.recorded?.previousManifest)];
+      // Until the file is read, what the values given hold is masked, as in the tests' output (HB-1196).
+      secrets = maskedValues(m, earlier, values);
+      // No file is an empty config; one that cannot be read stops it. Read as
+      // empty, the defaults were written over the owner's settings (#105).
+      const read = await sh(d, `if [ -e ${sq(live)} ]; then cat ${sq(live)}; fi`);
+      if (read.code !== 0) throw new AppError(`Could not read ${live} in the agent (${readFailure(read)}), so its settings were left as they are. Check it, then try again.`);
+      const existing = configFileValues(live, read.stdout);
+      const { config, missing, missingKeys, unfilled } = mergeConfig(m, d.facts, existing, values);
+      if (missing.length) {
+        // The fields too, so the page can ask for them: its Update sends no
+        // values, and a field made required (or a required one an older
+        // version left blank) had no way in from it (final audit, 2026-10-22).
+        const e = new AppError(`Needs a value for: ${missing.join(', ')} (give them as key=value).`);
+        (e as AppError & { needs?: unknown }).needs = fieldsToAsk(m).filter((f) => missingKeys.includes(f.key))
+          .map((f) => ({ key: f.key, ...(f.label ? { label: f.label } : {}), ...(f.type ? { type: f.type } : {}), ...(f.secret ? { secret: true } : {}) }));
+        throw e;
+      }
+      if (unfilled.length) throw new AppError(`Hatchabot has nothing to fill ${unfilled.join(', ')} with; set that up, then try again.`);
+      await d.checkConfig?.(config, existing);
+      secrets = maskedValues(m, earlier, config, existing);
+      stagedConfig = Buffer.from(JSON.stringify(config, null, 2) + '\n');
+    }
+
+    // 2. the code, and an empty staging folder for its data while it is tested.
     // The same commit as the live one (a change of values only) keeps the live
     // folder: unpacking over it removed the running code, and anything its
     // tests had built in it, before the new values were even tested (#92).
@@ -704,35 +771,14 @@ export async function installRelease(d: InstallDeps, rel: Resolved, values: Reco
     if (un.code !== 0) throw new AppError(`Could not unpack the code: ${errText(un)}`);
     step('unpacked');
 
-    // 2. the config, staged: the live file is not touched until the switch
-    if (m.config) {
-      // No file is an empty config; one that cannot be read stops it. Read as
-      // empty, the defaults were written over the owner's settings (#105).
-      const read = await sh(d, `if [ -e ${sq(live)} ]; then cat ${sq(live)}; fi`);
-      if (read.code !== 0) throw new AppError(`Could not read ${live} in the agent (${errText(read) || 'no output'}), so its settings were left as they are. Check it, then try again.`);
-      const existing = configFileValues(live, read.stdout);
-      const { config, missing, missingKeys, unfilled } = mergeConfig(m, d.facts, existing, values);
-      if (missing.length) {
-        // The fields too, so the page can ask for them: its Update sends no
-        // values, and a field made required (or a required one an older
-        // version left blank) had no way in from it (final audit, 2026-10-22).
-        const e = new AppError(`Needs a value for: ${missing.join(', ')} (give them as key=value).`);
-        (e as AppError & { needs?: unknown }).needs = fieldsToAsk(m).filter((f) => missingKeys.includes(f.key))
-          .map((f) => ({ key: f.key, ...(f.label ? { label: f.label } : {}), ...(f.type ? { type: f.type } : {}), ...(f.secret ? { secret: true } : {}) }));
-        throw e;
-      }
-      if (unfilled.length) throw new AppError(`Hatchabot has nothing to fill ${unfilled.join(', ')} with; set that up, then try again.`);
-      await d.checkConfig?.(config, existing);
-      // The record's manifest too: the live release's file may be gone.
-      const recorded = d.recorded?.app === m.app ? manifestSchema.safeParse(d.recorded.manifest) : undefined;
-      secrets = maskedValues(m, [before, recorded?.success ? recorded.data : undefined], config, existing);
-      const w = await d.provider.writeToVolume(d.runtimeRef,
-        ['sh', '-c', `umask 077 && cat > ${sq(staged)}`], Buffer.from(JSON.stringify(config, null, 2) + '\n'));
+    // 3. the config, staged beside the live one
+    if (stagedConfig) {
+      const w = await d.provider.writeToVolume(d.runtimeRef, ['sh', '-c', `umask 077 && cat > ${sq(staged)}`], stagedConfig);
       if (w.code !== 0) throw new AppError(`Could not write ${staged}.`);
     }
     step('configured');
 
-    // 3. its tests: the new release, with its env, {data_dir} = the staged folder (the new config, none of the live data)
+    // 4. its tests: the new release, with its env, {data_dir} = the staged folder (the new config, none of the live data)
     let test: Installed['test'];
     if (m.test?.length) {
       log('app.test', { app: m.app, sha: short });
@@ -757,7 +803,7 @@ export async function installRelease(d: InstallDeps, rel: Resolved, values: Reco
     }
     step('tested');
 
-    // 4. switch: the config (the old one kept aside, or a note there was none), then `current`, atomically.
+    // 5. switch: the config (the old one kept aside, or a note there was none), then `current`, atomically.
     // Where `current` stood: a replaced app's own link stays on the volume, so
     // it alone could not tell whether this switch moved it (appOperations.ts, tasksBackAgain).
     step('switching', { toWas: previousSha ?? null });
@@ -770,12 +816,12 @@ export async function installRelease(d: InstallDeps, rel: Resolved, values: Reco
     log('app.switched', { app: m.app, sha: short, previous: previousSha ?? null });
     step('switched');
 
-    // 5. its scheduled commands (syncTasks leaves the old set in place when it fails)
+    // 6. its scheduled commands (syncTasks leaves the old set in place when it fails)
     const tasks = await syncTasks(d, m, before);
     tasksOn = tasks;
     step('tasks');
 
-    // 6. keep the newest releases (never the live one or the one before it).
+    // 7. keep the newest releases (never the live one or the one before it).
     // Housekeeping once the release is live: one that fails, or whose call is
     // rejected (the runner dropping mid-call), is said in the log and the
     // install stands. Rejected, it held an install that had finished (HB-1192).
@@ -865,7 +911,8 @@ export async function clearStaging(d: InstallDeps, app: string, short?: string):
  * lost): the link, read again, decides. One that cannot be put back, or
  * whose place cannot be read, is thrown `held`: the code, the tasks and the
  * record may disagree, and the operation waits for the owner's choice. It
- * ended failed with no choice to make (HB-0254).
+ * ended failed with no choice to make (HB-0254). So is one whose tasks went
+ * on and whose record of that failed: nothing is pointed back (HB-1311).
  */
 export async function switchTo(d: InstallDeps, m: AppManifest, sha: string, from?: AppManifest): Promise<void> {
   const p = appPaths(m.app);
@@ -884,11 +931,25 @@ export async function switchTo(d: InstallDeps, m: AppManifest, sha: string, from
     }
     // It landed: go on as if it had answered.
   }
+  /** Its scheduled tasks, once they are on. */
+  let tasksOn: string[] | undefined;
   try {
-    await syncTasks(d, m, from);
+    tasksOn = await syncTasks(d, m, from);
     d.step?.('tasks');
   } catch (e) {
     if (e instanceof SimulatedCrash) throw e;
+    // Its tasks are on (recording so failed): pointing back left them
+    // running the old release, said "unchanged" (HB-1311), the class
+    // HB-1192 fixed for installs. Nothing is put back: it waits for the
+    // owner's choice, as an install does.
+    if (tasksOn) {
+      const what = tasksOn.length ? `its scheduled tasks went on (${tasksOn.join(', ')})` : 'its scheduled tasks were changed over (it has none)';
+      if (e instanceof Error) {
+        e.message = `${m.app} ${short} was switched on and ${what}, then recording that its tasks are on failed: ${e.message}. Nothing was switched back, so it waits for your choice on its page: use the release it went back to (${short}), or stay on ${shaOf(before) ?? 'the one it had'}.`;
+      }
+      if (e && typeof e === 'object') Object.assign(e, { tasksOn: true });
+      throw outcome(e, { held: true });
+    }
     const back = await sh(d, pointBack(p, before)).catch(() => ({ code: 1, stdout: '', stderr: '' }));
     // The link decides, as above: a put-back whose reply was lost is back.
     const isBack = back.code === 0 || (await linkNow()) === before;
@@ -991,6 +1052,18 @@ const taskCommand = (d: InstallDeps, argv: string[]): Promise<ExecResult> => d.p
     if (err instanceof SimulatedCrash) throw err;
     return { code: 1, stdout: '', stderr: String((err as Error)?.message ?? err) };
   });
+
+/**
+ * The app's jobs its kept task record names (`.tasks-settled.json`, written
+ * once its tasks are on): how its tasks are named when no manifest of its
+ * release is left to name them (HB-1199). Throws when the record or the
+ * list cannot be read.
+ */
+export async function settledAppJobs(d: InstallDeps, app: string): Promise<Job[]> {
+  const origins = await readTaskOrigins(d, app);
+  if (!origins.length) return [];
+  return (await appJobs(d, new Set(origins.map((o) => o.name)))).filter((j) => origins.some((o) => o.id === j.id && o.name === j.name));
+}
 
 /** The job names an app's manifests make: "<app>-<task>", exactly. */
 export function appTaskNames(...ms: Array<AppManifest | undefined>): Set<string> {

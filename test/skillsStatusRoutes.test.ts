@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type Database from 'better-sqlite3';
 import type { AgentState } from '../src/domain/types.js';
-import { clearBusy, markBusy } from '../src/orchestrator/lifecycle/busy.js';
+import { markBusy } from '../src/orchestrator/lifecycle/busy.js';
 import { beginOperation } from '../src/orchestrator/lifecycle/operations.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { as, makeWorld, seedRunningAgent, type World } from './support/world.js';
@@ -10,7 +10,6 @@ const worlds: World[] = [];
 const releases: Array<() => void> = [];
 afterEach(async () => {
   for (const release of releases.splice(0)) release();
-  clearBusy('a1');
   while (worlds.length) await worlds.pop()!.f.close();
 });
 const db = (w: World) => (w.store as unknown as { db: Database.Database }).db;

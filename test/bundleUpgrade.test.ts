@@ -223,6 +223,28 @@ describe('scripts/upgrade.sh on a bundle install', () => {
     expect(read(join(w.home, '.config', 'hatchabot', 'channel')).trim()).toBe('v2.0.2');
   });
 
+  it.skipIf(!existsSync('/dev/full'))('a run going on from a kept .swapping whose first record the full disk stops: the kept record is never cut short, 5, and it stays for the next run (HB-1468)', () => {
+    const w = world();
+    comesUpWhen(w);
+    const sw = join(w.install, '.swapping');
+    publish(w.base, 'v2.0.1', { restart: STARTS_DOWN });
+    expect(upgrade(w, 'v2.0.1').status).toBe(1);
+    publish(w.base, 'v2.0.2');
+    // The disk is full where the record is written; df, asked before the rollback, notes the kept record as it is then.
+    symlinkSync('/dev/full', `${sw}.tmp`);
+    const bin = join(w.root, 'full-at-record'); mkdirSync(bin);
+    const seen = join(w.root, 'record-at-df');
+    writeFileSync(join(bin, 'df'), `#!/bin/sh\ncat ${JSON.stringify(sw)} > ${JSON.stringify(seen)} 2>/dev/null || : > ${JSON.stringify(seen)}\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\necho "/dev/made-up 1000000 989760 10240 99% /"\n`, { mode: 0o755 });
+    const r = upgrade(w, 'v2.0.2', bin);
+    expect(r.status, r.stdout + r.stderr).toBe(5);
+    expect(r.stdout).toContain('(2 of 3)');
+    const kept = `${PUT_BACK}tries 1\nback\ntries 2\n`;
+    expect(read(seen)).toBe(kept); // whole while the run was failing, not only once its rollback wrote it back
+    expect(read(sw)).toBe(kept);
+    expect(existsSync(`${sw}.tmp`)).toBe(false);
+    expect(read(join(w.install, 'VERSION'))).toBe('v2.0.0');
+  });
+
   /** The channel timer's tick, its channel naming `stable` (raw.githubusercontent answered for it; the API never). */
   const channelTick = (w: ReturnType<typeof world>, stable: string) => {
     const bin = join(w.root, 'channels-curl'); mkdirSync(bin, { recursive: true });
@@ -387,7 +409,7 @@ describe('scripts/upgrade.sh on a bundle install', () => {
     });
     expect(r.status, r.stdout + r.stderr).toBe(1);
     expect(r.stdout).toContain("for half an hour, so v2.0.0's files were left in");
-    expect(r.stdout).toContain('Then run hatchabot upgrade: it puts v2.0.0 back first, from its record.');
+    expect(r.stdout).toContain('So the rollback did not finish either: v2.0.0 is not back as it was.\nThen run hatchabot upgrade: it puts v2.0.0 back first, from its record.'); // HB-1383
     expect(existsSync(join(w.install, '.swapping'))).toBe(true); // the record stays
   }, 200_000);
 

@@ -511,12 +511,13 @@ function imageWorld(label = OPENCLAW, tag = TAG) {
   curlShim(bin, releases, log);
   shim(bin, 'git', 'exit 128');
   shim(bin, 'npm', 'exit 1');
-  // docker: every image carries `label`; a local build runs the default OpenClaw.
+  // docker: every image carries `label`; a local build runs the default
+  // OpenClaw, as node, with its build-inputs label (HB-1326).
   shim(bin, 'docker', `echo "docker $*" >> ${JSON.stringify(log)}
 case "$1" in
   inspect) echo ${JSON.stringify(label)} ;;
   run) echo "OpenClaw ${OPENCLAW}" ;;
-  image) exit 1 ;;
+  image) case "$4" in *Config.User*) echo ${JSON.stringify(`node|v1;openclaw=${OPENCLAW};engine=baked`)} ;; *) exit 1 ;; esac ;;
 esac
 exit 0`);
   const w = { root, home, bin, releases, log, app };
@@ -756,7 +757,7 @@ describe('installRuntimeImage on a runner of another CPU, with the release manif
     const bin = join(dir, 'docker');
     writeFileSync(bin, `#!/usr/bin/env bash
 echo "$*" >> ${JSON.stringify(join(dir, 'calls'))}
-if [ "$1" = info ]; then echo aarch64; exit 0; fi
+if [ "$1" = image ] && [ "$2" = inspect ]; then echo arm64; exit 0; fi
 if [ "$1" = -H ] && [ "$3" = info ]; then echo x86_64; exit 0; fi
 if [ "$3" = image ] && [ "$4" = inspect ]; then echo ${JSON.stringify(label)}; exit 0; fi
 exit 0

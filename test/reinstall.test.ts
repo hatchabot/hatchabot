@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { LocalDockerProvider } from '../src/providers/localDockerProvider.js';
+import { EmbedderUntouchedError } from '../src/providers/provider.js';
 
 /**
  * A reinstall on a machine whose previous install's containers survived (the
@@ -177,7 +178,7 @@ case "$*" in
   "inspect --format {{.State.Running}} hatchabot-embedder") [ -f "$d/engine" ] && echo true || exit 1 ;;
   "inspect --format {{.State.Running}} hatchabot-embed-door") [ -f "$d/door" ] && echo true || exit 1 ;;
   # What the format asks for: the key label alone, or the key, memory label and limit.
-  "inspect hatchabot-embedder --format "*embed-memory*) cat "$d/engine" ;;
+  "inspect hatchabot-embedder --format "*embed-memory*) if [ -f "$d/hang" ]; then exec sleep 5; fi; if [ -f "$d/unread" ]; then cat "$d/unread" >&2; exit 1; fi; if [ -f "$d/unread-once" ]; then cat "$d/unread-once" >&2; rm -f "$d/unread-once"; exit 1; fi; cat "$d/engine" ;;
   "inspect hatchabot-embedder --format "*) cut -d'|' -f1 "$d/engine" ;;
   "inspect hatchabot-embed-door --format "*) printf '%s|bridge,hatchabot-embed,\\n' "$(cat "$d/door")" ;;
   "rm -f hatchabot-embedder") if [ -f "$d/refuse" ]; then echo 'Error response from daemon: removal timed out' >&2; exit 1; fi; rm -f "$d/engine" ;;
@@ -205,7 +206,7 @@ exit 0
     };
     const argv = () => (existsSync(log) ? readFileSync(log, 'utf8').split('\n') : []);
     const runs = () => argv().filter((l) => l.startsWith('run -d --name hatchabot-embedder '));
-    return { provider, dir, spec, runs, removals: () => argv().filter((l) => l === 'rm -f hatchabot-embedder').length };
+    return { provider, dir, spec, runs, removals: () => argv().filter((l) => l === 'rm -f hatchabot-embedder').length, looks: () => argv().filter((l) => l.startsWith('inspect hatchabot-embedder --format ') && l.includes('embed-memory')).length };
   }
   const withMemory = async (value: string | undefined, fn: () => Promise<void>) => {
     const had = process.env.HATCHABOT_EMBEDDER_MEMORY;
@@ -267,6 +268,62 @@ exit 0
     writeFileSync(join(other.dir, 'nolimits'), '');
     await withMemory(undefined, () => other.provider.ensureEmbedder(other.spec as never).then(() => {}));
     await withMemory('4g', async () => expect((await other.provider.embedderStatus()).engineMemoryOff).toBeUndefined());
+  });
+
+  it("one look at a serving engine's key and limit that fails is asked again: the engine is kept, nothing changed (HB-1402 review)", async () => {
+    const { provider, dir, spec, runs, removals, looks } = engineStub();
+    await withMemory('2g', () => provider.ensureEmbedder(spec as never).then(() => {}));
+    const before = looks();
+    // Serving on the right key and limit; one inspect times out. Was: the start failed, and the service was stopped.
+    writeFileSync(join(dir, 'unread-once'), 'Error response from daemon: context deadline exceeded\n');
+    await withMemory('2g', () => provider.ensureEmbedder(spec as never).then(() => {}));
+    expect(looks() - before).toBe(2);
+    expect(removals()).toBe(0);
+    expect(runs()).toHaveLength(1);
+  });
+
+  it("a look at the engine's key and limit that gets no answer in its time is not asked again: a hung daemon holds the start once (HB-1402 re-review)", async () => {
+    const { provider, dir, spec, runs, removals, looks } = engineStub();
+    await withMemory('2g', () => provider.ensureEmbedder(spec as never).then(() => {}));
+    const before = looks();
+    writeFileSync(join(dir, 'hang'), '');
+    const had = process.env.HATCHABOT_DOCKER_TIMEOUT_MS;
+    process.env.HATCHABOT_DOCKER_TIMEOUT_MS = '1500';
+    try {
+      const err = await withMemory('2g', () => provider.ensureEmbedder(spec as never).then(() => undefined)).then(() => undefined, (e: unknown) => e);
+      expect(err).toBeInstanceOf(EmbedderUntouchedError);
+    } finally {
+      if (had === undefined) delete process.env.HATCHABOT_DOCKER_TIMEOUT_MS; else process.env.HATCHABOT_DOCKER_TIMEOUT_MS = had;
+      rmSync(join(dir, 'hang'));
+    }
+    // Was: asked three times, each held to its limit.
+    expect(looks() - before).toBe(1);
+    expect(removals()).toBe(0);
+    expect(runs()).toHaveLength(1);
+  });
+
+  it("a start whose look at the old engine's key and limit fails fails too, instead of keeping it unread (HB-1402)", async () => {
+    const { provider, dir, spec, runs, removals, looks } = engineStub();
+    await withMemory('2g', () => provider.ensureEmbedder(spec as never).then(() => {}));
+    // A slow daemon: the look at its labels times out. Was: the engine kept on its old limit, and "up".
+    writeFileSync(join(dir, 'unread'), 'Error response from daemon: context deadline exceeded\n');
+    await withMemory('4g', async () => {
+      const err = await provider.ensureEmbedder(spec as never).then(() => undefined, (e: unknown) => e);
+      expect(err).toBeInstanceOf(EmbedderUntouchedError);
+      expect(err).toMatchObject({ userMessage: "Couldn't read the memory search engine's settings to start it. Try again in a moment." });
+    });
+    // Asked three times, a second apart, before it says so (HB-1402 review); the first start found no engine to look at.
+    expect(looks()).toBe(3);
+    expect(removals()).toBe(0);
+    expect(runs()).toHaveLength(1);
+    // Gone since the first look (removed meanwhile): not a failure; the start goes on, as before.
+    writeFileSync(join(dir, 'unread'), 'Error: No such object: hatchabot-embedder\n');
+    await withMemory('4g', () => provider.ensureEmbedder(spec as never).then(() => {}));
+    // Read again: the new limit takes it.
+    rmSync(join(dir, 'unread'));
+    await withMemory('4g', () => provider.ensureEmbedder(spec as never).then(() => {}));
+    expect(runs()).toHaveLength(2);
+    expect(runs()[1]).toContain('--memory 4g ');
   });
 
   it('a start whose old engine Docker would not remove fails, for a new limit or a new key, instead of saying the old one is up', async () => {

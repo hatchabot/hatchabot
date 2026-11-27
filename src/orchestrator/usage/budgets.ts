@@ -44,6 +44,42 @@ export const PAUSE_WAIT_MS = 20 * 60_000;
 export const DOWNGRADE_RETRY_MS = 3_600_000;
 /** The budget mark kept when its 100% message said a switch did not take; told once a later one takes. */
 const LATE_SWITCH = 101;
+/**
+ * How a switch to a cheaper model ends when a class moves its agent to
+ * another AI source and that drops the cheaper model (classChanges.ts
+ * applyClassToAgent): neither the owner's choice nor a month's end, so the
+ * next pass judges the agent again on its new source (HB-1477).
+ */
+export const CLASS_SOURCE = 'class-source';
+/**
+ * A switch its class ended (CLASS_SOURCE), judged again on the new source
+ * once it was rebuilt there, and already on the cheapest model it can run
+ * there: what its Usage line says (HB-1477 review).
+ */
+export const CLASS_SOURCE_CHEAPEST = 'class-source-cheapest';
+const classEnded = (by: string | undefined): boolean => by === CLASS_SOURCE || by === CLASS_SOURCE_CHEAPEST;
+/**
+ * A model its owner sets by hand after a class ended its budget's switch
+ * (CLASS_SOURCE) wins for the rest of the month, as one set while the
+ * switch was open does: this month's row becomes the owner's, so the next
+ * pass leaves it alone (HB-1477 review). Last month's switch, which its
+ * class ended this month (what runBudgets' skip reads too), has no row of
+ * this month's to become theirs: one is written as the owner's, as Start
+ * over a cut-off pause writes one (startedOverCutOffPause). Before, the
+ * next pass, with its budget reached again, switched their model down
+ * (HB-1552). Called in the write's transaction.
+ */
+export function ownModelOverClass(store: Store, agentId: string, now = Date.now()): void {
+  const tz = machineTz();
+  const month = monthKey(now, tz);
+  for (const by of [CLASS_SOURCE, CLASS_SOURCE_CHEAPEST]) store.retagBudgetPause(agentId, month, by, 'owner');
+  if (store.getBudgetPause(agentId, month)) return;
+  const last = store.getBudgetPause(agentId, prevMonth(month));
+  if (!last?.resumedAt || !classEnded(last.resumedBy) || monthKey(Date.parse(last.resumedAt), tz) !== month) return;
+  const at = new Date(now).toISOString();
+  store.addBudgetPause(agentId, month, last.scope, at, last.kind === 'cheaper' && last.toModel ? { fromModel: last.fromModel ?? null, toModel: last.toModel } : undefined);
+  store.resumeBudgetPause(agentId, month, at, 'owner');
+}
 const refusals = new WeakMap<Store, Map<string, { at: number; day: string }>>();
 const refusalsOf = (store: Store) => { let m = refusals.get(store); if (!m) refusals.set(store, m = new Map()); return m; };
 /** Cost days are kept this long (last month and this one, with room). */
@@ -205,9 +241,13 @@ export interface BudgetView {
   /** ended: paused for a month that is over, and the start it was owed on the 1st has not happened yet (HB-1011). */
   paused?: { at: string; staysStopped?: boolean; ended?: EndedPause };
   /** Moved to a cheaper model by this budget now. */
-  downgraded?: { at: string; to: string };
+  /** `classModel`: the cheaper model is its class's own, which is what comes back when the switch ends: nothing to switch back to (HB-1477 review). */
+  /** `ended`: a switch for a month that is over, its own model still owed (its restore failed): it runs on `to` until a pass puts it back (HB-1496). */
+  downgraded?: { at: string; to: string; classModel?: true; ended?: EndedSwitch };
   /** Started (or its model changed) by hand after this month's action: left alone until the 1st. */
   resumedByHand?: boolean;
+  /** Its class moved it to another AI source, which ended this month's switch to a cheaper model: to be judged again on that source after its rebuild ('pending', CLASS_SOURCE, HB-1477), or judged there with nothing cheaper ('cheapest', CLASS_SOURCE_CHEAPEST). */
+  classMovedSource?: 'pending' | 'cheapest';
 }
 
 export function levelOf(spent: number, usd: number): 0 | 80 | 100 {
@@ -221,8 +261,63 @@ export interface EndedPause {
   spent: number;
   /** `spent` is the whole machine's. */
   machine?: true;
-  /** "November 1": when the pause ended. */
+  /** "November 1": when the pause ended; none when it ended this month with its budget changed (`removed`, `raised`, `changed`). */
+  on?: string;
+  /** Its budget was removed in the month it paused it: that ended the pause, and the start it is owed has not happened yet (HB-1316). */
+  removed?: true;
+  /** Its budget was raised past this month's spend in the month it paused it (HB-1496). */
+  raised?: true;
+  /** Its budget was set to warn, or to a cheaper model, in the month it paused it (HB-1496). */
+  changed?: true;
+}
+
+/**
+ * Why this month's pause no longer holds it, its budget changed since:
+ * removed (HB-1316), raised past this month's spend, or set to warn or to a
+ * cheaper model (HB-1496); what runBudgets ends it for ("budget-raised").
+ * Undefined while its budget still pauses it.
+ */
+function pauseEndedNow(store: Store, agentId: string, month: string, scope: string): Pick<EndedPause, 'removed' | 'raised' | 'changed'> | undefined {
+  const b = store.getBudget(scope);
+  if (!b) return { removed: true };
+  if (b.atLimit !== 'pause') return { changed: true };
+  const spend = monthSpend(store, month, scope === MACHINE ? undefined : [agentId]);
+  const spent = scope === MACHINE ? [...spend.values()].reduce((s, x) => s + x, 0) : spend.get(agentId) ?? 0;
+  return spent < b.usd ? { raised: true } : undefined;
+}
+
+/** A budget's switch to a cheaper model whose month is over, its own model still owed: the month it was for, and the 1st it ended on. */
+export interface EndedSwitch {
+  month: string;
+  /** "November 1". */
   on: string;
+  /** It was this Hatchabot's budget's. */
+  machine?: true;
+}
+
+/**
+ * Its budget's switch to a cheaper model from a month that is over, still
+ * open: each pass tries to put its own model back (runBudgets, "new-month")
+ * and its runtime has refused so far, so it runs on the cheaper model. Not
+ * once its model was changed by hand (the next pass closes it as the
+ * owner's), and not while a cheaper-model budget that covers it is reached
+ * this month, which holds it there as the pass does. Before, every view read
+ * only this month's switch, and such an agent showed nothing (HB-1496).
+ */
+export function endedSwitchOwed(store: Store, agentId: string, month: string, scope: string): { at: string; to: string; ended: EndedSwitch } | undefined {
+  const a = store.getAgent(agentId);
+  if (!a || !switchable(a)) return undefined;
+  const now = store.getBudgetPause(agentId, month);
+  if (now && !now.resumedAt) return undefined;
+  const p = store.openBudgetPauses(agentId).filter((x) => x.kind === 'cheaper' && x.scope === scope && x.month < month && !!x.toModel).at(-1);
+  if (!p || (a.model ?? null) !== p.toModel) return undefined;
+  if (cheaperDue(store, a, month)) return undefined;
+  return { at: p.pausedAt, to: p.toModel!, ended: { month: p.month, on: `${monthName(nextMonth(p.month))} 1`, ...(scope === MACHINE ? { machine: true as const } : {}) } };
+}
+
+/** The line for a switch to a cheaper model that has ended but whose own model is not back yet (HB-1496). */
+export function endedSwitchLine(e: EndedSwitch): string {
+  return `${e.machine ? "This Hatchabot's budget's" : "Its budget's"} cheaper model ended on ${e.on}, but its own model could not be put back yet: Hatchabot tries again each pass, or choose its model now`;
 }
 
 /**
@@ -237,20 +332,33 @@ export interface EndedPause {
 export function endedPauseOwed(store: Store, agentId: string, month: string, scope: string, opts: { machineSpend?: boolean } = {}): { at: string; ended: EndedPause } | undefined {
   const a = store.getAgent(agentId);
   if (!a || a.state !== 'STOPPED' || a.hibernatedAt) return undefined;
-  const p = store.openBudgetPauses(agentId).filter((x) => x.kind === 'pause' && x.scope === scope && x.month < month && !x.alreadyStopped).at(-1);
+  // This month's too, when its budget no longer pauses it (removed, HB-1316;
+  // raised, or set to warn or a cheaper model, HB-1496): the pass owes it a
+  // start as on the 1st.
+  const rows = store.openBudgetPauses(agentId).filter((x) => x.kind === 'pause' && x.scope === scope && x.month <= month && !x.alreadyStopped);
+  const endedNow = rows.some((x) => x.month === month) ? pauseEndedNow(store, agentId, month, scope) : undefined;
+  const p = rows.filter((x) => x.month < month || !!endedNow).at(-1);
   if (!p) return undefined;
+  // Held by a pause budget this month (its own or the machine's): the pass
+  // does not try to start it, and that pause's own line says why (HB-1316).
+  const nowPause = p.month < month ? store.getBudgetPause(agentId, month) : undefined;
+  if ((nowPause && !nowPause.resumedAt && nowPause.kind === 'pause') || pauseDue(store, a, month)) return undefined;
   // The whole machine's spend is its owner's to see (GET /v1/budgets gives it
   // to no one else): anyone else's tile says what their own agent spent.
   const machine = scope === MACHINE && opts.machineSpend === true;
   const spend = monthSpend(store, p.month, machine ? undefined : [agentId]);
   const spent = machine ? [...spend.values()].reduce((s, x) => s + x, 0) : spend.get(agentId) ?? 0;
-  return { at: p.pausedAt, ended: { month: p.month, spent: r2(spent), on: `${monthName(nextMonth(p.month))} 1`, ...(machine ? { machine: true as const } : {}) } };
+  const when = p.month === month ? endedNow! : { on: `${monthName(nextMonth(p.month))} 1` };
+  return { at: p.pausedAt, ended: { month: p.month, spent: r2(spent), ...when, ...(machine ? { machine: true as const } : {}) } };
 }
 
 /** The line for a pause that has ended but whose start has not happened yet (HB-1011). */
 export function endedPauseLine(e: EndedPause, whose: 'it' | 'this Hatchabot'): string {
   const which = whose === 'it' ? "Its budget's pause" : "Its pause for this Hatchabot's budget";
-  return `${which} ended on ${e.on}, but it could not be started yet: Hatchabot tries again each pass, or start it now. ${e.machine ? 'This Hatchabot' : 'It'} used ${money(e.spent)} in ${monthName(e.month)}`;
+  const budget = whose === 'it' ? 'Its budget' : "This Hatchabot's budget";
+  const ended = e.removed ? `${budget} was removed, which ended its pause` : e.raised ? `${budget} was raised, which ended its pause`
+    : e.changed ? `${budget} no longer pauses it, which ended its pause` : `${which} ended on ${e.on}`;
+  return `${ended}, but it could not be started yet: Hatchabot tries again each pass, or start it now. ${e.machine ? 'This Hatchabot' : 'It'} used ${money(e.spent)} in ${monthName(e.month)}`;
 }
 
 export function budgetView(store: Store, b: BudgetRow, spent: number, now: number, tz: string, agentId?: string): BudgetView {
@@ -258,17 +366,24 @@ export function budgetView(store: Store, b: BudgetRow, spent: number, now: numbe
   const elapsed = monthElapsed(now, tz);
   const act = agentId ? store.getBudgetPause(agentId, month) : undefined;
   const open = act && !act.resumedAt && act.scope === b.scope;
-  const ended = agentId && !(open && act.kind === 'pause') ? endedPauseOwed(store, agentId, month, b.scope) : undefined;
+  const openPause = open && act.kind === 'pause';
+  // This month's pause its budget no longer holds (raised past the spend,
+  // or set to warn or a cheaper model) is ended, as one whose budget was
+  // removed: said so while the start it is owed has not happened (HB-1496).
+  const ended = agentId && (!openPause || b.atLimit !== 'pause' || spent < b.usd) ? endedPauseOwed(store, agentId, month, b.scope) : undefined;
+  const openCheaper = open && act.kind === 'cheaper' && act.toModel ? act : undefined;
+  const switchEnded = agentId && !openCheaper ? endedSwitchOwed(store, agentId, month, b.scope) : undefined;
   return {
     scope: b.scope, usd: b.usd, atLimit: b.atLimit, month,
     spent: r2(spent), pct: Math.round((spent / b.usd) * 100),
     ...(elapsed >= 2 / 31 ? { onPace: r2(spent / elapsed) } : {}),
     level: levelOf(spent, b.usd),
     resetsOn: `${monthName(nextMonth(month))} 1`,
-    ...(open && act.kind === 'pause' ? { paused: { at: act.pausedAt, ...(act.alreadyStopped ? { staysStopped: true } : {}) } }
-      : ended ? { paused: ended } : {}),
-    ...(open && act.kind === 'cheaper' && act.toModel ? { downgraded: { at: act.pausedAt, to: act.toModel } } : {}),
+    ...(ended ? { paused: ended } : openPause ? { paused: { at: act.pausedAt, ...(act.alreadyStopped ? { staysStopped: true } : {}) } } : {}),
+    ...(openCheaper ? { downgraded: { at: openCheaper.pausedAt, to: openCheaper.toModel!, ...(openCheaper.fromModel === openCheaper.toModel ? { classModel: true as const } : {}) } }
+      : switchEnded ? { downgraded: { at: switchEnded.at, to: switchEnded.to, ended: switchEnded.ended } } : {}),
     ...(act?.resumedBy === 'owner' ? { resumedByHand: true } : {}),
+    ...(classEnded(act?.resumedBy) && act!.scope === b.scope ? { classMovedSource: act!.resumedBy === CLASS_SOURCE_CHEAPEST ? 'cheapest' as const : 'pending' as const } : {}),
   };
 }
 
@@ -282,8 +397,17 @@ export function budgetLine(v: BudgetView, whose: string): string {
   if (v.paused?.ended) return endedPauseLine(v.paused.ended, whose === 'it' ? 'it' : 'this Hatchabot');
   if (v.paused?.staysStopped) return `Over ${of} (${money(v.spent)}), and stopped by hand: it stays stopped until you start it`;
   if (v.paused) return `Paused: ${whose} used ${of} (${money(v.spent)}). It starts again on ${v.resetsOn} — or raise the budget, or start it now`;
+  if (v.downgraded?.ended) return endedSwitchLine(v.downgraded.ended);
+  // On its class's own model (the cheaper one): over its budget, and nothing to switch back to (HB-1477 review).
+  if (v.downgraded?.classModel) return `Over ${of} (${money(v.spent)}): on ${bare(v.downgraded.to)}, its class's model`;
   if (v.downgraded) return `Over ${of} (${money(v.spent)}): on ${bare(v.downgraded.to)} until ${v.resetsOn} — raise the budget to switch back now`;
-  if (v.level === 100) return `Over ${of}: ${money(v.spent)} so far${v.onPace && v.onPace > v.spent ? `, on pace for ${money(v.onPace)}` : ''}${v.atLimit !== 'warn' && v.resumedByHand ? ' (you took over after its budget acted: left alone until the 1st)' : ''}`;
+  // Its class's move to another source ended the switch: not the owner's taking over (HB-1477).
+  // Said as it stands: waiting for its rebuild there and the check after it, or judged there already (HB-1477 review).
+  const moved = "its class moved it to another AI source, which ended its budget's cheaper model";
+  const after = v.atLimit === 'cheaper' && v.classMovedSource === 'pending' ? ` (${moved}: its budget's first check after it is rebuilt there moves it to that source's cheapest model, if one costs less)`
+    : v.atLimit === 'cheaper' && v.classMovedSource === 'cheapest' ? ` (${moved}: it is already on the cheapest model it can run there)`
+    : v.atLimit !== 'warn' && v.resumedByHand ? ' (you took over after its budget acted: left alone until the 1st)' : '';
+  if (v.level === 100) return `Over ${of}: ${money(v.spent)} so far${v.onPace && v.onPace > v.spent ? `, on pace for ${money(v.onPace)}` : ''}${after}`;
   if (v.level === 80) return `Used ${v.pct}% of ${of} (${money(v.spent)})${v.onPace ? ` — on pace for ${money(v.onPace)}` : ''}${v.atLimit === 'pause' ? '; it pauses at 100%' : v.atLimit === 'cheaper' ? '; it moves to a cheaper model at 100%' : ''}`;
   return '';
 }
@@ -304,16 +428,19 @@ export interface BudgetDeps {
    * transaction, before it is applied: it opens the switch's pause row
    * then, so a change made while it applies (a class's model) sees it and
    * sets the model that comes back. A switch that throws has it dropped.
+   * `made`: the budget and month whose switch it is, which its model ask
+   * names, so a refusal after a restart undoes only that row (HB-1444).
    */
-  downgrade?(agent: Agent, hold: (from: string | null, to: string) => void): Promise<{ from: string | null; to: string } | undefined>;
+  downgrade?(agent: Agent, hold: (from: string | null, to: string) => void, made: { scope: string; month: string }): Promise<{ from: string | null; to: string } | undefined>;
   /** Put an agent's model pin back (null = its source's default), recorded as the budget's. */
   restoreModel?(agent: Agent, pin: string | null): Promise<boolean>;
   /**
    * Put back the cheaper model a budget had chosen (its own was put back for a
    * pause that then did not happen), recorded as that budget's switch. True
    * only if the runtime took it; refused, its own pin stays (eighth review).
+   * `made`: the switch's budget and month, which its model ask names (HB-1444).
    */
-  reapplyCheaper?(agent: Agent, model: string | null): Promise<boolean>;
+  reapplyCheaper?(agent: Agent, model: string | null, made: { scope: string; month: string }): Promise<boolean>;
   isBusy(agentId: string): boolean;
   /**
    * Is its runtime up (not stopped, and its machine answers)? Asked at the
@@ -332,19 +459,38 @@ const switchable = (a: Agent) => !a.ops && !a.migratedTo && a.state !== 'ARCHIVE
 const pausable = (a: Agent) => switchable(a) && !!a.runtimeRef;
 
 /**
- * Its own pause budget is reached this month and a pass will pause it, as
- * runBudgets judges it, though the pause may not be made yet: it waits for a
- * quiet moment first, up to PAUSE_WAIT_MS. What Practice refuses on meanwhile
- * (HB-0933). Not once its owner started it by hand after this month's pause:
- * it runs on until the 1st.
+ * A pause budget that covers it is reached this month and a pass will pause
+ * it, as runBudgets judges it, though the pause may not be made yet: it waits
+ * for a quiet moment first, up to PAUSE_WAIT_MS. Its own, or the machine's,
+ * which pauses every agent but the Hatchabot agent. What Practice refuses on
+ * meanwhile (HB-0933); before, only its own was looked at, so Practice still
+ * spent in the wait before the machine's pause was made (HB-1248). Not once
+ * its owner started it by hand after this month's pause: it runs on until the
+ * 1st. The budget's scope (the agent's id, or MACHINE), or undefined.
  */
-export function ownPauseDue(store: Store, agent: Agent, month: string): boolean {
-  if (!pausable(agent)) return false;
-  const b = store.getBudget(agent.id);
-  if (!b || b.atLimit !== 'pause') return false;
+export function pauseDue(store: Store, agent: Agent, month: string): string | undefined {
+  if (!pausable(agent)) return undefined;
   const prior = store.getBudgetPause(agent.id, month);
-  if (prior?.resumedBy === 'owner' && prior.kind === 'pause') return false;
-  return (monthSpend(store, month, [agent.id]).get(agent.id) ?? 0) >= b.usd;
+  if (prior?.resumedBy === 'owner' && prior.kind === 'pause') return undefined;
+  const own = store.getBudget(agent.id);
+  if (own?.atLimit === 'pause' && (monthSpend(store, month, [agent.id]).get(agent.id) ?? 0) >= own.usd) return agent.id;
+  const machine = store.getBudget(MACHINE);
+  if (machine?.atLimit === 'pause' && [...monthSpend(store, month).values()].reduce((s, x) => s + x, 0) >= machine.usd) return MACHINE;
+  return undefined;
+}
+
+/**
+ * A cheaper-model budget that covers it is reached this month (its own, or
+ * the machine's), so a pass keeps it on the cheaper model a budget chose, as
+ * runBudgets' first step does: what holds an ended switch's own model back
+ * (HB-1496). The budget's scope, or undefined.
+ */
+export function cheaperDue(store: Store, agent: Agent, month: string): string | undefined {
+  const own = store.getBudget(agent.id);
+  if (own?.atLimit === 'cheaper' && (monthSpend(store, month, [agent.id]).get(agent.id) ?? 0) >= own.usd) return agent.id;
+  const machine = store.getBudget(MACHINE);
+  if (switchable(agent) && machine?.atLimit === 'cheaper' && [...monthSpend(store, month).values()].reduce((s, x) => s + x, 0) >= machine.usd) return MACHINE;
+  return undefined;
 }
 
 /**
@@ -394,6 +540,33 @@ export function recordCutOffPauses(store: Store, log?: BudgetDeps['log'], up?: (
 }
 
 /**
+ * Its owner started it by hand over a budget stop a restart cut off before
+ * the pause was recorded (only its hold is kept, HB-0835; the boot leaves a
+ * hold whose record still said RUNNING for a pass): the pause is recorded as
+ * the budget's and ended by its owner, with the hold let go, in one write, so
+ * it runs on until the 1st as after any pause. Before, nothing marked the
+ * Start, and the next pass stopped it again (HB-1406). The month it was for
+ * when one was recorded; undefined when there was none.
+ */
+export function startedOverCutOffPause(store: Store, agentId: string, at: string): string | undefined {
+  const kept = store.agentHold(agentId, 'budget-pause');
+  if (kept === undefined) return undefined;
+  let intent: { month?: string; scope?: string; at?: string } = {};
+  try { intent = JSON.parse(kept) as typeof intent; } catch { /* unreadable: let go */ }
+  return store.transact(() => {
+    let month: string | undefined;
+    const p = intent.month ? store.getBudgetPause(agentId, intent.month) : undefined;
+    if (intent.month && intent.scope && (!p || p.resumedAt)) {
+      store.addBudgetPause(agentId, intent.month, intent.scope, intent.at ?? at);
+      store.resumeBudgetPause(agentId, intent.month, at, 'owner');
+      month = intent.month;
+    }
+    store.clearAgentHold(agentId, 'budget-pause', kept);
+    return month;
+  });
+}
+
+/**
  * One pass, after a usage pass (or at once after a budget changes): record
  * cost days, undo what a new month or a raised budget frees, mark and tell
  * 80% and 100%, and pause, or move to a cheaper model, what the budget says to.
@@ -427,8 +600,8 @@ export async function runBudgets(deps: BudgetDeps, now = Date.now(), opts: { rec
    * so the next pass does not read its own model as the owner's choice (seventh
    * and eighth reviews).
    */
-  const putCheaperBackOrClose = async (a: Agent, cheap: { fromModel?: string | null; toModel?: string | null }): Promise<void> => {
-    if (deps.reapplyCheaper && (await deps.reapplyCheaper(a, cheap.toModel ?? null).catch(() => false))) return;
+  const putCheaperBackOrClose = async (a: Agent, cheap: { scope: string; month: string; fromModel?: string | null; toModel?: string | null }): Promise<void> => {
+    if (deps.reapplyCheaper && (await deps.reapplyCheaper(a, cheap.toModel ?? null, { scope: cheap.scope, month: cheap.month }).catch(() => false))) return;
     store.resumeBudgetPause(a.id, month, nowIso, 'budget-changed');
     deps.log?.('budget.model_restored', { agentId: a.id, why: 'budget-changed', model: cheap.fromModel ?? null });
   };
@@ -569,11 +742,17 @@ export async function runBudgets(deps: BudgetDeps, now = Date.now(), opts: { rec
           // pause is RECORDED, so Start marks the owner's take-over and the next pass
           // does not pause it again in silence — the message promises exactly that
           // (audit, 2026-10-23). FAILED and PROVISIONING agents are judged when they run.
+          // Held by a budget pause from a month that is over, still owed its
+          // start, is the budgets' stop, not the owner's: recorded as this
+          // budget's, it starts when this one lets it, as the earlier one
+          // would have. As "stopped by hand", its tile and message said it
+          // stays stopped though the 1st or a raise starts it (HB-1316).
           if (a.state === 'STOPPED' && (!prior || prior.resumedAt)) {
-            store.addBudgetPause(a.id, month, b.scope, nowIso, undefined, { alreadyStopped: true });
+            const held = store.openBudgetPauses(a.id).some((x) => x.kind === 'pause' && x.month < month && !x.alreadyStopped);
+            store.addBudgetPause(a.id, month, b.scope, nowIso, undefined, held ? undefined : { alreadyStopped: true });
             paused.push(a.id);
-            acted.push({ a, stopped: true });
-            deps.log?.('budget.paused', { agentId: a.id, scope: b.scope === MACHINE ? MACHINE : 'agent', spent: r2(spent), usd: b.usd, alreadyStopped: true });
+            acted.push(held ? { a } : { a, stopped: true });
+            deps.log?.('budget.paused', { agentId: a.id, scope: b.scope === MACHINE ? MACHINE : 'agent', spent: r2(spent), usd: b.usd, alreadyStopped: !held });
           }
           continue;
         }
@@ -611,10 +790,15 @@ export async function runBudgets(deps: BudgetDeps, now = Date.now(), opts: { rec
         // The pause is kept before the stop, and recorded with the hold let go
         // in one write once it took: a restart between the two left a stopped
         // agent the next pass read as stopped by hand, never started again (HB-0835).
-        const intent = JSON.stringify({ month, scope: b.scope, at: nowIso });
-        store.setAgentHold(a.id, 'budget-pause', intent);
+        // A hold an earlier process kept (its stop cut off, and its runtime not
+        // seen since: recordCutOffPauses) stays as it was: replaced by this
+        // try's and let go when this stop failed, the stop that earlier one
+        // made, found later, read as one by hand (HB-1416).
+        const earlier = store.agentHold(a.id, 'budget-pause');
+        const intent = earlier ?? JSON.stringify({ month, scope: b.scope, at: nowIso });
+        if (earlier === undefined) store.setAgentHold(a.id, 'budget-pause', intent);
         let took = false;
-        try { took = await deps.pause(a).catch(() => false); } finally { if (!took) store.clearAgentHold(a.id, 'budget-pause', intent); }
+        try { took = await deps.pause(a).catch(() => false); } finally { if (!took && earlier === undefined) store.clearAgentHold(a.id, 'budget-pause', intent); }
         if (took) {
           store.transact(() => { store.addBudgetPause(a.id, month, b.scope, nowIso); store.clearAgentHold(a.id, 'budget-pause', intent); });
           paused.push(a.id);
@@ -640,6 +824,15 @@ export async function runBudgets(deps: BudgetDeps, now = Date.now(), opts: { rec
         if (!a || !switchable(a)) continue;
         const prior = store.getBudgetPause(a.id, month);
         if (prior?.resumedBy === 'owner' || (prior && !prior.resumedAt)) continue;
+        // Its class moved it to another source, which ended this month's
+        // switch: judged again on that source once the rebuild its switch
+        // needs is done. Tried before, the switch down was refused (its
+        // runtime still runs the old source) and not tried again for an hour (HB-1477).
+        // Last month's switch, closed by its class this month (before the 1st's pass ended it), counts too (HB-1477 review).
+        if (a.appliedProfileId && a.appliedProfileId !== a.aiProfileId) {
+          const last = prior ? undefined : store.getBudgetPause(a.id, prevMonth(month));
+          if (classEnded(prior?.resumedBy) || (classEnded(last?.resumedBy) && !!last?.resumedAt && monthKey(Date.parse(last.resumedAt), tz) === month)) continue;
+        }
         if (deps.isBusy(a.id)) { deferred++; continue; }
         // A switch that failed is not "nothing cheaper": it is tried again on the
         // next pass, and the 100% message waits for it (#185) — for so long
@@ -649,9 +842,9 @@ export async function runBudgets(deps: BudgetDeps, now = Date.now(), opts: { rec
         let r: Awaited<ReturnType<NonNullable<BudgetDeps['downgrade']>>>;
         let held = false;
         const hold = (from: string | null, to: string) => { store.addBudgetPause(a.id, month, b.scope, nowIso, { fromModel: from, toModel: to }); held = true; };
-        try { r = await deps.downgrade(a, hold); } catch (err) {
+        try { r = await deps.downgrade(a, hold, { scope: b.scope, month }); } catch (err) {
           // Not a switch: the row its hold opened goes, and the next pass tries again.
-          if (held) store.dropCheaperPause(a.id, month);
+          if (held) store.dropCheaperPause(a.id, month, b.scope);
           deferred++;
           refused.push(a);
           const day = nowIso.slice(0, 10);
@@ -661,7 +854,11 @@ export async function runBudgets(deps: BudgetDeps, now = Date.now(), opts: { rec
           continue;
         }
         tries.delete(a.id);
-        if (!r) continue; // nothing cheaper on its source
+        if (!r) {
+          // Nothing cheaper on its source: judged there, after its class's move, and said so (HB-1477 review).
+          if (prior?.resumedBy === CLASS_SOURCE) store.retagBudgetPause(a.id, month, CLASS_SOURCE, CLASS_SOURCE_CHEAPEST);
+          continue; // nothing cheaper on its source
+        }
         // Opened by its hold already (a model to restore a change set since kept), or now.
         if (!held) store.addBudgetPause(a.id, month, b.scope, nowIso, { fromModel: r.from, toModel: r.to });
         downgraded.push(a.id);

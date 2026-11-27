@@ -11,13 +11,14 @@ import { filesMb } from '../../domain/filesLimit.js';
 import type { Agent, Channel } from '../../domain/types.js';
 import { CHANNEL_ACCOUNT } from '../../openclaw/configWriter.js';
 import { auditBots, type HostBots } from '../../orchestrator/channels/bots.js';
-import { AgentBusyError, busyDone, isBusy, markBusy, whileBusy } from '../../orchestrator/lifecycle/busy.js';
+import { AgentBusyError, isBusy, markBusy, whileBusy } from '../../orchestrator/lifecycle/busy.js';
 import { pairingKind } from '../../orchestrator/channels/knocks.js';
 import { claimFirstContact, isKnockWindow } from '../../orchestrator/members/claim.js';
 import { parkDiscordBot, poolRef, publicDiscordBot, type DiscordBotRow } from '../../orchestrator/channels/discordPool.js';
-import { admitMember, AdmitError, allowlistScrubScript, announceToMembers, denyPairing, scrubChannelAllowlist, writeDmPolicy } from '../../orchestrator/members/members.js';
+import { admitMember, AdmitError, allowlistScrubScript, announceToMembers, denyPairing, inChannelConfigTurn, PRESS_WAIT_MS, scrubChannelAllowlist } from '../../orchestrator/members/members.js';
 import { rethrowIfCrash } from '../../orchestrator/lifecycle/operations.js';
 import { stopAndConfirm } from '../../orchestrator/lifecycle/quiesce.js';
+import { SecretNotFoundError } from '../../secrets/secretStore.js';
 import { ChannelTakenError, normalizeHandle } from '../../store/store.js';
 import { pinnedPeerFetch } from '../../util/peerAddress.js';
 import { sixAtATime } from '../../util/queues.js';
@@ -87,7 +88,7 @@ export function registerChannelRoutes(app: FastifyInstance, ctx: RouteContext): 
     parkedBotToTake, stopForBotHandover, owedAfterHandover, botDisplayNameFor, rememberBotName, forgetBotName,
     startRecheck, endRecheck, botSecretRefs,
   } = ctx.channels.bots;
-  const { kindForCode, cachedKnocks, forgetKnocks, restDoor } = ctx.channels.knocks;
+  const { kindForCode, cachedKnocks, forgetKnocks, restDoor, openDoor, openDoorWhenFree } = ctx.channels.knocks;
 
   // ---- Telegram's spare bots (telegramPool.ts) -------------------------------
   app.get('/v1/pool', async (req) => {
@@ -106,12 +107,16 @@ export function registerChannelRoutes(app: FastifyInstance, ctx: RouteContext): 
             bots: deps.channel.pool
               .list()
               .filter((b) => ownsLocalHost(req) || !b.ownerId || b.ownerId === ownerIdOf(req))
+              .map((b) => ({ ...b, wornBy: b.leasedTo ?? store.findAgentUsingAccount(b.username)?.id }))
               .map((b) => ({
                 username: b.username,
-                leasedTo: b.leasedTo,
+                // Leased, or free in the pool while a live agent's channel row
+                // still names it (a detach or a delete a restart cut off): in
+                // use either way, not a spare to Delete (telegramPool.ts #connectedTo).
+                leasedTo: b.wornBy,
                 // Which agent wears this bot right now — names beat ids in
                 // a roster meant for humans.
-                leasedToName: b.leasedTo && (!seen || seen.has(b.leasedTo)) ? store.getAgent(b.leasedTo)?.name : undefined,
+                leasedToName: b.wornBy && (!seen || seen.has(b.wornBy)) ? store.getAgent(b.wornBy)?.name : undefined,
                 ownerId: ownsLocalHost(req) ? b.ownerId : undefined, // undefined = shared house bot
                 shared: !b.ownerId,
                 mine: b.ownerId === ownerIdOf(req),
@@ -141,7 +146,8 @@ export function registerChannelRoutes(app: FastifyInstance, ctx: RouteContext): 
     if (throttled(req, ownerIdOf(req))) return reply.code(429).send({ error: TOKEN_CHECK_THROTTLED });
     let username: string;
     try {
-      username = await verifyBotToken(token);
+      // Telegram as the routes are handed it, as every other call to it here (HB-1447).
+      username = await verifyBotToken(token, deps.oauthFetch ?? fetch);
     } catch (err) {
       // Telegram not answering is no strike against the person: 503, try again.
       if (!(err instanceof InvalidBotTokenError)) throw err;
@@ -259,7 +265,7 @@ export function registerChannelRoutes(app: FastifyInstance, ctx: RouteContext): 
       // Every check before the token is held: one refused here is never
       // written to disk (telegram/pending/<id>), where it outlived the refusal.
       let username: string;
-      try { username = await verifyBotToken(token); }
+      try { username = await verifyBotToken(token, deps.oauthFetch ?? fetch); }
       catch (err) {
         if (err instanceof InvalidBotTokenError) { noteFailure(req, ownerIdOf(req)); return reply.code(400).send({ error: err.userMessage }); }
         throw err;
@@ -302,8 +308,13 @@ export function registerChannelRoutes(app: FastifyInstance, ctx: RouteContext): 
     }
     const clash = store.findAgentUsingAccount(result.accountId);
     if (clash && clash.id !== agent.id) {
-      // The lease stays: the bot is live on the other agent, and releasing it
-      // queued the idle name onto that agent's bot (regression review).
+      // A pool bot's lease goes back unused: kept, it stayed leased to this
+      // agent with no row on it, never offered again. Not released: that
+      // told this agent's people "end of this agent" and queued the idle
+      // name onto the other agent's bot (regression review); returnUnused
+      // does neither on a live agent's bot.
+      const pool = (deps.channel as { pool?: { owns(u: string): boolean; returnUnused?(u: string, agentId: string): void } }).pool;
+      if (pool?.returnUnused && pool.owns(result.accountId)) pool.returnUnused(result.accountId, agent.id);
       return reply.code(409).send({ error: `@${result.accountId} already belongs to "${clash.name}".` });
     }
     // The bot found, not connected after all, with no farewell: it never
@@ -328,7 +339,7 @@ export function registerChannelRoutes(app: FastifyInstance, ctx: RouteContext): 
     // Under the agent's lock, as the Discord/Slack attach is: two attaches at
     // once (a double-click) both passed the checks above, and the second's
     // insert threw ChannelTakenError as a 500 (audit, 2026-10-23).
-    let attached: 'ok' | 'has-one' | 'taken' | 'gone';
+    let attached: 'ok' | 'has-one' | 'taken' | 'gone' | 'lost';
     try {
       attached = await whileBusy(agent.id, 'telegram-attach', async () => {
         // Deleted, archived or rebuilding while the bot was found: a row and a
@@ -338,7 +349,29 @@ export function registerChannelRoutes(app: FastifyInstance, ctx: RouteContext): 
           await giveBack(result, true);
           return 'gone' as const;
         }
-        if (store.getChannelForAgent(agent.id)) return 'has-one' as const;
+        const has = store.getChannelForAgent(agent.id);
+        if (has) {
+          // Another attach of this agent connected first. The bot this one
+          // found goes back unused, unless it is that very bot (two at once
+          // from the pool find one lease): kept, a spare stayed leased to
+          // an agent with no row on it, and to a gone agent once it was
+          // deleted, never counted again (HB-1263).
+          if (has.accountId.toLowerCase() !== result.accountId.toLowerCase()) await giveBack(result, false);
+          return 'has-one' as const;
+        }
+        // A spare's lease, judged again here: another attach of this agent,
+        // refused as busy, gave it back meanwhile, and a row put on it named
+        // a bot the pool offered the next agent (HB-1263). Not ours now, it
+        // goes back as unused (its idle name queued, while it is free).
+        // (A pool that keeps no leases, a test's stand-in, is not asked.)
+        const pool = deps.channel.pool as { owns(u: string): boolean; list?: () => Array<{ username: string; leasedTo?: string }> };
+        if (pool.list && pool.owns(result.accountId)) {
+          const lease = pool.list().find((b) => b.username.toLowerCase() === result.accountId.toLowerCase())?.leasedTo;
+          if (lease !== agent.id) {
+            await giveBack(result, false);
+            return 'lost' as const;
+          }
+        }
         try {
           store.insertChannel({
             id: randomUUID(), agentId: agent.id, kind: deps.channel.kind, accountId: result.accountId,
@@ -364,6 +397,7 @@ export function registerChannelRoutes(app: FastifyInstance, ctx: RouteContext): 
     }
     if (attached === 'gone') return reply.code(409).send({ error: `It changed while its bot was being found (it is ${(store.getAgent(agent.id)?.state ?? 'deleted').toLowerCase()}); the bot was not connected.` });
     if (attached === 'has-one') return reply.code(409).send({ error: 'It already has a Telegram bot.' });
+    if (attached === 'lost') return reply.code(409).send({ error: `@${result.accountId} went back to the pool while it was being connected; it was not connected. Try again.` });
     if (attached === 'taken') return reply.code(409).send({ error: `@${result.accountId} was just connected to another agent. Each agent needs its own bot.` });
     store.setAgentWebOnly(agent.id, false);
     await deps.channel.syncDisplayName?.(result.accountId, agent.name).catch(() => {});
@@ -1240,7 +1274,15 @@ export function registerChannelRoutes(app: FastifyInstance, ctx: RouteContext): 
     const probe = async ([username, r]: [string, typeof rows extends Map<string, infer V> ? V : never]) => {
       let alive: boolean | undefined;
       let displayName: string | undefined;
-      const token = await secrets.get(r.secretRef).catch(() => null);
+      let tokenMissing = false;
+      let tokenUnreadable = false;
+      // Absent is not the same as not read: a read that failed (the store
+      // busy, a file it could not open, a secret key that changed) offered
+      // to Remove the spare, which scrubs a token that is there.
+      const token = await secrets.get(r.secretRef).catch((err: unknown) => {
+        if (err instanceof SecretNotFoundError) tokenMissing = true; else tokenUnreadable = true;
+        return null;
+      });
       if (token) {
         try {
           const res = await botFetch(`https://api.telegram.org/bot${token}/getMe`, { signal: AbortSignal.timeout(6000) });
@@ -1250,10 +1292,13 @@ export function registerChannelRoutes(app: FastifyInstance, ctx: RouteContext): 
           alive = b.ok === true ? true : telegramRefusedToken(res.status, b) ? false : undefined;
           displayName = b.ok === true ? b.result?.first_name : undefined;
         } catch { alive = undefined; /* Telegram unreachable ≠ bot dead */ }
-      } else {
-        alive = false;
+      } else if (!tokenUnreadable) {
+        // No token here to ask Telegram with: not Telegram's "no", which it
+        // was said to be ("Telegram rejects this token"), and nothing to
+        // judge the bot by (HB-1384). The page says how to put it back.
+        tokenMissing = true;
       }
-      return { username, ...r, secretRef: undefined, alive, displayName };
+      return { username, ...r, secretRef: undefined, alive, displayName, ...(tokenMissing ? { tokenMissing } : {}), ...(tokenUnreadable ? { tokenUnreadable } : {}) };
     };
     for (let i = 0; i < entries.length; i += 8) {
       out.push(...(await Promise.all(entries.slice(i, i + 8).map(probe))));
@@ -1331,7 +1376,11 @@ export function registerChannelRoutes(app: FastifyInstance, ctx: RouteContext): 
       // anyway, leaving a second unlink nothing to find (HB-1090).
       let outcome: 'done' | 'failed' | 'volume-gone';
       try {
-        outcome = await whileBusy(id, 'discord-unlink', async () => {
+        // The scrub and the binding's removal in one turn at the agent's
+        // chat-app access, as a member's removal is (HB-1554): a door rest
+        // asked for meanwhile read the id as still theirs, and its write,
+        // landing after the scrub, put it back on the agent's allowFrom.
+        outcome = await whileBusy(id, 'discord-unlink', () => inChannelConfigTurn(store, id, async () => {
           const ownId = store.memberIdentities(id, me).discord;
           const agent = store.getAgent(id);
           if (ownId && /^\d{5,32}$/.test(ownId) && agent?.runtimeRef && agent.state !== 'DELETED' && store.getChannelForAgent(id, 'discord')) {
@@ -1346,7 +1395,7 @@ export function registerChannelRoutes(app: FastifyInstance, ctx: RouteContext): 
           }
           n += store.unbindMemberIdentity(id, me, 'discord');
           return 'done' as const;
-        });
+        }));
       } catch (err) {
         if (!(err instanceof AgentBusyError)) throw err;
         // Mid-move or mid-rebuild: kept for a retry, as a failed scrub is.
@@ -1495,12 +1544,16 @@ export function registerChannelRoutes(app: FastifyInstance, ctx: RouteContext): 
         // They are on the list now, so the door goes back to silence (unless
         // a window is still open for someone else, or the agent is open).
         await restDoor(agent);
-        forgetKnocks(agent.id);
         return { approved: true, member: admitted };
       } catch (err) {
         if (err instanceof AdmitError) return reply.code(err.status).send({ error: err.userMessage });
         throw err;
       } finally {
+        // Forgotten however it ends, as deny does: one refused after the
+        // approval had taken the request from the store (the agent changed,
+        // the seat could not be linked) left the knocks read before it for
+        // half a minute, the request shown as waiting still (HB-1309).
+        forgetKnocks(agent.id);
         release();
       }
     },
@@ -1537,7 +1590,7 @@ export function registerChannelRoutes(app: FastifyInstance, ctx: RouteContext): 
         throw err;
       } finally {
         // Again once the store has changed: a dashboard's read made during the turn-away saw the request still there,
-        // and was kept for half a minute, so "Not now" came back (HB-1302). Approve forgets after its change already.
+        // and was kept for half a minute, so "Not now" came back (HB-1302). Approve forgets in its finally too (HB-1309).
         forgetKnocks(agent.id);
       }
     },
@@ -1608,7 +1661,17 @@ export function registerChannelRoutes(app: FastifyInstance, ctx: RouteContext): 
         }
         const clash = store.findAgentUsingAccount(fresh.accountId);
         if (clash && clash.id !== agent.id) {
-          await deps.channel.release(fresh.accountId).catch(() => {});
+          // Back unused, as the attach gives one back: released with no
+          // reason, the lease's agent (this one) was the departing one, and
+          // its people were told "end of this agent" on the other agent's
+          // live bot, whose idle name was queued too.
+          // A pasted token held for this agent, for that agent's bot: only
+          // what is held for this one goes, as the attach's clash leaves it.
+          // Released, its token went, under the bot's name, which may be the
+          // other agent's stored token.
+          const pool = (deps.channel as { pool?: { owns(u: string): boolean; returnUnused?(u: string, agentId: string): void } }).pool;
+          if (pool?.returnUnused && pool.owns(fresh.accountId)) pool.returnUnused(fresh.accountId, agent.id);
+          else await deps.channel.discardPending?.(agent.id);
           return { code: 409, error: `@${fresh.accountId} already belongs to "${clash.name}".` };
         }
 
@@ -1690,19 +1753,8 @@ export function registerChannelRoutes(app: FastifyInstance, ctx: RouteContext): 
     // finishes that if it fails too). An app its running config does not
     // have (`no-account`: an image without that app's plugin is built
     // without it) has no door to open now, and is not a refusal: its next
-    // build writes the door from the setting. Only a write that failed is.
-    /** Each app's door opened: the first that did not take it, and why, or undefined when all did. */
-    const refusedDoor = async (a: Agent): Promise<{ kind: string; why: string } | undefined> => {
-      for (const ch of store.listChannelsForAgent(a.id)) {
-        let why = 'the write to its volume failed';
-        const out = await writeDmPolicy(
-          { store, provider: providerFor(a.hostId), log: trace(a.id) },
-          { agentId: a.id, runtimeRef: a.runtimeRef!, kind: ch.kind, accountId: ch.kind === 'telegram' ? ch.accountId : CHANNEL_ACCOUNT, policy: 'pairing' },
-        ).catch((err: unknown) => { why = String(err instanceof Error ? err.message : err).slice(0, 160); return 'failed' as const; });
-        if (out === 'failed') return { kind: ch.kind, why };
-      }
-      return undefined;
-    };
+    // build writes the door from the setting. Only a write that failed is
+    // (openDoor).
     // Turned on while a change holds the agent (a rebuild that may have
     // written its config, the door shut, already): the live write is skipped
     // while it rebuilds, or lands on a config the rebuild then replaces, and
@@ -1710,31 +1762,39 @@ export function registerChannelRoutes(app: FastifyInstance, ctx: RouteContext): 
     // door is opened on what runs then, the same way. One that does not take
     // it keeps the setting the owner was answered with (its next build writes
     // the door from it), and says so on its timeline: put back, the setting
-    // changed with no word to anyone (HB-1156 review).
-    if (parsed.data.on && !was && isBusy(agent.id)) {
-      void busyDone(agent.id).then(async () => {
-        const now = store.getAgent(agent.id);
-        // Turned off since, or not up: its next build writes the door from the setting.
-        if (!now?.allowKnocks || !now.runtimeRef || now.state !== 'RUNNING') return;
-        const refused = await refusedDoor(now);
-        if (refused) trace(now.id)('agent.knock_door_failed', refused);
-      }).catch((err: unknown) => app.log.error({ err, agentId: agent.id }, 'opening the door once the agent was free failed'));
-    }
+    // changed with no word to anyone (HB-1156 review). Kept in the store
+    // meanwhile: a restart during the wait lost it (HB-1264).
+    if (parsed.data.on && !was && isBusy(agent.id)) openDoorWhenFree(agent.id);
     // Live, not at the next rebuild: "anyone can knock" that only takes
     // effect in a minute or two is a setting people press twice.
+    // Each of a press's writes waits for the agent's turn at its chat apps
+    // half a minute at most (one for each app, and one for a look again: a
+    // few times that, with several apps): behind a slow one (a removal on a
+    // machine that answers slowly) it waited as long as that took, the
+    // button pressed and nothing said (HB-1554). A rest that waited that long
+    // is left waiting, on its own, and lands when its turn comes: turned off,
+    // the setting is off, and the door shuts then (the sweep shuts it too);
+    // turned on again by then, it writes nothing (restDoor asks in its turn).
+    const rest = async (a: typeof agent, wait = true) => {
+      const r = wait ? await restDoor(a, { waitMs: PRESS_WAIT_MS }) : 'busy';
+      if (r === 'busy') void restDoor(a).catch(() => {});
+    };
     if (agent.runtimeRef && agent.state === 'RUNNING') {
       if (parsed.data.on) {
-        if (await refusedDoor(agent)) {
+        const refused = await openDoor(agent, { waitMs: PRESS_WAIT_MS });
+        if (refused) {
           store.setAllowKnocks(agent.id, was);
           trace(agent.id)('agent.allow_knocks', { on: was, undone: true });
-          if (!was) await restDoor({ ...agent, allowKnocks: false });
-          return reply.code(502).send({
+          // Refused for its wait, the rest behind it would wait as long again: left to wait on its own.
+          if (!was) await rest({ ...agent, allowKnocks: false }, !refused.busy);
+          const stays = `It stays ${was ? 'open to knocks' : 'invite only'}.`;
+          return reply.code(refused.busy ? 409 : 502).send({
             allowKnocks: was,
-            error: `Its bot did not take the change — is its machine awake? It stays ${was ? 'open to knocks' : 'invite only'}. Try again in a moment, or Rebuild it.`,
+            error: refused.busy ? `${refused.why} ${stays}` : `Its bot did not take the change — is its machine awake? ${stays} Try again in a moment, or Rebuild it.`,
           });
         }
       } else {
-        await restDoor({ ...agent, allowKnocks: false });
+        await rest({ ...agent, allowKnocks: false });
       }
     }
     return { allowKnocks: parsed.data.on };

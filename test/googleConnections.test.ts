@@ -710,6 +710,26 @@ describe('attach / detach / remove', () => {
     expect(w.store.connectionRemovals('a1')).toEqual([]);
   });
 
+  it("a removal Google does not confirm is said, listed on GET /v1/connections, and a given-up one is marked done by DELETE /v1/connections/ending/:id (HB-1336)", async () => {
+    const refusing = (async (url: any) => (String(url).includes('/revoke') ? new Response('', { status: 503 }) : new Response('{}', { status: 200 }))) as unknown as typeof fetch;
+    const w = await world(refusing);
+    await w.secrets.put('connection/c1', 'fixture-refresh-held');
+    w.store.insertConnection({ id: 'c1', ownerId: OWNER, kind: 'google', email: 'mailbox@example.org', services: ['gmail'], secretRef: 'connection/c1' });
+    const del = await w.f.inject({ method: 'DELETE', url: '/v1/connections/c1', headers: H });
+    expect(del.json()).toEqual({ removed: true, pendingOn: 0, stillEnding: true });
+    const list = await w.f.inject({ method: 'GET', url: '/v1/connections', headers: H });
+    expect(list.json().ending).toEqual([expect.objectContaining({ email: 'mailbox@example.org', givenUpAt: null, lastAnswer: 'Google did not revoke it: Google answered 503' })]);
+    expect(list.body).not.toContain('fixture-refresh-held');
+    const id = list.json().ending[0].id as string;
+    expect((await w.f.inject({ method: 'DELETE', url: `/v1/connections/ending/${id}`, headers: H })).statusCode).toBe(404);
+    w.store.giveUpConnectionCleanup('connection/c1', 'Google did not revoke it: Google answered 503');
+    expect((await w.f.inject({ method: 'DELETE', url: `/v1/connections/ending/${id}`, headers: { 'x-hatchabot-owner': 'someone-else' } })).statusCode).toBe(404);
+    const done = await w.f.inject({ method: 'DELETE', url: `/v1/connections/ending/${id}`, headers: H });
+    expect(done.statusCode).toBe(200);
+    expect(done.json()).toEqual({ dismissed: true });
+    expect((await w.f.inject({ method: 'GET', url: '/v1/connections', headers: H })).json().ending).toEqual([]);
+  });
+
   it('an attach while the connection is being deleted is refused, not imported behind the removal (issue #16)', async () => {
     const w = await connectedWorld('mailbox@example.org');
     const g = gogBarrier(w.provider, 'gog auth remove');

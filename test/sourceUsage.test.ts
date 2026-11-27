@@ -333,6 +333,38 @@ describe('sampleSourceUsage + summarizeSourceUsage', () => {
   });
 });
 
+describe('practice runs in the source counts (HB-1270)', () => {
+  const NOW = Date.parse('2026-09-15T18:00:00Z');
+  const row = (agentId: string, at: string, calls: number, profileId = 'max') => ({ agentId, run: `r-${agentId}-${at}`, model: 'claude-opus-4-8', profileId, at, day: at.slice(0, 10),
+    skill: 'hatchabot-writing', status: 'completed', calls, input: 1000 * calls, output: 0, cacheRead: 0, cacheWrite: 0, usd: 0, unpricedTokens: 0 });
+  it('their calls are in the windows, top agents, hours and slots, the others\' counts too; their tokens were already; never a success of the source\'s', async () => {
+    const { store } = await world();
+    store.insertAIProfile({ id: 'key', ownerId: OWNER, name: 'Key', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/key', createdAt: 'now' } as never);
+    store.addPracticeUsage([
+      row('a', '2026-09-15T17:31:00.000Z', 3),            // inside the hour
+      row('a', '2026-09-15T14:02:00.000Z', 2),            // inside 5 h
+      row('b', '2026-09-12T09:00:00.000Z', 4),            // inside the week
+      row('x', '2026-09-15T16:00:00.000Z', 5),            // someone else's agent on the shared plan
+      row('a', '2026-09-15T17:40:00.000Z', 7, 'key'),      // on another source
+    ]);
+    store.addLimitHit('a', 'max', '2026-09-15T17:00:00.000Z', 'claude-opus-4-8');
+    const src = summarizeSourceUsage(store, OWNER, NOW).find((s) => s.id === 'max')!;
+    // Was: 0 everywhere, the tokens beside them counting practice.
+    expect(src.window1h.requests).toBe(3);
+    expect(src.window5h.requests).toBe(5);
+    expect(src.window24h.requests).toBe(5);
+    expect(src.window7d.requests).toBe(9);
+    expect(src.topAgents.map((t) => [t.name, t.requests])).toEqual([['todo', 5], ['sched', 4]]);
+    expect(src.hourly.find((h) => h.hour === '2026-09-15T17')).toEqual({ hour: '2026-09-15T17', ok: 3, limited: 0 });
+    expect(src.slots.find((x) => x.slot === '2026-09-15T17:30')).toEqual({ slot: '2026-09-15T17:30', ok: 3, limited: 0 });
+    expect(src.others).toEqual({ agents: 1, liveAgents: 1, requests5h: 5, requests7d: 5 });
+    // A refusal is not answered by a practice call: the status is still the log's.
+    expect(src.status).toBe('limited');
+    expect(src.lastOkAt).toBeUndefined();
+    expect(summarizeSourceUsage(store, OWNER, NOW).find((s) => s.id === 'key')!.window1h.requests).toBe(7);
+  });
+});
+
 describe('GET /v1/ai-profiles/usage', () => {
   it('returns one entry per visible source with the summary shape', async () => {
     const { store, provider } = await world();

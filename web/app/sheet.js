@@ -1240,8 +1240,10 @@ function v2Pane(a, tab) {
   const goto = (t) => onAction('click', 'openV2Agent', [a.id, t]);
   const place = v2PlaceInGroup(a);
   const st = v2Status(a);
-  // Overview's list of what is wrong, less what a notice above already says with its button.
-  const whyList = st.why.filter(w => !(a.state === 'FAILED' && /^it failed/.test(w)) && !(w === TEMPLATE_WHY && a.state !== 'ARCHIVED'));
+  // Overview's list of what is wrong, less what a notice above already says with its button, and the Telegram rename
+  // its notice says with when (botNameNote): it was said twice there (HB-1268).
+  const renameWhy = new Set(a.botNamePending ? agentAttention(a).filter(x => x.key === 'botName').map(x => x.why) : []);
+  const whyList = st.why.filter(w => !(a.state === 'FAILED' && /^it failed/.test(w)) && !(w === TEMPLATE_WHY && a.state !== 'ARCHIVED') && !renameWhy.has(w));
   // A loop, a budget at 100% and a spike link to their Recommended item (the agent's Usage tab).
   const recOf = new Map(v2Mine(a) ? agentAttention(a).filter(x => x.rec).map(x => [x.why, x.rec]) : []);
   const src = profiles.find(p => p.id === a.aiProfileId);
@@ -1384,7 +1386,9 @@ async function v2AddTelegram(id, withToken) {
     toast(r.atNextStart ? `Connected @${r.username}. It stays down, and answers there once it next starts (memory kept).` : `Connected @${r.username} — rebuilding so it answers there (memory kept).`, 6000);
     await refresh(false);
   } catch (e) {
-    if (/pool/i.test(e.message) && !withToken) { $('v2TgToken').hidden = false; $('v2TgTokenIn').focus(); return; }
+    // No spare to take: the box for a token of their own. Read from the answer, not its words: a spare that
+    // went back to the pool while it was connected says "pool" too, and its "Try again" was never shown.
+    if (e.data?.needsToken && !withToken) { $('v2TgToken').hidden = false; $('v2TgTokenIn').focus(); return; }
     toast(e.message, 8000);
   }
 }

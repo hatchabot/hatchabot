@@ -130,7 +130,7 @@ done
 # line too), and that is the rule of every systemd since 2023 and of
 # Hatchabot's own readers. Never taken from the environment: one a caller
 # exported chose the rule, so it is unset here, before any reading. The same
-# in the seven scripts that read .env so (test/backupKeyLine.test.ts).
+# in every script that reads .env so (test/backupKeyLine.test.ts, READERS).
 unset SYSTEMD_MAJOR
 systemd_major() {
   [ -z "${SYSTEMD_MAJOR+x}" ] || return 0
@@ -228,6 +228,17 @@ if [ "$PURGE" = 1 ] && [ ! -f "$DB_PATH" ] && [ -n "$SHELL_DB" ] && [ -f "$(in_i
     # their containers are there it takes them for another install's, and
     # keeps the network and images too (other_installs).
     echo "If this install was started with that setting, that is its database, and --purge would not read it: it would remove the service but none of its agents. Their containers and volumes would stay (and, while those containers are there, the network and images they run on), and so would the database. Refusing."
+    # What it would remove all the same, there now (HB-1383). The data folder
+    # stays while a database is in it (other_databases): the shell's, when it
+    # is there, keeps it, and is not said to go (review of HB-1383).
+    GOES=""
+    if [ -d "$ENV_DIR/data" ]; then
+      SD="$(cd "$(dirname "$SHELL_DB")" 2>/dev/null && pwd -P)" || SD=""
+      case "$SD/" in "$(cd "$ENV_DIR/data" && pwd -P)/"*) ;; *) GOES="$GOES, $ENV_DIR/data (unless a database is in it)" ;; esac
+    fi
+    [ ! -f "$HOME/.config/hatchabot/env" ] || GOES="$GOES, ~/.config/hatchabot/env (the hatchabot command's sign-in)"
+    [ ! -f "$HOME/.config/hatchabot/channel" ] || GOES="$GOES, the channel pin"
+    [ -z "$GOES" ] || echo "  It would still remove${GOES#,}."
     echo "  It is this install's:     put the line HATCHABOT_DB=$SHELL_DB in $ENV_DIR/.env, with the key it was started with (HATCHABOT_SECRET_KEY), then run this again."
   fi
   echo "  It is another install's:  run this again from a shell without it (unset HATCHABOT_DB AGENTCLAW_DB)."
@@ -438,9 +449,29 @@ if have docker; then
 fi
 [ -z "$RUNNERS" ] || echo "  runners:   $(printf '%s\n' "$RUNNERS" | wc -l | tr -d ' ') agents on other machines — not reached from here, they keep running there"
 echo
-if [ "$PURGE" = 1 ]; then
+# The images and the agents' network stay while another install's containers
+# are here (other_installs), as images() and the network step below keep
+# them; with no database, this install's own agents count as another's. The
+# banner said they would be DELETED all the same (review of HB-1383).
+OTHERS_N=0
+if [ "$PURGE" = 1 ] && have docker; then OTHERS_N="$(other_installs | wc -l | tr -d ' ')"; fi
+KEPT_SAID="        The runtime images and the docker network are KEPT: $OTHERS_N container$([ "$OTHERS_N" = 1 ] || echo s) of another Hatchabot install on this machine may use them"
+if [ "$PURGE" = 1 ] && [ "$DB_FOUND" = 1 ] && [ "$OTHERS_N" = 0 ]; then
   echo "  MODE: --purge — agent volumes, the database$([ "$BACKUPS" = 1 ] && echo ", the backups"), the runtime images"
   echo "        and the docker network will be DELETED. Agents cannot be recovered$([ "$BACKUPS" = 1 ] && echo " (not even from a backup)")."
+elif [ "$PURGE" = 1 ] && [ "$DB_FOUND" = 1 ]; then
+  echo "  MODE: --purge — agent volumes and the database$([ "$BACKUPS" = 1 ] && echo " and the backups") will be DELETED. Agents cannot be recovered$([ "$BACKUPS" = 1 ] && echo " (not even from a backup)")."
+  echo "$KEPT_SAID."
+elif [ "$PURGE" = 1 ]; then
+  # No database to read: it said the agents' volumes and the database would
+  # go, and there were none of either it could find (HB-1383).
+  echo "  MODE: --purge — there is no database at $DB_PATH, so no agent of this install's is known, and"
+  if [ "$OTHERS_N" = 0 ]; then
+    echo "        none of their volumes will be removed. $([ "$BACKUPS" = 1 ] && echo "The backups, the" || echo "The") runtime images and the docker network will be DELETED."
+  else
+    echo "        none of their volumes will be removed.$([ "$BACKUPS" = 1 ] && echo " The backups will be DELETED.")"
+    echo "$KEPT_SAID (with no database, this install's own agents count as another's)."
+  fi
 else
   echo "  MODE: service only — agents are STOPPED, not deleted, and their"
   echo "        volumes, the database, the backups and the images are KEPT."
@@ -800,9 +831,13 @@ if [ "$PURGE" = 1 ]; then
     case "${1##*/}" in *.sqlite|*.sqlite3|*.db|*-wal|*-shm|*-journal) return 0 ;; esac
     [ -f "$1" ] || return 1
     [ -r "$1" ] || return 2
-    # Its NULs dropped before the $( ): bash 4.4 and later warn of each one.
-    # In the C locale, or a Mac's tr stops at a byte that is not UTF-8.
-    [ "$(head -c 15 "$1" 2>/dev/null | LC_ALL=C tr -d '\000')" = "SQLite format 3" ]
+    # Its first 15 bytes, read by the shell itself: a head and a tr for each
+    # file made a big tree in the folder slow to check (HB-1153). Up to a NUL
+    # (-d ''), which the header has only after those 15, so none reaches the
+    # value; byte by byte in the C locale other_databases runs in.
+    local h=""
+    IFS= read -r -d '' -n 15 h 2>/dev/null < "$1"
+    [ "$h" = "SQLite format 3" ]
   }
   # A line for each: "=<path>" a database, "?<path>" a file or folder that
   # cannot be read, so may be or hold one.
@@ -812,7 +847,9 @@ if [ "$PURGE" = 1 ]; then
   }
   readable_dir() { [ -r "$1" ] && [ -x "$1" ]; }
   other_databases() {
-    local e n f
+    # The C locale: is_database reads bytes, and a file that is not UTF-8 is
+    # read as one too.
+    local e n f LC_ALL=C
     readable_dir "$DATA_DIR" || { printf '?%s\n' "$DATA_DIR"; return 0; }
     for e in "$DATA_DIR"/* "$DATA_DIR"/.[!.]* "$DATA_DIR"/..?*; do
       { [ -e "$e" ] || [ -L "$e" ]; } || continue
@@ -871,6 +908,7 @@ if [ "$PURGE" = 1 ]; then
       rm -f "$f" 2>/dev/null || left="$left $f"
     done
     if [ -n "$left" ]; then echo "  could NOT remove$left"
+    elif [ "$had" = 1 ] && [ -n "$DB_LED_TO" ]; then echo "  removed the link to the database in $DATA_DIR ($1)"
     elif [ "$had" = 1 ]; then echo "  removed the database in $DATA_DIR ($1)"
     else echo "  no database of this install's was left in $DATA_DIR ($1)"; fi
   }
@@ -894,6 +932,17 @@ if [ "$PURGE" = 1 ]; then
     [ -z "$keys" ] || keys=" $keys $verb the memory search service's keys."
     echo "  kept$left in $DATA_DIR: the app keeps them beside its database, and $why.$keys $todo"
   }
+  # A database reached through a link (HB-1443): SQLite follows the link, so
+  # the database is the file it leads to, with its -wal and -shm, and the
+  # server's lock, beside that. Only the link goes, here or with its folder,
+  # and the purge said "removed the database" of the link alone; the file it
+  # leads to is named and kept: what else uses it is not this script's to
+  # judge. readlink -f (not on a Mac before 12.3), else node's realpath.
+  DB_LED_TO=""
+  if [ -L "$DB_PATH" ]; then
+    DB_LED_TO="$(readlink -f "$DB_PATH" 2>/dev/null)" || DB_LED_TO=""
+    [ -n "$DB_LED_TO" ] || DB_LED_TO="$(node -e 'try { process.stdout.write(require("fs").realpathSync(process.argv[1])) } catch {}' "$DB_PATH" 2>/dev/null)" || DB_LED_TO=""
+  fi
   # The whole directory only when it is Hatchabot's own (the install's data/
   # or a folder named hatchabot-data, as docs/releasing.md sets one up), and
   # no other database is in it; a database placed elsewhere (a home
@@ -924,6 +973,11 @@ if [ "$PURGE" = 1 ]; then
     *) rm_db "the folder is not Hatchabot's own, so it stays"
        say_beside "the folder is not Hatchabot's own, so they may be yours too" "Delete those that are Hatchabot's if no other install keeps its database there" ;;
   esac
+  DB_KEPT=""
+  if [ -n "$DB_LED_TO" ] && [ -e "$DB_LED_TO" ]; then
+    DB_KEPT="$DB_LED_TO"
+    echo "  kept $DB_LED_TO, the database $DB_PATH was a link to, and whichever of its -wal, -shm and .lock are beside it: only the link was removed. Delete them if no install uses that database any more"
+  fi
   [ -f "$ENV_DIR/.env" ] && rm -f "$ENV_DIR/.env" && echo "  removed $ENV_DIR/.env"
   if [ "$BACKUPS" != 1 ] && [ -d "$BACKUP_DIR" ]; then
     echo "  kept $BACKUP_DIR (pass --backups to delete its backup sets too)"
@@ -939,16 +993,29 @@ else
   echo "Hatchabot is no longer running or installed on this machine."
 fi
 [ "$DOCKER_LOST" = 0 ] || echo "But Docker did not answer, so this install's agents were not stopped: see docker ps."
+# A database reached through a link is kept (HB-1443): only the link went,
+# and no line below may say the database is gone (review).
 if [ "$PURGE" = 1 ] && [ -n "${VOLS_LEFT:-}" ]; then
-  echo "Its agents and database are gone, but these agent volumes are NOT — their data is still on this machine:"
+  if [ -n "${DB_KEPT:-}" ]; then
+    echo "Its agents and the link to its database are gone (the database it led to is kept, at $DB_KEPT), but these agent volumes are NOT — their data is still on this machine:"
+  else
+    echo "Its agents and database are gone, but these agent volumes are NOT — their data is still on this machine:"
+  fi
   for v in $VOLS_LEFT; do echo "  · $v"; done
   echo "See what holds one:  docker ps -a --filter volume=<name>   then:  docker volume rm <name>"
 elif [ "$PURGE" = 1 ] && [ -n "$RUNNERS" ]; then
-  echo "Its agents on this machine, their volumes and the database are gone. These still run on their runners (--forget-runners), no longer managed from anywhere:"
+  if [ -n "${DB_KEPT:-}" ]; then
+    echo "Its agents on this machine, their volumes and the link to its database are gone (the database it led to is kept, at $DB_KEPT). These still run on their runners (--forget-runners), no longer managed from anywhere:"
+  else
+    echo "Its agents on this machine, their volumes and the database are gone. These still run on their runners (--forget-runners), no longer managed from anywhere:"
+  fi
   printf '%s\n' "$RUNNERS" | sed 's/^/  · /'
   echo "On each runner: docker ps -a, then docker rm -f <container> and docker volume rm <container>-vol."
 elif [ "$PURGE" = 1 ] && [ "$DB_FOUND" = 0 ]; then
   echo "There was no database at $DB_PATH, so none of this install's agents were found, and none were removed. Any still here: docker ps -a, and docker volume ls."
+  if [ "$BACKUPS" != 1 ] && [ -d "$BACKUP_DIR" ]; then echo "Backups remain in $BACKUP_DIR (--backups removes them)."; fi
+elif [ "$PURGE" = 1 ] && [ -n "${DB_KEPT:-}" ]; then
+  echo "Its agents and volumes are gone, and the link to its database; the database it led to is kept, at $DB_KEPT."
   if [ "$BACKUPS" != 1 ] && [ -d "$BACKUP_DIR" ]; then echo "Backups remain in $BACKUP_DIR (--backups removes them)."; fi
 elif [ "$PURGE" = 1 ]; then
   echo "Its agents, volumes and database are gone."

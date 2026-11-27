@@ -100,12 +100,22 @@ export type DefaultModelChange = { model: string; models?: string[]; apply?: str
 export type DefaultModelApplied = {
   profile: Omit<AIProfile, 'secretRef'>;
   applied: number; held: number; live: number; staged: number; classDetached: number;
-  classDetachPending?: number; volumeGone?: number; notSwitched?: Array<{ id: string; name: string; reason: string }>; othersHeld?: number;
+  classDetachPending?: number; volumeGone?: number; notSwitched?: Array<{ id: string; name: string; reason: string; why: NotSwitchedWhy }>;
+  /** Other accounts' agents kept on their model, and of them `othersUnchecked`: on the source only since the last round of checks began, never checked (HB-1342). */
+  othersHeld?: number; othersUnchecked?: number;
   memoryPending?: string[]; limitsKept?: Array<{ name: string; why: string }>;
 } | {
   /** The list, with the models kept for agents that stay on theirs, would hold more than a source does: nothing was written (HB-0907). */
   refused: 'menu-full'; error: string;
+} | {
+  /** The source was deleted while the runtime checks waited: nothing was written. */
+  refused: 'gone'; error: string;
 };
+/** Why one of the caller's agents was not switched: its runtime is too old for the new default, its model was changed while this applied, or it joined the source too late to be checked (HB-1342). */
+export type NotSwitchedWhy = 'runtime' | 'changed' | 'late';
+
+/** How many times a new default's apply looks for agents that joined its source while its runtime checks waited, and checks them (HB-1342). */
+const JOIN_ROUNDS = 3;
 
 /** The most models a source's list holds, its default among them: what create and edit take (src/api/usage/aiSourceRoutes.ts) and the editor sends. */
 export const SOURCE_MODELS_MAX = 16;
@@ -430,7 +440,6 @@ export function createAiSources(deps: AiSourcesDeps): AiSources {
   const applyDefaultModel: AiSources['applyDefaultModel'] = async (profile, ownerId, change, ledger) => {
     const newDefault = change.model;
     const applyIds = new Set(change.apply ?? []);
-    const oldDefault = profile.model;
 
     const mine = store.listAgents(ownerId).filter((a) => a.aiProfileId === profile.id);
     // Each one's model as asked for when this began: a model chosen for it
@@ -452,18 +461,13 @@ export function createAiSources(deps: AiSourcesDeps): AiSources {
     // rule a class model and the model route keep, audit #069). Said per
     // agent in `notSwitched` (HB-0232). An agent with no container is judged
     // on the image it would be built on.
-    const notSwitched: Array<{ id: string; name: string; reason: string }> = [];
+    const notSwitched: Array<{ id: string; name: string; reason: string; why: NotSwitchedWhy }> = [];
     const cannotFollow = new Set<string>(); // ticked, and too old for the new default: ticking it frees nothing
     for (const a of mine) {
       if (!applyIds.has(a.id)) continue;
       const tooOld = await subscriptionRuntimeProblem(a, profile, newDefault, a.runtimeRef ? undefined : (a.image ?? null));
-      if (tooOld) { applyIds.delete(a.id); cannotFollow.add(a.id); notSwitched.push({ id: a.id, name: a.name, reason: tooOld }); }
+      if (tooOld) { applyIds.delete(a.id); cannotFollow.add(a.id); notSwitched.push({ id: a.id, name: a.name, reason: tooOld, why: 'runtime' }); }
     }
-    // On a shared source, another account's pins are held the same way: its
-    // stored pin was kept, but left off the menu effectiveModel ignored it
-    // and moved that agent onto our new default (A098). Only a pin that was
-    // valid before this call — one already stale stays stale.
-    const oldMenu = [oldDefault, ...(profile.models ?? [])];
     // Another account's agent that follows the default moves with it, so it
     // gets the same runtime check a ticked one of ours does: one whose
     // OpenClaw is too old for the new default on a subscription is pinned to
@@ -471,15 +475,63 @@ export function createAiSources(deps: AiSourcesDeps): AiSources {
     // not the caller's agents. Each is checked whatever its pin: its owner
     // may clear the pin while these checks wait, and it then follows the
     // new default, which only a check lets it do.
-    const othersFine = new Set<string>();
+    const othersFine = new Set<string>(), othersChecked = new Set<string>();
     for (const a of others) {
       if (gone(a)) continue;
+      othersChecked.add(a.id);
       if (!(await subscriptionRuntimeProblem(a, profile, newDefault, a.runtimeRef ? undefined : (a.image ?? null)))) othersFine.add(a.id);
+    }
+    // An agent that joined the source while those checks waited (moved onto
+    // it, its own or another account's) is checked too before it may follow
+    // the new default: a few rounds at most, as each round's checks are a
+    // wait in which another may join. Before, one of the caller's followed
+    // the new default unchecked, and another account's was held unchecked,
+    // a pin its owner did not choose (HB-1342). Its model as it joined goes
+    // in the ledger's snapshot, so a move to the new default is recorded.
+    const seen = new Set([...mine, ...others].map((a) => a.id));
+    const joinedMine: Agent[] = [];
+    const joinedFine = new Set<string>();
+    const joinedTooOld = new Map<string, string>();
+    for (let round = 0; round < JOIN_ROUNDS; round++) {
+      const joined = store.listAllActiveAgents().filter((a) => a.aiProfileId === profile.id && !gone(a) && !seen.has(a.id));
+      if (!joined.length) break;
+      for (const a of joined) {
+        seen.add(a.id);
+        (a.ownerId === ownerId ? ledgerBefore : othersBefore).set(a.id, snapshotModels(store, [a.id]).get(a.id));
+        if (a.ownerId === ownerId) joinedMine.push(a);
+      }
+      for (const a of joined) {
+        const tooOld = await subscriptionRuntimeProblem(a, profile, newDefault, a.runtimeRef ? undefined : (a.image ?? null));
+        if (a.ownerId !== ownerId) { othersChecked.add(a.id); if (!tooOld) othersFine.add(a.id); }
+        else if (tooOld) joinedTooOld.set(a.id, tooOld);
+        else joinedFine.add(a.id);
+      }
+    }
+    // One of the caller's that joined during the last round's checks, too
+    // late to be checked: held below, and named. Read with the writes, as
+    // nothing waits from here on.
+    for (const a of store.listAllActiveAgents()) {
+      if (a.ownerId !== ownerId || a.aiProfileId !== profile.id || gone(a) || seen.has(a.id)) continue;
+      seen.add(a.id);
+      ledgerBefore.set(a.id, snapshotModels(store, [a.id]).get(a.id));
+      joinedMine.push(a);
     }
 
     // From here to the writes nothing waits, so each agent is judged as it
     // is now, after those checks, and what is counted for the list is what
-    // is pinned. Held = "runs today": its override, or for a follower the
+    // is pinned. So is the source: its default and its list as an edit made
+    // while the checks waited left them, which were written over from the
+    // record this was given (HB-1340).
+    const current = store.getAIProfile(profile.id);
+    // Deleted while the checks waited (no agent on it any more): nothing is written.
+    if (!current) return { refused: 'gone', error: 'This AI source was deleted while its new default was being applied: nothing was changed.' };
+    const oldDefault = current.model;
+    // On a shared source, another account's pins are held the same way: its
+    // stored pin was kept, but left off the menu effectiveModel ignored it
+    // and moved that agent onto our new default (A098). Only a pin that was
+    // valid before this call — one already stale stays stale.
+    const oldMenu = [oldDefault, ...(current.models ?? [])];
+    // Held = "runs today": its override, or for a follower the
     // model it was last built with on this source (the page shows that one),
     // and the OLD default only when nothing was applied yet. A default saved
     // but not yet applied to it is not what it runs: pinned to that, the
@@ -504,7 +556,7 @@ export function createAiSources(deps: AiSourcesDeps): AiSources {
       // default meanwhile, it asks what this gives it: switched, and live.
       if (applyIds.has(a.id) && a.model && store.modelGeneration(a.id) !== gens.get(a.id)) {
         applyIds.delete(a.id);
-        notSwitched.push({ id: a.id, name: a.name, reason: 'its model was changed while this applied, and that choice stands' });
+        notSwitched.push({ id: a.id, name: a.name, reason: 'its model was changed while this applied, and that choice stands', why: 'changed' });
         hold(a.model, 'mine');
         continue;
       }
@@ -513,19 +565,36 @@ export function createAiSources(deps: AiSourcesDeps): AiSources {
         if (a.model) pins.push([a.id, null]);
       } else {
         const runsNow = a.appliedProfileId === profile.id && a.appliedModel ? a.appliedModel : undefined;
-        const current = a.model ?? runsNow ?? oldDefault;
-        pins.push([a.id, current]); // pin (no-op if already this override): a hold, not a change of its own
-        hold(current, 'mine', !cannotFollow.has(a.id));
+        const runs = a.model ?? runsNow ?? oldDefault;
+        pins.push([a.id, runs]); // pin (no-op if already this override): a hold, not a change of its own
+        hold(runs, 'mine', !cannotFollow.has(a.id));
         held++;
       }
+    }
+    // One of the caller's that joined while the checks waited (HB-1342): its
+    // own pin on the list stands; following the default, it follows the new
+    // one once its check let it. Too old, or joined too late to be checked,
+    // it is held on what it runs, and named with why.
+    for (const read of joinedMine) {
+      const a = store.getAgent(read.id);
+      if (!a || a.aiProfileId !== profile.id || gone(a)) continue;
+      if (a.model && oldMenu.includes(a.model)) { hold(a.model, 'mine'); continue; }
+      if (joinedFine.has(a.id)) continue;
+      const runsNow = a.appliedProfileId === profile.id && a.appliedModel ? a.appliedModel : oldDefault;
+      pins.push([a.id, runsNow]);
+      hold(runsNow, 'mine', !joinedTooOld.has(a.id));
+      held++;
+      const tooOld = joinedTooOld.get(a.id);
+      notSwitched.push({ id: a.id, name: a.name, reason: tooOld ?? 'it joined this source while the new default was applied, too late to be checked, so it stays on what it runs', why: tooOld ? 'runtime' : 'late' });
     }
     // Another account's agent, as it is now too: one whose own pin (chosen
     // meanwhile, perhaps) is on the list keeps it; one following the default
     // follows the new one only when its check found it can run it. Too old,
-    // or never checked (on the source only since the checks began), it is
-    // held on what it runs: holding changes nothing it runs, where following
-    // unchecked could put it on a model its runtime refuses (HB-0245).
-    let othersHeld = 0;
+    // or never checked (on the source only since the last round of checks
+    // began), it is held on what it runs: holding changes nothing it runs,
+    // where following unchecked could put it on a model its runtime refuses
+    // (HB-0245).
+    let othersHeld = 0, othersUnchecked = 0;
     for (const a of store.listAllActiveAgents()) {
       if (a.aiProfileId !== profile.id || a.ownerId === ownerId || gone(a)) continue;
       if (a.model && oldMenu.includes(a.model)) { hold(a.model, 'others'); continue; }
@@ -534,6 +603,7 @@ export function createAiSources(deps: AiSourcesDeps): AiSources {
         pins.push([a.id, runsNow]);
         hold(runsNow, 'others');
         othersHeld++;
+        if (!othersChecked.has(a.id)) othersUnchecked++;
       }
     }
 
@@ -542,7 +612,14 @@ export function createAiSources(deps: AiSourcesDeps): AiSources {
     // agent drifts to the new default, defeating the hold. A source holds 16,
     // the held among them: a longer list, stored, is one the editor cannot
     // send back (HB-0907), so it is refused here, before anything is written.
-    const extras = change.models ?? (profile.models ?? []);
+    // The list asked for was read when Save was pressed (the app always
+    // sends one): a model added to the source or taken off it while the
+    // checks waited stays added or taken off, merged three ways against the
+    // record this was given (HB-1340 review). Asked for none: the list as it
+    // is now.
+    const was = profile.models ?? [], now = current.models ?? [];
+    const takenOff = new Set(was.filter((m) => !now.includes(m)));
+    const extras = [...new Set([...(change.models ?? now), ...now.filter((m) => !was.includes(m))])].filter((m) => !takenOff.has(m));
     const menu = [...new Set([newDefault, ...extras, ...holders.keys()])];
     if (menu.length > SOURCE_MODELS_MAX) return { refused: 'menu-full', error: menuFullError(newDefault, extras, holders) };
     // The ticked agents whose class pinned another model come off it in
@@ -596,12 +673,13 @@ export function createAiSources(deps: AiSourcesDeps): AiSources {
     void pushModelList(profile.id).catch(() => undefined);
     const kept = await limitsSaid(limits);
 
-    const { secretRef: _s, ...safe } = store.getAIProfile(profile.id)!;
+    // Deleted since the writes (every agent moved off it meanwhile): as it was written.
+    const { secretRef: _s, ...safe } = store.getAIProfile(profile.id) ?? { ...current, model: newDefault, models: menu };
     // `applied` counts agents this call actually touched. It previously
     // echoed applyIds.size, which over-reported when the caller passed ids
     // that aren't theirs (a shared profile's other users) — they're filtered
     // out of `mine`, so nothing happened to them.
-    return { profile: safe, applied, held, live, staged, classDetached, ...(classDetachPending ? { classDetachPending } : {}), ...(volumeGone ? { volumeGone } : {}), ...(notSwitched.length ? { notSwitched } : {}), ...(othersHeld ? { othersHeld } : {}), ...kept };
+    return { profile: safe, applied, held, live, staged, classDetached, ...(classDetachPending ? { classDetachPending } : {}), ...(volumeGone ? { volumeGone } : {}), ...(notSwitched.length ? { notSwitched } : {}), ...(othersHeld ? { othersHeld } : {}), ...(othersUnchecked ? { othersUnchecked } : {}), ...kept };
   };
 
   // What models this profile could switch between — so the app can offer a

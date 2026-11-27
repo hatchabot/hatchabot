@@ -186,7 +186,7 @@ const root = "/home/node/.openclaw/agents";
 const models = {}; const sessions = new Set(); let first = Infinity, last = 0, bad = 0;
 // Run with -- --ids (the candidate gate's practice turn, scripts/practice-check.ts,
 // HB-1418), the event ids of the calls counted too: which calls, not only how many.
-const ids = process.argv.indexOf("--ids") > 0 ? [] : null;
+const ids = process.argv.indexOf("--ids") > 0 ? [] : null; let idsOver = false;
 const since = Date.now() - 8 * 86400000; const slots = {};
 const dayAgo = Date.now() - 86400000; const day = { calls: 0, tokens: 0 }; let lastCtx = 0, lastCtxAt = 0;
 // Calls per 5-minute slot: OpenClaw logs only calls slower than 1 s, so the
@@ -345,7 +345,8 @@ const ev = (sid, at, e) => {
   srch(at, msg);
   health(sid, at, msg);
   prof(sid, at, msg);
-  if (add(sid, at, msg) && ids && e.id && ids.length < 100000) ids.push(String(e.id));
+  // At most 100000 of them, saying so past that (idsOver): a call missing from the list is then no sign it is not there (HB-1453).
+  if (add(sid, at, msg) && ids && e.id) { if (ids.length < 100000) ids.push(String(e.id)); else idsOver = true; }
 };
 // Only these lines are parsed: calls, what people wrote, failed tools, web searches, prompt errors, compactions.
 const wanted = (s) => s.indexOf('"usage"') >= 0 || s.indexOf('"toolName":"web_search"') >= 0 || s.indexOf('"role":"user"') >= 0 || s.indexOf('"isError":true') >= 0 || s.indexOf("prompt-error") >= 0 || s.indexOf('"compaction"') >= 0;
@@ -573,7 +574,7 @@ out.health = { v: 1, since: W30, ...(ocv ? { ocv } : {}),
 out.window = { since: W30, models: wm, promptErrors, hourly: true };
 out.searches = { v: 1, since: SW, from: seenFrom === Infinity ? 0 : seenFrom, hours: SR };
 out.purposes = purposes; out.crons = crons;
-if (ids) out.ids = ids;
+if (ids) { out.ids = ids; if (idsOver) out.idsOver = true; }
 process.stdout.write(JSON.stringify(out));
 `;
 

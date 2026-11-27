@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { scriptEnv } from './helpers/scriptEnv.js';
@@ -31,18 +31,31 @@ function run(env: string, serving = '', os = 'Linux') {
   writeFileSync(join(bin, 'uname'), `#!/usr/bin/env bash\necho ${os}\n`, { mode: 0o755 });
   writeFileSync(join(bin, 'ipconfig'), '#!/usr/bin/env bash\necho 192.168.50.20\n', { mode: 0o755 });
   writeFileSync(join(bin, 'sleep'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+  symlinkSync(process.execPath, join(bin, 'node')); // .env read as the service reads it (env_named)
   const r = spawnSync('bash', [join(work, 'scripts', 'first-run-link.sh')], { cwd: work, env: scriptEnv(home, `${bin}:/usr/bin:/bin`), encoding: 'utf8' });
   return { ...r, asked: readFileSync(join(root, 'curl.log'), 'utf8') };
 }
 
 describe('scripts/first-run-link.sh (audit, 2026-10-22)', () => {
   it('reads a quoted PORT as the port, not with its quotes', () => {
-    for (const env of ['PORT="8123"\n', "PORT='8123'\n", 'PORT=8123 # my port\n', 'PORT=8123\n']) {
-      const r = run(env);
+    for (const [env, os] of [['PORT="8123"\n', 'Linux'], ["PORT='8123'\n", 'Linux'], ['PORT=8123\n', 'Linux'], ['PORT=8123 # my port\n', 'Darwin']] as const) {
+      const r = run(env, '', os);
       expect(r.status, env).toBe(0);
       expect(r.stdout, env).toContain('did not answer on port 8123 yet — open http://localhost:8123 in a minute');
       expect(r.asked, env).toContain('http://127.0.0.1:8123/v1/config');
     }
+  });
+
+  it('reads .env as the service does: the names from before the rename, Windows line endings, and a "# note" kept in the value on Linux (HB-1529)', () => {
+    const old = run('PORT=9137\nAGENTCLAW_TLS_CERT=/etc/hb/cert.pem\nAGENTCLAW_BIND=192.0.2.10\n', 'https://192.0.2.10:9137/v1/config');
+    expect(old.status, old.stdout + old.stderr).toBe(0);
+    expect(old.stdout).toContain('Open Hatchabot:  https://192.0.2.10:9137/#setup=0a1b2c3d');
+    const crlf = run('PORT=9137\r\nHATCHABOT_TLS_CERT=/etc/hb/cert.pem\r\nHATCHABOT_BIND=192.0.2.10\r\n', 'https://192.0.2.10:9137/v1/config');
+    expect(crlf.stdout).toContain('Open Hatchabot:  https://192.0.2.10:9137/#setup=0a1b2c3d');
+    // systemd keeps the note: PORT is no port then, and the service listens on 8080, as with none; the link never names a port that is none.
+    const noted = run('PORT=8123 # my port\n');
+    expect(noted.stdout).toContain('did not answer on port 8080 yet — open http://localhost:8080 in a minute');
+    expect(noted.asked).toContain('http://127.0.0.1:8080/v1/config');
   });
 });
 
@@ -74,6 +87,12 @@ describe('scripts/first-run-link.sh asks the listener as the service is configur
     expect(r.status, r.stdout + r.stderr).toBe(0);
     expect(r.asked).toContain('http://127.0.0.1:8080/v1/config');
     expect(r.stdout).toContain('Open Hatchabot:  http://192.168.50.20:8080');
+  });
+
+  it('a link-local address with its zone: asked there, and the link names it, the zone\'s % written %25 (RFC 6874; HB-1378)', () => {
+    const r = run('PORT=9137\nHATCHABOT_BIND=fe80::10%eth0\n', 'http://[fe80::10%25eth0]:9137/v1/config');
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).toContain('Open Hatchabot:  http://[fe80::10%25eth0]:9137/#setup=0a1b2c3d');
   });
 
   it('not answering, it names where to open it', () => {

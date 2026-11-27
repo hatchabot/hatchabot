@@ -53,6 +53,28 @@ const agent = (id: string, over: Partial<ReadinessAgentIn> = {}): ReadinessAgent
 const hosts = (id: string) => (id === 'runner' ? { name: 'Laptop runner', local: false, reachable: false } : { name: 'This machine', local: true });
 
 describe('readiness from the sets on disk', () => {
+  it('a volume left out while its files were being replaced is said so, not "its archive failed", and counted apart; a record from before the list reads as before (HB-1205)', () => {
+    const w = base();
+    w.set(day(3), ['hatchabot-a1-vol', 'hatchabot-a2-vol'], { state: 'complete', captured: ['hatchabot-a1-vol', 'hatchabot-a2-vol'] });
+    // Last night a1 was being restored, and a2's archive failed: both in failedVolumes, as older readers read them; a1 in replacing too.
+    w.set(day(1), [], { state: 'incomplete', failedVolumes: ['hatchabot-a1-vol', 'hatchabot-a2-vol'], replacing: ['hatchabot-a1-vol'], captured: [] });
+    const sets = listBackups(w.b);
+    expect(sets.find((s) => s.date === day(1))).toMatchObject({ failedVolumes: ['hatchabot-a1-vol', 'hatchabot-a2-vol'], replacing: ['hatchabot-a1-vol'] });
+    const r = computeReadiness({ sets, drills: [], agents: [agent('a1'), agent('a2')], host: hosts, now: Date.now() });
+    const by = Object.fromEntries(r.agents.map((a) => [a.agentId, a]));
+    expect(by.a1!.leftOut).toEqual({ count: 1, of: 2, asleep: 0, replacing: 1, failed: 0, missing: 0, other: 0 });
+    expect(by.a1!.line).toBe(`Its newest backup is from ${day(3)} (3 days ago) — left out of 1 of the last 2 backups: its files were being replaced (a restore, an import or a move): the next backup takes it.`);
+    expect(by.a2!.leftOut).toMatchObject({ count: 1, replacing: 0, failed: 1 });
+    expect(by.a2!.line).toContain('left out of 1 of the last 2 backups: its archive failed.');
+    // Two nights, one of each: both said, each with its count.
+    w.set(day(2), [], { state: 'incomplete', failedVolumes: ['hatchabot-a1-vol'], captured: [] });
+    const two = computeReadiness({ sets: listBackups(w.b), drills: [], agents: [agent('a1')], host: hosts, now: Date.now() }).agents[0]!;
+    expect(two.leftOut).toMatchObject({ count: 2, of: 3, replacing: 1, failed: 1 });
+    expect(two.line).toContain('left out of 2 of the last 3 backups: its files were being replaced (a restore, an import or a move): the next backup takes it (1); its archive failed (1).');
+    // A record from before the list: no replacing, so read as before.
+    expect(listBackups(w.b).find((s) => s.date === day(2))!.replacing).toBeUndefined();
+  });
+
   it('ready, never drilled, drill failed; an incomplete set counts only for an agent captured whole', () => {
     const w = base();
     w.set(day(3), ['hatchabot-a1-vol', 'hatchabot-a2-vol', 'hatchabot-a3-vol'], { state: 'complete', captured: ['hatchabot-a1-vol', 'hatchabot-a2-vol', 'hatchabot-a3-vol'] });

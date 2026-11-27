@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, statSync, chmodSync, symlinkSync, lstatSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -9,6 +9,7 @@ import {
   disableOpenclawBot,
   quiesceOpenclawBots,
   gatewayRestart,
+  restartByHand,
   restartOpenclawGateway,
 } from '../src/orchestrator/transfer/openclawImport.js';
 import { openclawAgentIdForWorkspace } from '../src/orchestrator/transfer/cronImport.js';
@@ -279,6 +280,16 @@ describe('the gateway restart on each platform (HB-0981)', () => {
     expect(res).toEqual({ quiet: ['a1bot'], stillBusy: [], unconfirmed: [] });
     expect(calls).toEqual(['systemctl --user restart openclaw-gateway']);
     expect(enabled).toBe(false);
+  });
+
+  it('the restart as the owner types it is the one the hand-over runs, with the gateway unit the server is set to (HB-1282)', () => {
+    vi.stubEnv('HATCHABOT_OPENCLAW_GATEWAY_UNIT', 'made-up-gateway');
+    try {
+      expect(restartByHand(gatewayRestart('linux', { PATH: '' }))).toBe('systemctl --user restart made-up-gateway');
+    } finally { vi.unstubAllEnvs(); }
+    expect(restartByHand(gatewayRestart('linux', { PATH: '' }))).toBe('systemctl --user restart openclaw-gateway');
+    // Elsewhere OpenClaw's own command, found or not.
+    expect(restartByHand(gatewayRestart('darwin', { PATH: '' }))).toBe('openclaw gateway restart');
   });
 
   it('on Linux too, a restart that does not end is stopped, and a failed one says the bots are already off and how to finish (HB-1028)', async () => {

@@ -10,7 +10,6 @@
  * running runtime, never a released bot with a running container.
  */
 import { afterEach, describe, expect, it } from 'vitest';
-import { clearBusy } from '../src/orchestrator/lifecycle/busy.js';
 import { resetHibernateState, wakeAgent } from '../src/orchestrator/lifecycle/hibernate.js';
 import type { MockProvider } from '../src/providers/mockProvider.js';
 import { as, makeWorld, seedRunningAgent, type World } from './support/world.js';
@@ -54,7 +53,7 @@ async function expectConsistent(w: World, id: string, ref: string, released: str
   if (phase === 'running') expect(a.state).toBe('RUNNING');
 }
 
-afterEach(() => { clearBusy('a1'); resetHibernateState(); });
+afterEach(() => { resetHibernateState(); });
 
 describe('Start holds the lifecycle lock (#10)', () => {
   it('an Archive during a Start is refused as busy; the agent ends RUNNING with its bot', async () => {

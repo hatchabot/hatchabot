@@ -65,10 +65,15 @@ export interface ModelRuntimeDeps {
    * since, and no model written for it since in this process (a choice of
    * the same model included: theirs, served with it, is not to be undone).
    * Whoever made it may undo what it stored with it (a budget's switch to a
-   * cheaper model, HB-1404). Never throws.
+   * cheaper model, HB-1404). Never throws. `how`: what the runtime answered
+   * ('refused': held back before it was tried); 'rebuild' is a source switch
+   * waiting for its rebuild, which may be one made after the ask (HB-1444).
    */
-  owedRefused?: (agentId: string, ask: string) => void;
+  owedRefused?: (agentId: string, ask: string, how: OwedRefusal) => void;
 }
+
+/** Why an owed ask did not land at a start, as owedRefused is told it. */
+export type OwedRefusal = 'refused' | 'failed' | 'gone' | 'rebuild';
 
 export interface ModelRuntime {
   /**
@@ -175,7 +180,11 @@ export function createModelRuntime(deps: ModelRuntimeDeps): ModelRuntime {
    * The asks an earlier process left, read once as this one starts (any
    * made after are this process's own, and its queues serve them).
    */
-  const owed = store.agentHolds('model-apply');
+  // With each its agent's model generation as the list is read: a model
+  // written for it from here on (the owner's, the same model included) is
+  // theirs, though its turn comes later (a seventh agent waits for a slot):
+  // read in its slot, a write before it was not seen, and a refusal undid it (HB-1444).
+  const owed = store.agentHolds('model-apply').map((o) => ({ ...o, generation: store.modelGeneration(o.agentId) }));
   let stopped = false;
   /** Ends the waits for a busy agent at stop(). */
   const waits = new AbortController();
@@ -201,12 +210,11 @@ export function createModelRuntime(deps: ModelRuntimeDeps): ModelRuntime {
     }));
   };
   /** One owed ask served. True when it was put off because the agent was busy, and `mayWait`: to be asked again once it is free. */
-  const serveOwed = async ({ agentId, value }: { agentId: string; value: string }, mayWait: boolean): Promise<boolean> => {
+  const serveOwed = async ({ agentId, value, generation }: { agentId: string; value: string; generation: number }, mayWait: boolean): Promise<boolean> => {
     if (stopped) return false;
     const nothingToTell = (): false => { store.clearAgentHold(agentId, 'model-apply', value); return false; };
-    // A model written for it from here on (the owner's choice, the same model
-    // included) moves this on: a refusal is then no longer the ask's alone to undo.
-    const generation = store.modelGeneration(agentId);
+    // A model written for it since the list was read (the owner's choice, the
+    // same model included) moves this on: a refusal is then no longer the ask's alone to undo.
     const stillTheirs = () => store.modelGeneration(agentId) === generation;
     try {
       // Served, or asked again, by this process since: its own.
@@ -237,7 +245,7 @@ export function createModelRuntime(deps: ModelRuntimeDeps): ModelRuntime {
         const ours = store.agentHold(agentId, 'model-apply') === value && stillTheirs();
         nothingToTell();
         trace(agentId)('model.after_restart', { model, how: 'refused', why: refused.slice(0, 200) });
-        if (ours) deps.owedRefused?.(agentId, value);
+        if (ours) deps.owedRefused?.(agentId, value, 'refused');
         return false;
       }
       const how = await applyModelToRuntime(agentId);
@@ -245,8 +253,10 @@ export function createModelRuntime(deps: ModelRuntimeDeps): ModelRuntime {
       if (how === 'none' && mayWait && store.agentHold(agentId, 'model-apply') === value) return true;
       trace(agentId)('model.after_restart', { model, how });
       // Refused (its ask went with the answer: one cut off is still asked), and nothing asked since.
-      // Not 'rebuild': a source switch made after the ask may be what waits, and then the model stands.
-      if ((how === 'failed' || how === 'gone') && store.agentHold(agentId, 'model-apply') === undefined && stillTheirs()) deps.owedRefused?.(agentId, value);
+      // 'rebuild' too: a source switch waits for a rebuild, so the model is not on its runtime, as the
+      // pass judges it live (HB-1444). Told so: its maker judges whose switch waits (one made after
+      // the ask is the owner's, and then the model stands).
+      if ((how === 'failed' || how === 'gone' || how === 'rebuild') && store.agentHold(agentId, 'model-apply') === undefined && stillTheirs()) deps.owedRefused?.(agentId, value, how);
       return false;
     } catch (err) {
       // The write was cut off (its machine stopped answering): still asked, for the next start.

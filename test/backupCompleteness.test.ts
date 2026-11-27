@@ -7,10 +7,10 @@ import { dirname, join } from 'node:path';
 import Database from 'better-sqlite3';
 import { agentsMissingFromSet, keepDays, listBackups, readSetStatus } from '../src/orchestrator/backups/backupFiles.js';
 import { usableFor } from '../src/orchestrator/backups/recoveryReadiness.js';
-import { doctorReport, type DoctorFacts } from '../src/doctor.js';
+import { backupFacts, doctorReport, type DoctorFacts } from '../src/doctor.js';
 import { FILES_REPLACED_BY } from '../src/orchestrator/lifecycle/operations.js';
 import { LocalSecretStore } from '../src/secrets/localSecretStore.js';
-import { systemPathWithout } from './helpers/scriptEnv.js';
+import { pinDay, systemPathWithout } from './helpers/scriptEnv.js';
 
 // Most of this file runs real scripts in a sandbox (shell, git, SQLite,
 // archives): on a busy CI runner process startup alone can pass the five-second
@@ -76,6 +76,37 @@ describe('a set is judged by its run\'s record', () => {
     const ok = doctorReport({ ...facts, backups: { dir: '/b', lastSet: '2026-09-28', ageDays: 0, complete: true } });
     expect(ok.find((l) => /Backups: last set 2026-09-28/.test(l.text))?.level).toBe('ok');
   });
+
+  it('doctor counts a volume left out while its files were replaced apart from the failed ones, as the app does (review of HB-1205)', () => {
+    const base = tmp('hb-bkrep-');
+    const set = (date: string, rec: object) => {
+      mkdirSync(join(base, date));
+      writeFileSync(join(base, date, 'hatchabot.sqlite'), 'x');
+      writeFileSync(join(base, date, 'backup-status.json'), JSON.stringify({ state: 'incomplete', startedAt: `${date}T03:30:00Z`, orphans: [], captured: [], ...rec }));
+    };
+    // As backup-volumes.sh records one: among the failed volumes too, for an older reader.
+    set('2026-09-27', { failedVolumes: ['hatchabot-k0-vol', 'hatchabot-k1-vol', 'hatchabot-k2-vol'], replacing: ['hatchabot-k0-vol'] });
+    const now = Date.parse('2026-09-27T12:00:00Z');
+    expect(backupFacts(base, now, undefined)).toMatchObject({ lastSet: '2026-09-27', complete: false, failed: 2, replacing: 1 });
+    set('2026-09-28', { failedVolumes: ['hatchabot-k0-vol'], replacing: ['hatchabot-k0-vol'] });
+    const only = backupFacts(base, now + 86_400_000, undefined);
+    expect(only).toMatchObject({ lastSet: '2026-09-28', complete: false, replacing: 1 });
+    expect(only.failed).toBeUndefined();
+    const facts = {
+      nodeVersion: 'v22.22.2', dockerCli: true, dockerDaemon: { ok: true, arch: 'arm64', version: '27.1' },
+      envFile: { present: true, secretKey: true, password: true, authMode: 'password', publicUrl: 'https://box.example.com' },
+      db: { path: '/x/hatchabot.sqlite', present: true }, service: { manager: 'systemd', active: true, enabled: true },
+      controlPlane: { url: 'http://localhost:8080', ok: true }, backups: { dir: base, lastSet: '2026-09-28', ageDays: 0, complete: false, failed: 2, replacing: 1 },
+    } as unknown as DoctorFacts;
+    expect(doctorReport(facts).find((l) => /incomplete/.test(l.text))).toEqual({
+      level: 'warn', text: 'Last backup set 2026-09-28 is incomplete (2 volumes failed, 1 left out while their files were replaced)', fix: 'journalctl --user -u hatchabot-backup -n 30',
+    });
+    expect(doctorReport({ ...facts, backups: { ...facts.backups, failed: undefined, replacing: 2 } }).find((l) => /incomplete/.test(l.text))).toEqual({
+      level: 'warn', text: 'Last backup set 2026-09-28 is incomplete (2 left out while their files were replaced)', fix: 'Nothing to repair: the next backup takes it (journalctl --user -u hatchabot-backup -n 30 names the agent)',
+    });
+    // A set an older backup wrote names none apart: every one is failed, as before.
+    expect(doctorReport({ ...facts, backups: { ...facts.backups, failed: 1, replacing: undefined } }).find((l) => /incomplete/.test(l.text))?.text).toBe('Last backup set 2026-09-28 is incomplete (1 volume failed)');
+  });
 });
 
 describe('agents a set does not cover', () => {
@@ -98,7 +129,7 @@ describe('agents a set does not cover', () => {
  * fails), HOME and the backup dir are temp dirs, the install is a temp dir
  * with an .env and a real SQLite registry.
  */
-function scriptWorld(volumes: string[], agentRefs: string[]) {
+function scriptWorld(volumes: string[], agentRefs: string[], day?: string) {
   const root = tmp('hb-bkscript-');
   const home = join(root, 'home'); mkdirSync(home);
   const repo = join(root, 'install'); mkdirSync(join(repo, 'scripts'), { recursive: true }); mkdirSync(join(repo, 'data'));
@@ -163,6 +194,9 @@ case "$1 $2" in
     echo fake > "$out/$f" ;;
 esac
 `, { mode: 0o755 });
+  // Every run of this world on one day, the one it was made on unless given: two
+  // runs either side of midnight wrote two sets (HB-1334).
+  const setDay = pinDay(bin, day);
   const backups = join(root, 'backups');
   const env = (extraEnv: Record<string, string>) => ({
     HOME: home, PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`,
@@ -215,8 +249,8 @@ esac
     db.prepare(`UPDATE agents SET state = ? WHERE runtime_ref = ?`).run(state, ref);
     db.close();
   };
-  /** Today's set directory, as the script names it (before any run made it). */
-  const today = () => join(backups, spawnSync('date', ['+%F'], { encoding: 'utf8' }).stdout.trim());
+  /** Today's set directory, as the script names it (before any run made it): the world's day. */
+  const today = () => join(backups, setDay);
   return { run, start, spawnRun, bin, root, setDir, fillVolume, repo, onRunners, localLog, remoteLog, oldSet, record, setState, backups, today };
 }
 
@@ -420,6 +454,19 @@ describe('scripts/backup-volumes.sh: a second run of the same day (HB-0433)', ()
     expect(st.complete).toBe(false);
     expect(st.captured).toEqual(VOLS); // both whole, though the second run reached neither
   }, 30_000);
+  it('the two runs of a test share the world\'s day, whatever the clock says between them (HB-1334)', () => {
+    // A day that is not today, as a run past midnight would see the other run's.
+    const y = new Date(Date.now() - 86_400_000);
+    const day = `${y.getFullYear()}-${String(y.getMonth() + 1).padStart(2, '0')}-${String(y.getDate()).padStart(2, '0')}`;
+    const w = scriptWorld(VOLS, REFS, day);
+    expect(w.run().status).toBe(0);
+    failing(w, 'hatchabot-notes-2-vol');
+    expect(w.run().status).toBe(1);
+    expect(readdirSync(w.backups).filter((d) => /^20\d\d-/.test(d))).toEqual([day]);
+    expect(w.setDir()).toBe(w.today());
+    expect(readSetStatus(w.setDir()).failedVolumes).toEqual(['hatchabot-notes-2-vol']);
+    expect(readFileSync(join(w.setDir(), 'hatchabot-notes-2-vol.tgz'), 'utf8')).toBe('fake\n');
+  });
   it('a volume that fails in the second run is failed; the other stays captured once, not twice', () => {
     const w = scriptWorld(VOLS, REFS);
     expect(w.run().status).toBe(0);
@@ -1278,6 +1325,8 @@ describe('scripts/backup-volumes.sh takes no volume whose files are being replac
     expect(left).toHaveLength(kinds.length + HELD_HALF.length + 2);
     const rec = w.record();
     expect([...rec.failedVolumes].sort()).toEqual([...left].sort());
+    // Named apart too, as left out on purpose (HB-1205); still in failedVolumes for a reader from before.
+    expect([...rec.replacing].sort()).toEqual([...left].sort());
     expect(rec.state).toBe('incomplete');
     expect([...rec.captured].sort()).toEqual([...taken].sort());
     for (const v of left) expect(existsSync(join(w.setDir(), `${v}.tgz`)), v).toBe(false);
@@ -1302,7 +1351,7 @@ describe('scripts/backup-volumes.sh takes no volume whose files are being replac
     const k1Old = w.oldSet(['hatchabot.sqlite', 'hatchabot-k1-vol.tgz'], '2026-01-03', 29);
     const r = w.run();
     expect(r.status, r.stdout + r.stderr).toBe(1);
-    expect(w.record()).toMatchObject({ state: 'incomplete', failedVolumes: ['hatchabot-k0-vol'], captured: ['hatchabot-k1-vol'] });
+    expect(w.record()).toMatchObject({ state: 'incomplete', failedVolumes: ['hatchabot-k0-vol'], replacing: ['hatchabot-k0-vol'], captured: ['hatchabot-k1-vol'] });
     expect(existsSync(onlyK0), 'the replaced volume\'s last whole copy').toBe(true);
     expect(existsSync(k1Old), 'an old set whose volume has a copy today').toBe(false);
     expect(r.stdout).toContain('kept 2026-01-02 past 14 days: the newest copy of hatchabot-k0-vol');
@@ -1316,6 +1365,9 @@ describe('scripts/backup-volumes.sh takes no volume whose files are being replac
     const rb = b.run();
     expect(rb.status, rb.stdout + rb.stderr).toBe(1);
     expect(rb.stderr).toContain('✗ 2 volume(s) failed or missing, 1 succeeded — incomplete backup, nothing pruned.');
+    // The failed one is no volume whose files were being replaced (HB-1205).
+    expect(b.record()).toMatchObject({ replacing: ['hatchabot-k0-vol'] });
+    expect([...b.record().failedVolumes].sort()).toEqual(['hatchabot-broken-1-vol', 'hatchabot-k0-vol']);
     expect(existsSync(k2Old)).toBe(true);
   }, 60_000);
 
@@ -1344,6 +1396,7 @@ exec "${real}" "$@"
     expect(r.status, r.stdout + r.stderr).toBe(1);
     expect(w.record()).toMatchObject({ state: 'incomplete' });
     expect([...w.record().failedVolumes].sort()).toEqual(['hatchabot-k1-vol', 'hatchabot-notes-3-vol']);
+    expect([...w.record().replacing].sort()).toEqual(['hatchabot-k1-vol', 'hatchabot-notes-3-vol']);
     expect(r.stderr).toContain('hatchabot-k1-vol: while it was being copied, a restore from a snapshot began on its agent, so this copy may be half replaced — not kept (the next backup takes it)');
     expect(r.stderr).toContain('hatchabot-notes-3-vol on laptop.test: while it was being copied, a restore from a backup began on its agent');
     expect(readFileSync(join(w.setDir(), 'hatchabot-k1-vol.tgz'), 'utf8')).toBe('morning');
@@ -1367,6 +1420,30 @@ if [ -n "$op" ]; then
   node -e 'const D = require("better-sqlite3"); const db = new D(process.argv[1]); const [a, s] = process.argv[2].split(" ");
     db.prepare("UPDATE operations SET status = ?, updated_at = ? WHERE agent_id = ?").run(s, new Date().toISOString(), a);' "${join(w.repo, 'data', 'hatchabot.sqlite')}" "$op"
 fi
+exec "${real}" "$@"
+`, { mode: 0o755 });
+    const r = w.run();
+    expect(r.status, r.stdout + r.stderr).toBe(1);
+    expect(w.record()).toMatchObject({ state: 'incomplete', failedVolumes: ['hatchabot-k1-vol'] });
+    expect([...w.record().captured].sort()).toEqual(['hatchabot-k0-vol', 'hatchabot-k2-vol']);
+    expect(r.stderr).toContain('hatchabot-k1-vol: while it was being copied, a rebuild began on its agent, so this copy may be half replaced — not kept (the next backup takes it)');
+    expect(existsSync(join(w.setDir(), 'hatchabot-k1-vol.tgz'))).toBe(false);
+    expect(existsSync(join(w.setDir(), 'hatchabot-k2-vol.tgz'))).toBe(true);
+  }, 60_000);
+
+  it('a rebuild queued before a volume was copied, that started while it was and was left held by an app restart: that copy is not kept; a hold of before, untouched, is still no bar (HB-1206)', () => {
+    const w = scriptWorld(['hatchabot-k0-vol', 'hatchabot-k1-vol', 'hatchabot-k2-vol'], ['docker://hatchabot-k0', 'docker://hatchabot-k1', 'docker://hatchabot-k2']);
+    const anHourAgo = new Date(Date.now() - 3600_000).toISOString();
+    // a1's rebuild waits its turn; a2's app update has been held for its owner since an hour ago.
+    ops(w.repo, [['a1', 'rebuild', 'queued', anHourAgo], ['a2', 'app-update', 'held', anHourAgo]]);
+    // Reading k1, the rebuild starts, the app restarts, and the boot pass leaves it held.
+    const real = join(w.bin, 'docker.real');
+    writeFileSync(real, readFileSync(join(w.bin, 'docker')), { mode: 0o755 });
+    writeFileSync(join(w.bin, 'docker'), `#!/usr/bin/env bash
+for a in "$@"; do case "$a" in hatchabot-k1-vol:/data:ro)
+  node -e 'const D = require("better-sqlite3"); const db = new D(process.argv[1]);
+    db.prepare("UPDATE operations SET status = ?, updated_at = ? WHERE agent_id = ?").run("held", new Date().toISOString(), "a1");' "${join(w.repo, 'data', 'hatchabot.sqlite')}" ;;
+esac; done
 exec "${real}" "$@"
 `, { mode: 0o755 });
     const r = w.run();

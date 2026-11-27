@@ -13,7 +13,7 @@ import { atPointForTests, BACKGROUND_KINDS, currentBootId, FILES_REPLACED_BY, ha
 import { finishInterruptedRebuild, reapplyCurrentSettings, runProvisionSteps, type ProvisionDeps } from './provision.js';
 import { applyReconcileRule } from './reconcile.js';
 import { recoverSnapshotRestore, resumeSnapshotRestore } from '../files/snapshots.js';
-import { resumeImport } from '../transfer/transfer.js';
+import { resumeImport, startCutOffDownloads } from '../transfer/transfer.js';
 import { recoverAdoptWorkspace, resumeAdoptWorkspace } from '../transfer/adopt.js';
 
 /**
@@ -43,6 +43,12 @@ export interface ResumeContext {
    * now (another rebuild already under way, an operation on disk).
    */
   requeueRebuild?: (op: Operation) => boolean;
+  /**
+   * The recovery a source switch chained after its rebuild (the routes'
+   * memory.history.afterRebuild), for one this pass finishes itself: run
+   * once `done` settles, if the rebuild put it on its new source.
+   */
+  recoverAfterRebuild?: (agentId: string, done: Promise<unknown>) => void;
   /** How to reach an agent's apps (the routes' appDeps); undefined when it has no runtime. */
   appDeps?: (agentId: string) => InstallDeps | undefined;
   /** Tell an owner on their chat app (the routes' tellOwner), for what a restart settles with nobody watching. */
@@ -57,7 +63,9 @@ export interface ResumeContext {
    * (true), or a start a restart left (false), which is not rebuilt only
    * because its peers changed: power.ts keeps that for the owner's own Start.
    */
-  startStopped?: (agentId: string, opts: { ownerAsked: boolean }) => Promise<{ ok: boolean; rebuilding?: boolean; error?: string }>;
+  startStopped?: (agentId: string, opts: { ownerAsked: boolean; stillOwed?: () => boolean }) => Promise<{ ok: boolean; rebuilding?: boolean; error?: string; notOwed?: true; leftOwed?: true }>;
+  /** A rebuild of the agent under way or queued (the rebuild queue's isInFlight): it starts the agent. */
+  isInFlight?: (agentId: string) => boolean;
   /** An archive's Discord and Slack bots, parked as it finishes (the routes' parkArchivedChannels). */
   parkOtherChannels?: ArchiveDeps['parkOtherChannels'];
 }
@@ -103,11 +111,15 @@ const notStartedWords = (why: string) => `It could not be started (${why}), so i
 async function startAsStartDoes(ctx: ResumeContext, opId: string, agentId: string, ownerAsked: boolean, then?: StartAfter): Promise<string | undefined> {
   atPointForTests(ctx.store.getOperation(opId), '#start-owed');
   // Its owner's Start or Stop, or a budget's pause, took it over meanwhile (settleStartsOwedOn).
-  const op = ctx.store.getOperation(opId);
-  if (!op || startOwedIn(op) === undefined) return undefined;
-  const r: { ok: boolean; rebuilding?: boolean; error?: string } = ctx.startStopped
-    ? await ctx.startStopped(agentId, { ownerAsked }).catch((err: unknown) => { rethrowIfCrash(err); return { ok: false, error: String((err as Error)?.message ?? err).slice(0, 200) }; })
+  const stillOwed = (): boolean => { const now = ctx.store.getOperation(opId); return !!now && startOwedIn(now) !== undefined; };
+  if (!stillOwed()) return undefined;
+  // Judged again by the start itself, once its checks are done and under its lock (HB-1252).
+  const r: { ok: boolean; rebuilding?: boolean; error?: string; notOwed?: true; leftOwed?: true } = ctx.startStopped
+    ? await ctx.startStopped(agentId, { ownerAsked, stillOwed }).catch((err: unknown) => { rethrowIfCrash(err); return { ok: false, error: String((err as Error)?.message ?? err).slice(0, 200) }; })
     : { ok: false, error: 'nothing here can start it' };
+  // Taken over while it was being checked: whoever took it over wrote its words.
+  // Or the process stopped while it waited for another holder: still owed, for the next boot.
+  if (r.notOwed || r.leftOwed) return undefined;
   if (r.ok) { settleOwedStart(ctx.store, opId, r.rebuilding ? REBUILT_WORDS : STARTED_WORDS); return undefined; }
   const why = String(r.error ?? 'no reason given').slice(0, 300);
   ctx.logFor?.(agentId)('op.start_failed', { error: why });
@@ -262,8 +274,8 @@ async function resumeBackground(ctx: ResumeContext, op: Operation, held?: Reserv
   // running on health alone, a repo source was never cloned (audit #082).
   // Its steps run again, as Retry runs them: the volume is kept, and each
   // step leaves what is done as it is.
+  // Each counts as replacing its files under its own take, not before it (HB-1491).
   if (op.kind === 'provision' && !agent.pendingAction && status?.phase === 'running' && status.healthy) {
-    noteFilesReplacing(agent.id);
     const r = await runProvisionSteps({
       store: ctx.store, secrets: ctx.secrets, provider, channel: ctx.channel, embedder: ctx.embedder, log: base,
       ...(ctx.sleep ? { sleep: ctx.sleep } : {}),
@@ -277,11 +289,18 @@ async function resumeBackground(ctx: ResumeContext, op: Operation, held?: Reserv
   // A rebuild likewise: up after its new container was made, its steps after
   // health (sources, hook, parked schedules) had not run (HB-0301).
   if (op.kind === 'rebuild' && status?.phase === 'running' && status.healthy) {
-    noteFilesReplacing(agent.id);
-    const r = await finishInterruptedRebuild({
+    const finishing = finishInterruptedRebuild({
       store: ctx.store, secrets: ctx.secrets, provider, channel: ctx.channel, embedder: ctx.embedder, log: base,
       ...(ctx.sleep ? { sleep: ctx.sleep } : {}),
     }, agent.id, { reuse: held });
+    // The recovery its switch chained after it (HB-0832), while the agent is
+    // on the source it was asked for: requeueRebuild chains it for a rebuild
+    // queued again, and one finished here had none (HB-1445). Its slot is
+    // reserved now, as a live switch's is; it runs once the rebuild put the
+    // agent on that source, and never on a rebuild that failed.
+    const recoverOn = (op.params as { recoverOn?: unknown }).recoverOn;
+    if (typeof recoverOn === 'string' && recoverOn && agent.aiProfileId === recoverOn) ctx.recoverAfterRebuild?.(agent.id, finishing.catch(() => undefined));
+    const r = await finishing;
     if (r?.state === 'RUNNING') h.done('Interrupted by a restart after it came up; the rest of its rebuild ran again, and it is running.');
     else h.fail(r?.stateReason ?? 'The rebuild was interrupted by a restart — tap Retry.');
     return;
@@ -372,9 +391,14 @@ export function startResumeOperations(ctx: ResumeContext): ResumingOperations {
     if (op.agentId) byAgent.set(op.agentId, [...(byAgent.get(op.agentId) ?? []), p]);
     return p;
   });
-  const all = Promise.allSettled(settling).then(() => startsStillOwed(ctx));
+  // Then the downloads a restart cut off, each started again (HB-1479).
+  const all = Promise.allSettled(settling).then(() => startsStillOwed(ctx))
+    .then(() => startCutOffDownloads({ store: ctx.store, startStopped: ctx.startStopped, isInFlight: ctx.isInFlight, logFor: (id) => ctx.logFor?.(id) ?? (() => {}) }));
   const owesStart = (agentId: string): boolean => {
-    try { return ctx.store.operationsOwingStart().some((op) => op.agentId === agentId && startOwedIn(op) !== currentBootId()); } catch { return false; }
+    try {
+      return ctx.store.operationsOwingStart().some((op) => op.agentId === agentId && startOwedIn(op) !== currentBootId())
+        || ctx.store.agentHold(agentId, 'download-stop') !== undefined;
+    } catch { return false; }
   };
   return {
     all,

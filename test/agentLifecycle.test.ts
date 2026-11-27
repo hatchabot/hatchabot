@@ -32,11 +32,9 @@ interface World {
 }
 
 const built: AgentLifecycle[] = [];
-const busyIds: string[] = [];
 let worldNo = 0;
 afterEach(() => {
   for (const l of built.splice(0)) l.stop();
-  for (const id of busyIds.splice(0)) clearBusy(id);
   vi.restoreAllMocks();
   delete process.env.HATCHABOT_REBUILD_CONCURRENCY;
   delete process.env.HATCHABOT_REBUILD_POLICY;
@@ -232,7 +230,7 @@ describe('the rebuild queue', () => {
   it('a setup for an answered step waits while another holder has the agent, and stop() ends the wait', async () => {
     const w = world();
     const a = w.agent('p', { state: 'PROVISIONING', pendingAction: { kind: 'telegram_token', received: true } as never });
-    markBusy(a.id); busyIds.push(a.id);
+    markBusy(a.id);
     const spy = vi.spyOn(global, 'setTimeout');
     w.life.queue.provisionWhenFree(a.id);
     expect(spy.mock.calls.some((c) => c[1] === 2_000)).toBe(true);
@@ -336,7 +334,7 @@ describe('start, stop, sleep and wake', () => {
     expect(w.life.power.startRefusal(w.store.getAgent(z.id))).toBeTruthy();
     await archived;
     expect(w.life.records.isArchiving(z.id)).toBe(false);
-    markBusy(a.id); busyIds.push(a.id);
+    markBusy(a.id);
     expect(w.life.power.startRefusal(a)).toBe('Another operation is already running on this agent.');
     expect(w.life.power.startRefusal(a, true)).toBeUndefined();
     clearBusy(a.id);
@@ -442,6 +440,19 @@ describe('an agent\'s record: create, archive, unarchive, delete', () => {
     expect(w.events.some((e) => e.event === 'agent.archiving')).toBe(true);
   });
 
+  it('an archive drops what was cached of its conversations once it is archived; one refused keeps them (HB-1362)', async () => {
+    const w = world();
+    const a = w.agent('a', { state: 'STOPPED' });
+    const r = await w.life.records.archive(a, { checkpoint: false, requestedBy: OWNER }, () => 'answer');
+    expect(r).toEqual({ ok: true, value: 'answer' });
+    expect(w.calls).toContain(`forget conversations ${a.id}`);
+    const busy = w.agent('busy', { state: 'STOPPED' });
+    markBusy(busy.id);
+    expect((await w.life.records.archive(busy, { checkpoint: false, requestedBy: OWNER }, () => 'answer')).ok).toBe(false);
+    clearBusy(busy.id);
+    expect(w.calls).not.toContain(`forget conversations ${busy.id}`);
+  });
+
   it('brings an archived agent back: setup kicked before its answer is made, its lock let go', async () => {
     const w = world();
     const a = w.agent('a', { state: 'ARCHIVED', runtimeRef: undefined });
@@ -467,7 +478,7 @@ describe('an agent\'s record: create, archive, unarchive, delete', () => {
   it('deletes: refused when busy after the wait, parked FAILED when the runtime will not go, else a tombstone', async () => {
     const w = world();
     const busy = w.agent('busy');
-    markBusy(busy.id); busyIds.push(busy.id);
+    markBusy(busy.id);
     expect(await w.life.records.remove(busy, {}, () => 'x')).toEqual({ ok: false, status: 409, error: 'Another operation is already running on this agent.' });
     expect(w.store.getAgent(busy.id)?.state).toBe('RUNNING');
 

@@ -275,10 +275,11 @@ const imagesOf = (c) => {
 // chat read its whole history, and kept every id in it, to show 100
 // (HB-0897, HB-1172). Each message keeps the place reading oldest first
 // gave it (its source in that order, then its place there), so the order,
-// and the copies dropped, are as they were. A source is read until its
-// events are an hour older than the oldest of the newest CAP (its times may
-// step back a little); while a delivery id is not found yet, the rest is
-// only looked through for it, as all of it was before.
+// and the copies dropped, are as they were. A source is read until BEHIND
+// of its messages, one after another, are an hour older than the oldest of
+// the newest CAP (its times may step back a little, and now and then one is
+// far out of place); while a delivery id is not found yet, the rest is only
+// looked through for it, as all of it was before.
 //
 // An event recorded twice (a window as it moves to an archive) kept the
 // place of the copy reading oldest first met first. Newest first, the copy
@@ -289,6 +290,12 @@ let fwd = false, stop = false; // fwd: all of it, oldest first; stop: a copy met
 const order = (a, b) => (a.ms - b.ms) || (a.r - b.r) || (a.p - b.p);
 const SLACK = 3600000;
 let floor = null; // the oldest of the newest CAP so far: nothing older can show
+// How many messages, one after another in a source, older than all that can
+// show: one far out of place (recorded again with the time it first had, or
+// a clock that stepped back) is not where the source ends, and the messages
+// behind it were missed (HB-1358).
+const BEHIND = 3;
+let behind = 0;
 const looking = () => received.size < wanted.size;
 const emit = (m) => {
   keep.push(m);
@@ -301,7 +308,7 @@ const emit = (m) => {
 // or after it, is not).
 // Replies with the same text one after another are held as a run, newest
 // first, and decided oldest first against the reply before them, as reading
-// forward did.
+// forward did; newest first, a run ends at a gap of two minutes (joins, below).
 let run = [], lastRank = null, head;
 const settle = (prev = null) => {
   const n = run.length;
@@ -314,32 +321,54 @@ const settle = (prev = null) => {
   run = [];
 };
 // Source r begins: a run goes on into it only from the source next to it.
-const begin = (r) => { if (run.length && r !== lastRank + (fwd ? 1 : -1)) settle(); lastRank = r; };
+const begin = (r) => { if (run.length && r !== lastRank + (fwd ? 1 : -1)) settle(); lastRank = r; behind = 0; };
 // One event of source r, at place p. False: nothing older in it can show.
 const take = (e, r, p) => {
   if (!e || typeof e !== "object") { complete = false; return true; }
   const m = e.message;
-  const raw = e.timestamp || (m && m.timestamp) || "";
-  const when = typeof raw === "string" ? Date.parse(raw) : typeof raw === "number" ? raw : NaN;
-  // Older than all that can show, and no run held that it could change.
-  const past = !fwd && !!floor && !run.length && when < floor.ms - SLACK;
-  if (past && !looking()) return false;
   if (e.type !== "message" || !m) return true;
-  if (!past && e.id) { if (seen.has(e.id)) { if (fwd) return true; stop = true; return false; } seen.add(e.id); }
-  const role = m.role;
-  if (role !== "user" && role !== "assistant") return true;
-  const t = textOf(m.content).trim();
-  if (!t || t === "NO_REPLY" || t.indexOf("<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>") === 0) return true;
+  const raw = e.timestamp || m.timestamp || "";
+  // A number out of the range of a time is no time, as text that is not
+  // one is: it failed the read of a file (HB-1367).
+  const asDate = typeof raw === "number" ? new Date(raw) : null;
+  const when = asDate ? asDate.getTime() : typeof raw === "string" ? Date.parse(raw) : NaN;
+  const role = m.role, said = role === "user" || role === "assistant";
+  const t = said ? textOf(m.content).trim() : "";
   // What OpenClaw itself put in the conversation (a finished background task
   // arrives as a "user" message with provenance inter_session) is not
   // something this person wrote. What they wrote carries the web-app line.
-  if (role === "user" && m.provenance && !prefix.test(t)) return true;
+  const shows = !!t && t !== "NO_REPLY" && t.indexOf("<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>") !== 0 && !(role === "user" && m.provenance && !prefix.test(t));
+  const at = typeof raw === "string" ? raw : when === when ? asDate.toISOString() : "";
+  const ms = Date.parse(at) || 0;
+  // A reply goes on the run held when it has the same words. Newest first,
+  // also only within two minutes of the oldest held: one further off, or
+  // any reply before that, cannot change what the run keeps, so the run is
+  // decided. A reply is dropped only within a minute of the last one kept
+  // before it, so the last kept before the run's oldest is within a minute
+  // of this one, and over a minute from the oldest. Held on, the agent's
+  // replies were read back to the person's last message, however far back,
+  // and nothing they held could show (HB-1359).
+  const joins = run.length > 0 && role === "assistant" && run[0].text === t && (fwd || Math.abs(ms - run[run.length - 1].ms) < 120000);
+  // Older than all that can show, and no run held that it could change.
+  const past = !fwd && !!floor && when < floor.ms - SLACK && (shows ? !joins : !run.length);
+  // A copy of one read already: the copy reading oldest first meets first
+  // is the one kept, so all of it is read again. One read past where
+  // nothing older can show too: a later copy with a later time showed
+  // where only its first copy should have (HB-1367).
+  if (e.id) { if (seen.has(e.id)) { if (fwd) return true; stop = true; return false; } if (!past) seen.add(e.id); }
+  if (shows && run.length && !joins) settle();
+  // Only what the person or the agent said says where a source ends, and
+  // only BEHIND of it one after another: a tool's output, any other event,
+  // or one message far out of place ended it before the messages behind it
+  // (HB-1358). One with no time says nothing either way: the agent's tool
+  // calls written with none kept the count from ever reaching BEHIND, and
+  // all of the source was read.
+  if (said && when === when) { if (!past) behind = 0; else if (++behind >= BEHIND && !looking()) return false; }
+  if (!shows) return true;
   const messageId = role === "user" ? prefix.exec(t)?.[1] : undefined;
   if (messageId && wanted.has(messageId)) received.add(messageId);
   if (past) return true;
-  const at = typeof raw === "string" ? raw : new Date(raw).toISOString();
-  const c = { role, text: t, at, ms: Date.parse(at) || 0, r, p, img: role === "assistant" ? imagesOf(m.content) : "", mirror: !!(m.openclawDeliveryMirror || m.model === "delivery-mirror") };
-  if (run.length && (role !== "assistant" || run[0].text !== t)) settle();
+  const c = { role, text: t, at, ms, r, p, img: role === "assistant" ? imagesOf(m.content) : "", mirror: !!(m.openclawDeliveryMirror || m.model === "delivery-mirror") };
   if (role === "assistant") run.push(c);
   else { emit(c); if (head === undefined) head = c; }
   return true;
@@ -348,7 +377,7 @@ const line = (l, r, p) => { let e; try { e = JSON.parse(l); } catch { complete =
 // All of it again, oldest first, from nothing kept.
 const again = (pass) => {
   seen.clear(); keep.length = 0; run = []; lastRank = null; head = undefined; floor = null; received.clear();
-  stop = false; fwd = true; pass();
+  stop = false; fwd = true; behind = 0; pass();
 };
 // Text from its start, a line at a time (oldest first).
 const linesOn = (text, r) => { let at = 0, i, p = 0; while ((i = text.indexOf(NL, at)) >= 0) { const l = text.slice(at, i); if (l) line(l, r, p++); at = i + 1; } const l = text.slice(at); if (l) line(l, r, p++); };

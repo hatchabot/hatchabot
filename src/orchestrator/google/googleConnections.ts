@@ -3,6 +3,7 @@ import type { Store } from '../../store/store.js';
 import type { RuntimeProvider } from '../../providers/provider.js';
 import type { SecretStore } from '../../secrets/secretStore.js';
 import { keyedLock } from '../../util/queues.js';
+import { rethrowIfCrash } from '../lifecycle/operations.js';
 
 /**
  * Platform-managed Google connections (docs/connections-design.md, Phase 2 —
@@ -155,27 +156,60 @@ export function sameGoogleGrant(a: string | null | undefined, b: string | null |
   return !pa || !pb || pa === pb;
 }
 
+const GOOGLE_REVOKE_URL = 'https://oauth2.googleapis.com/revoke';
+/**
+ * How a token's cleanup records a secret store that kept Hatchabot's copy
+ * once Google's part was done (revoked, gone already, or kept for another
+ * connection's grant): the Connections page says that, not "not confirmed
+ * at Google" (HB-1336 review).
+ */
+export const COPY_NOT_DELETED = 'the secret store did not delete it';
+
+/**
+ * Whether a 200 to a revoke is Google's own (HB-1345): from the revoke
+ * address itself, no redirect followed, with Google's body, empty or a JSON
+ * object. A captive portal's or a proxy's page is a 200 too, and ended the
+ * cleanup with the token still live at Google.
+ */
+function revokeAnsweredByGoogle(r: Response, body: string): boolean {
+  if (r.status !== 200 || r.redirected || (r.url && r.url !== GOOGLE_REVOKE_URL)) return false;
+  if (!body.trim()) return true;
+  try {
+    const v = JSON.parse(body) as unknown;
+    return !!v && typeof v === 'object' && !Array.isArray(v);
+  } catch { return false; }
+}
+
 /**
  * Revoke a refresh token at Google when a connection is removed from the
- * vault. Ended: Google revoked it, or answered that it knows no such token
- * (400 `invalid_token`: expired, or revoked already), so nothing is left
- * to end. Anything else (no answer in ten seconds, another refusal,
- * Google's own error) did not end it, in words for the record (HB-1203).
+ * vault. Ended: Google revoked it (its own 200: revokeAnsweredByGoogle), or
+ * answered that it knows no such token (400 `invalid_token`: expired, or
+ * revoked already), so nothing is left to end. Anything else (no answer in
+ * ten seconds, another refusal, Google's own error, a redirect, or a 200
+ * that is not Google's) did not end it, in words for the record (HB-1203).
  */
 export async function revokeGoogleToken(refreshToken: string, fetchImpl: typeof fetch = fetch): Promise<{ ended: true; already: boolean } | { ended: false; error: string }> {
   let r: Response;
   try {
-    r = await fetchImpl('https://oauth2.googleapis.com/revoke', {
+    r = await fetchImpl(GOOGLE_REVOKE_URL, {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ token: refreshToken }).toString(),
+      // A redirect is no answer of Google's: followed, a portal's page answered 200.
+      redirect: 'manual',
       signal: AbortSignal.timeout(10_000),
     });
   } catch (err) {
     return { ended: false, error: `no answer from Google: ${String((err as Error)?.message ?? err).slice(0, 160)}` };
   }
-  if (r.ok) return { ended: true, already: false };
-  const body = await r.text().catch(() => '');
+  // A body cut off part way is no answer: read as empty, a 200 counted as Google's revoke (HB-1345 review).
+  let body: string;
+  try { body = await r.text(); } catch { return { ended: false, error: 'the answer was cut off' }; }
+  if (r.status === 200) {
+    if (revokeAnsweredByGoogle(r, body)) return { ended: true, already: false };
+    const type = (r.headers.get('content-type') ?? '').split(';')[0]!.trim().slice(0, 60);
+    return { ended: false, error: `an answer that was not Google's (200${type ? `, ${type}` : ''}): a captive portal or a proxy in the way?` };
+  }
   let code: unknown;
   try { code = (JSON.parse(body) as { error?: unknown } | null)?.error; } catch { code = undefined; }
   if (r.status === 400 && code === 'invalid_token') return { ended: true, already: true };
@@ -221,7 +255,8 @@ export interface ConnectionSyncDeps {
   log?: (event: string, detail: Record<string, unknown>) => void;
 }
 
-const GOG_HOME = '/home/node/.openclaw/connections/gog';
+/** Where gog keeps an agent's Google accounts, on its volume: the agent container's GOG_HOME (provision.ts sets it from this). */
+export const GOG_HOME = '/home/node/.openclaw/connections/gog';
 
 /**
  * The volume-side plumbing every materialization needs, idempotent: file
@@ -570,8 +605,16 @@ export async function gogAccounts(deps: ConnectionSyncDeps, runtimeRef: string):
       runtimeRef,
       '~/.local/bin/gog auth list --json 2>/dev/null || gog auth list --json 2>/dev/null',
     );
-    if (res.code !== 0) return null;
-    const parsed = JSON.parse(res.stdout) as { accounts?: unknown } | null;
+    return res.code === 0 ? gogList(res.stdout) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The emails `gog auth list --json` printed, or null when that is not an answer (gogAccounts says why). */
+function gogList(stdout: string): string[] | null {
+  try {
+    const parsed = JSON.parse(stdout) as { accounts?: unknown } | null;
     if (!parsed || typeof parsed !== 'object') return null;
     // Only a list gog actually gave is an answer. `{}`, a missing key or any
     // other shape is unknown, not "holds nothing": read as empty, it let a
@@ -605,7 +648,7 @@ export async function dematerializeConnection(
   email: string,
 ): Promise<{ ok: boolean; error?: string }> {
   // A shape materialize refuses to write: nothing of ours can be there.
-  if (!/^[A-Za-z0-9][A-Za-z0-9._%+-]*@[A-Za-z0-9.-]+$/.test(email) || email.length > 254) return { ok: true };
+  if (!plainMailbox(email)) return { ok: true };
   let error: string;
   try {
     const res = await deps.provider.execShell(
@@ -633,6 +676,70 @@ export async function dematerializeConnection(
   }
   deps.log?.('connection.remove_failed', { agentId: agent.id, email, error });
   return { ok: false, error };
+}
+
+/** An email of the shape materialize writes (it reaches a shell line). */
+const plainMailbox = (email: string) => /^[A-Za-z0-9][A-Za-z0-9._%+-]*@[A-Za-z0-9.-]+$/.test(email) && email.length <= 254;
+const GOG_LIST_MARK = '--- hatchabot: gog auth list ---';
+
+/**
+ * The removals queued for an agent that is not running, done early on its
+ * volume, before it starts (HB-1207). A restore re-arms the removal of an
+ * account taken off since its copy was made (queueRemovalsSince), and that
+ * came off only at the start's sync: for the seconds before it, the
+ * restored account could be used. The agent's own image runs its gog
+ * wrapper (the keyring's password is on the volume), with no network, and
+ * GOG_HOME set as the agent's container has it: without it gog used a store
+ * of its own under ~/.config, "removed" the account there and listed none,
+ * while the account stayed in GOG_HOME (round 2 review of HB-1207).
+ *
+ * Only early, never the record: the removal stays queued and the start's
+ * sync runs it and confirms it from `gog auth list` as before, so whatever
+ * this one-shot says can never leave an account on that the old way took
+ * off. A volume with no GOG_HOME of Hatchabot's (no keyring password: no
+ * account was ever put there) cannot tell, and nothing is run. In the
+ * agent's connection turn. Returns the emails gog no longer lists after it.
+ */
+export async function removeQueuedOnVolume(
+  deps: Pick<ConnectionSyncDeps, 'store' | 'provider' | 'log'>,
+  agent: { id: string; runtimeRef: string; image?: string | null },
+): Promise<string[]> {
+  const { store } = deps;
+  return withConnectionLock(agent.id, async () => {
+    const attached = new Set(store.listAgentConnections(agent.id).map((a) => store.getConnection(a.connectionId)?.email.toLowerCase()));
+    const emails = store.connectionRemovals(agent.id).filter((e) => plainMailbox(e) && !attached.has(e.toLowerCase()));
+    if (!emails.length) return [];
+    const script = [
+      // First: every gog below reads the agent's own store, never ~/.config/gogcli.
+      `export GOG_HOME='${GOG_HOME}'`,
+      `if [ ! -f "$GOG_HOME/keyring_password" ]; then echo 'no Google accounts kept by Hatchabot on this volume (GOG_HOME has no keyring)' >&2; exit 3; fi`,
+      ...emails.map((e) => `{ ~/.local/bin/gog auth remove --force -- "${e}" || gog auth remove --force -- "${e}"; } >/dev/null 2>&1`),
+      `printf '%s\\n' '${GOG_LIST_MARK}'`,
+      `~/.local/bin/gog auth list --json 2>/dev/null || gog auth list --json 2>/dev/null`,
+    ].join('\n');
+    let held: string[] | null = null, error = 'gog did not list its accounts';
+    try {
+      const res = await deps.provider.execShellOnVolume(agent.runtimeRef, script, { image: agent.image ?? undefined });
+      const at = res.stdout.lastIndexOf(`${GOG_LIST_MARK}\n`);
+      held = res.code === 0 && at >= 0 ? gogList(res.stdout.slice(at + GOG_LIST_MARK.length + 1)) : null;
+      if (res.code !== 0) error = (res.stderr || `it ended with code ${res.code}`).slice(0, 300);
+    } catch (err) {
+      rethrowIfCrash(err);
+      error = String((err as Error)?.message ?? err).slice(0, 300);
+    }
+    // Said, never recorded: the start's sync takes it off and confirms it.
+    if (!held) {
+      for (const email of emails) deps.log?.('connection.remove_failed', { agentId: agent.id, email, error, beforeStart: true, triedAgainAtStart: true });
+      return [];
+    }
+    const off = emails.filter((email) => !held!.some((h) => h.toLowerCase() === email.toLowerCase()));
+    for (const email of emails) {
+      deps.log?.(off.includes(email) ? 'connection.removed_from_agent' : 'connection.remove_failed', {
+        agentId: agent.id, email, beforeStart: true, triedAgainAtStart: true, ...(off.includes(email) ? {} : { error: 'gog still lists it' }),
+      });
+    }
+    return off;
+  });
 }
 
 /**

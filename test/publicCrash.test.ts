@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SHIM_DNS, tailscaleShim } from './helpers/tailscaleShim.js';
-import { changing, closeAfterEach, ctx, envNow, world } from './helpers/publicWorld.js';
+import { changing, closeAfterEach, ctx, envNow, turnOn, world } from './helpers/publicWorld.js';
 import { publicAccessFacts, publicAccessLines } from '../src/doctor.js';
 import { publicIntentPath, readPublicIntent, writePublicIntent } from '../src/ops/publicIntent.js';
 import { funnelOff, parseFunnelStatus } from '../src/ops/tailnet.js';
@@ -38,7 +38,7 @@ exec '${w.shim.bin}' "$@"
     chmodSync(wrapper, 0o755);
     process.env.HATCHABOT_TAILSCALE_BIN = wrapper;
     expect(existsSync(marker)).toBe(false);
-    const r = await w.call('POST', '/v1/public-access/on', { confirm: true });
+    const r = await turnOn(w);
     expect(r.statusCode, r.body).toBe(200);
     expect(readFileSync(saw, 'utf8')).toBe('true');
     expect(existsSync(marker)).toBe(false);
@@ -54,7 +54,7 @@ exec '${w.shim.bin}' "$@"
     const w = await world();
     const real = w.h.store.recordSecurity.bind(w.h.store);
     w.h.store.recordSecurity = (kind: string, ...rest: [string | undefined, Record<string, unknown>?]) => { if (kind === 'public.on') throw new Error('the disk is full'); return real(kind, ...rest); };
-    const r = await w.call('POST', '/v1/public-access/on', { confirm: true });
+    const r = await turnOn(w);
     expect(r.statusCode).toBe(500);
     expect(w.shim.config().AllowFunnel ?? {}).toEqual({});
     expect(envNow(w.envFile).get('HATCHABOT_PUBLIC_ACCESS')).toBeUndefined();
@@ -62,7 +62,7 @@ exec '${w.shim.bin}' "$@"
     expect(existsSync(publicIntentPath(w.envFile))).toBe(false);
     // …and it can be turned on afterwards.
     w.h.store.recordSecurity = real;
-    expect((await w.call('POST', '/v1/public-access/on', { confirm: true })).statusCode).toBe(200);
+    expect((await turnOn(w)).statusCode).toBe(200);
   }, 60_000);
 
   /**
@@ -95,8 +95,14 @@ exec '${w.shim.bin}' "$@"
       if (left.funnel) shim.setConfig(funnelEntry(deadPort));
       expect(w.h.app.publicAccess!.config().on).toBe(left.access);
 
-      // index.ts, at start, before the listener is opened:
+      // The next start, as index.ts runs it: what a switch that died left behind is taken back, and
+      // then the public listener opens if public access is still on.
       const rec = await w.h.app.publicAccessRecover!('startup');
+      if (w.h.app.publicAccess!.config().on) await w.h.app.publicAccess!.syncListener();
+      // Nothing is served on the public port: this app has no listener there. Asked of the app, not
+      // the port: nothing holds that port, so another test file's app could have chosen it and answer
+      // there (HB-1495).
+      expect(w.h.app.publicAccess!.status().listening).toBe(false);
       expect(rec).toEqual({ rolledBack: true });
       expect(shim.config().AllowFunnel ?? {}).toEqual({});
       expect(changing(shim)).toEqual(left.funnel ? ['funnel --https=8443 off'] : []);
@@ -106,11 +112,9 @@ exec '${w.shim.bin}' "$@"
       expect(w.h.app.publicAccess!.status()).toMatchObject({ on: false, serving: false, listening: false });
       expect(existsSync(publicIntentPath(envFile))).toBe(false);
       expect(w.h.store.listSecurityLog().find((e) => e.kind === 'public.recovered')).toMatchObject({ detail: { when: 'startup', funnelRemoved: true } });
-      // Nothing answers on the public port.
-      await expect(fetch(`http://127.0.0.1:${deadPort}/`)).rejects.toThrow();
-      // A second start finds nothing to do, and it can be turned on properly.
+      // A second start finds nothing to do, and it can be turned on properly (on another port if something took this one).
       expect(await w.h.app.publicAccessRecover!('startup')).toEqual({});
-      expect((await w.call('POST', '/v1/public-access/on', { confirm: true })).statusCode).toBe(200);
+      expect((await turnOn(w)).statusCode).toBe(200);
     }, 60_000);
   }
 
@@ -150,7 +154,7 @@ exec '${w.shim.bin}' "$@"
     expect((await w.call('GET', '/v1/public-access')).json().recovered).toBeUndefined();
     expect(changing(w.shim).length).toBe(before);
     // With public access ON the entry is the public address itself: never touched by this.
-    expect((await w.call('POST', '/v1/public-access/on', { confirm: true })).statusCode).toBe(200);
+    expect((await turnOn(w)).statusCode).toBe(200);
     expect(await w.h.app.publicAccessRecover!('status')).toEqual({});
     expect(Object.keys(w.shim.config().AllowFunnel ?? {}).sort()).toEqual([`${SHIM_DNS}:10000`, `${SHIM_DNS}:8443`]);
     expect((await w.h.pub('/v1/config')).status).toBe(200);

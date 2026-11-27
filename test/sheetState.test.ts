@@ -158,6 +158,23 @@ async function u() { const f = sheetSave(); await api('/v1/agents/' + f.id); f.d
   });
 });
 
+describe("the exemptions: the page's tables, or a test's (the page's are empty since HB-1487 and HB-1489)", () => {
+  it('a function named with its one button turns that button after an await, and no other; a read named takes its handle late', () => {
+    const code = `async function own() {
+  await api('/x');
+  $('renameBtn').disabled = false;
+  $('modelBtn').disabled = false;
+}
+async function late() { await api('/x'); const r = sheetRead('y'); return r; }`;
+    const run = (opts: Record<string, unknown>) => sheetStateProblems([{ name: 'web/app/x.js', code }], { formIds: ['renameBtn', 'modelBtn'], ...opts })
+      .map((x: string) => x.replace(/(after an await).*/, '$1'));
+    const turnsModel = 'web/app/x.js:4: own turns modelBtn on or off after an await';
+    expect(run({})).toEqual(['web/app/x.js:3: own turns renameBtn on or off after an await', turnsModel,
+      'web/app/x.js:6: late takes its handle (sheetRead) after an await']);
+    expect(run({ ownButtons: { own: { renameBtn: 'a made-up guard of its own' } }, lateReads: { late: 'a made-up list read again' } })).toEqual([turnsModel]);
+  });
+});
+
 describe('one way to note what the forms hold', () => {
   it('a baseline noted by hand fails, and so does a press noted outside sheetSave', () => {
     const p = problems(`function fillIt() { $('a').value = 'x'; v2SheetBaseline('a'); }

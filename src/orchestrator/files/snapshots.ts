@@ -358,7 +358,9 @@ export async function restoreSnapshot(
   // Recorded as it goes (operations.ts): a restart part-way through the
   // files holds the agent for its owner — finish, or revert to the snapshot
   // taken just before (resumeSnapshotRestore).
-  const op = beginOperation(store, 'restore-snapshot', agentId, { snapshotId, label: snapshot.label }, { requestedBy: deps.requestedBy });
+  // Its name as the owner sees it, in every word of the restore (HB-1467).
+  const label = snapshotLabel(snapshot);
+  const op = beginOperation(store, 'restore-snapshot', agentId, { snapshotId, label }, { requestedBy: deps.requestedBy });
   deps.onOperation?.(op.id);
 
   // A restore is itself destructive — capture the current state first so an
@@ -368,7 +370,7 @@ export async function restoreSnapshot(
   try {
     const safety = await captureSnapshot(deps, agentId, {
       reason: 'pre-restore',
-      label: `before restoring ${snapshot.label}`,
+      label: `before restoring ${label}`,
     });
     safetySnapshotId = safety.id;
     present = safety.files;
@@ -408,7 +410,7 @@ export async function restoreSnapshot(
       const why = err instanceof SnapshotError ? err.userMessage : String(err);
       const msg =
         `${why}${restored.length ? ` ${restored.join(', ')} ${restored.length === 1 ? 'was' : 'were'} already restored.` : ' Nothing was changed.'} ` +
-        `The snapshot "before restoring ${snapshot.label}" holds how its files were.`;
+        `The snapshot "before restoring ${label}" holds how its files were.`;
       if (restored.length) op.fail(msg);
       else op.rolledBack(msg);
       throw new SnapshotError(msg);
@@ -419,7 +421,7 @@ export async function restoreSnapshot(
   restoreParamLayer(store, agentId, snapshot);
   op.step('written');
   log('snapshot.restored', { agentId, snapshotId, restored });
-  op.done(`Restored its files from "${snapshot.label}".`);
+  op.done(`Restored its files from "${label}".`);
   return { restored, safetySnapshotId };
 }
 
@@ -578,6 +580,16 @@ export async function recoverSnapshotRestore(deps: SnapshotDeps, opId: string, a
   restoreParamLayer(deps.store, agent.id, snapshot);
   op.step('written');
   op.done(`Restored its files from "${label}".`);
+}
+
+/**
+ * A snapshot's name as the owner sees it. One taken before a change of its
+ * setup values or definition was named "manual snapshot" before 2.192.0 (no
+ * words for its reason then), and listed so, with no "kept": it is named for
+ * its reason now (HB-1467).
+ */
+export function snapshotLabel(s: { label: string; reason: string }): string {
+  return s.reason === 'pre-params' && s.label === defaultLabel('manual') ? defaultLabel('pre-params') : s.label;
 }
 
 /** A snapshot's name when it is given none, and the words for why one was taken (eventLabels.ts). */

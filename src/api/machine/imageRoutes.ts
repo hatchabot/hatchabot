@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { derivedNameProblem } from '../../domain/derivedImageName.js';
 import { imageRepository } from '../../domain/imageRepository.js';
 import type { Agent } from '../../domain/types.js';
-import { baseProblem, buildLogPath, checkTag, deriveTag, dockerfileProblem, readLogTail, removeBuildLogs, removeDerivedImage } from '../../orchestrator/machines/derivedImage.js';
+import { baseProblem, buildLogPath, checkTag, deriveTag, derivedBuildProblem, dockerfileProblem, readLogTail, removeBuildLogs, removeDerivedImage } from '../../orchestrator/machines/derivedImage.js';
 import { needsSharedEmbedder } from '../../orchestrator/machines/buildFailure.js';
 import { baseBuildEnv, baseBuildTag, blockedMessage, cleanPackages, movesFleetDefault, promoteRefusal, someNames, strandedFollowers, type MakeDefault } from '../../orchestrator/machines/runtimeImages.js';
 import { probeImageCapabilities } from '../../orchestrator/machines/runtimeCaps.js';
@@ -43,7 +43,7 @@ const RebuildImage = z.object({ base: z.string().optional() });
 export function registerImageRoutes(app: FastifyInstance, ctx: RouteContext): void {
   const { deps, store, trace, providerFor, ownsLocalHost, memorySearch } = ctx;
   const { defaultBase: DEFAULT_BASE, runtimeRepo: RUNTIME_REPO, dataDir: buildDataDir } = ctx.machines.images;
-  const { isBuilding, kickImageBuild, readImagesInUse, imageBlockers, baseBuildNow, startBaseBuild, distTags } = ctx.machines.images;
+  const { isBuilding, kickImageBuild, readImagesInUse, defaultRefusal, derivedBase, imageBlockers, baseBuildNow, startBaseBuild, distTags } = ctx.machines.images;
 
   /** Fleet runtime images: every tag on the local daemon, who is pinned where, what :latest points at. */
   app.get('/v1/runtime/images', async (req, reply) => {
@@ -230,13 +230,25 @@ export function registerImageRoutes(app: FastifyInstance, ctx: RouteContext): vo
    * What POST /v1/runtime/build would say of a build onto `tag`, for one made
    * outside the app (hatchabot upgrade-image runs the build script itself):
    * `refused` is why not, null when nothing stops it. Changes nothing.
+   * `built=1`: asked once the build of `tag` is done, before it moves its
+   * repository's `latest`, what the app's build asks then (defaultRefusal):
+   * an engine-free image with the shared memory service off, agents it would
+   * strand; not the pins, as its tag already names the new image (HB-1450
+   * review). Its answer says `built: true`: a service from before it reads no
+   * `built` and answers the check above, which the CLI then does not take.
    */
-  app.get<{ Querystring: { tag?: string; version?: string; candidate?: string } }>('/v1/runtime/build/check', async (req, reply) => {
+  app.get<{ Querystring: { tag?: string; version?: string; candidate?: string; built?: string } }>('/v1/runtime/build/check', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     const tag = String(req.query.tag ?? '').trim();
     if (!IMAGE_TAG_RE.test(tag)) return reply.code(400).send({ error: 'That image tag is not valid.' });
     const version = req.query.version?.trim() || undefined;
     if (version && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(version)) return reply.code(400).send({ error: 'That version is not valid.' });
+    if (req.query.built === '1') {
+      if (req.query.candidate === '1') return reply.code(400).send({ error: 'A candidate moves no default: there is nothing to ask once it is built.' });
+      const localHost = store.listHosts(ownerIdOf(req)).find((h) => h.kind === 'local');
+      if (!localHost) return { refused: null, built: true };
+      return { refused: (await defaultRefusal({ hostId: localHost.id, tag, latest: `${imageRepository(tag)}:latest`, version: version ?? '' })) ?? null, built: true };
+    }
     return { refused: await buildRefusal(imageRepository(tag), tag, version, req.query.candidate === '1', ownerIdOf(req)) };
   });
 
@@ -249,15 +261,23 @@ export function registerImageRoutes(app: FastifyInstance, ctx: RouteContext): vo
     const b = parsed.data;
     const version = b.version?.trim() || undefined;
     if (version && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(version)) return reply.code(400).send({ error: 'That version is not valid.' });
-    if (version && (version === 'latest' || version.startsWith('derived-'))) return reply.code(400).send({ error: 'Build a specific OpenClaw version; :latest is set by Promote.' });
+    // Said plainly: ":latest is set by Promote" was untrue under a pinned HATCHABOT_IMAGE, where a default build
+    // moves :latest and Promote is off, and of any build that is not a candidate (HB-1454).
+    if (version && (version === 'latest' || version.startsWith('derived-'))) return reply.code(400).send({ error: 'Name the OpenClaw version to build, such as 2026.9.8: "latest" and "derived-" names are image tags, not versions.' });
     // Engine-free: the image carries no memory search engine, its agents use
     // the shared service (docs/embedder-and-openclaw-port-design.md, step 4).
     // Only with that service on: an image nobody can run is no candidate.
     if (b.engine !== undefined && b.engine !== 'baked' && b.engine !== 'none') return reply.code(400).send({ error: "engine must be 'baked' or 'none'" });
-    const engine = b.engine === 'none' || needsSharedEmbedder(version) ? 'none' as const : undefined;
+    // No version given builds the Dockerfile's, and is judged by it: it was
+    // judged as one that bakes, so a 2026.8+ build with the service off was
+    // started (HB-1185). Neither known, the build itself is the judge.
+    const dockerfileVersion = (() => { try { return /^ARG OPENCLAW_VERSION=(\S+)/m.exec(readFileSync('docker/Dockerfile.runtime', 'utf8'))?.[1]; } catch { return undefined; } })();
+    const outVersion = version ?? dockerfileVersion;
+    const lacksEngine = needsSharedEmbedder(outVersion) === true;
+    const engine = b.engine === 'none' || lacksEngine ? 'none' as const : undefined;
     const embedder = memorySearch.local;
     if (engine && !embedder.enabled && !embedder.external) {
-      return reply.code(400).send({ error: (needsSharedEmbedder(version) ? `OpenClaw ${version} has no memory search engine of its own to bake, so its agents need` : 'An image without its own memory search engine needs') + ' the shared memory search service: start it first (Settings → Hosts).' });
+      return reply.code(400).send({ error: (lacksEngine ? `OpenClaw ${outVersion} has no memory search engine of its own to bake, so its agents need` : 'An image without its own memory search engine needs') + ' the shared memory search service: start it first (Settings → Hosts).' });
     }
     const candidate = b.candidate !== false;
     const packages = cleanPackages(b.packages);
@@ -277,8 +297,6 @@ export function registerImageRoutes(app: FastifyInstance, ctx: RouteContext): vo
     // repo, HB-1352), not one HATCHABOT_IMAGE_REPO names where the service
     // runs, as the script does, never a HATCHABOT_IMAGE pinned to another
     // tag: asked now (buildRefusal), and again as it ends (makeDefault, HB-1187).
-    const dockerfileVersion = (() => { try { return /^ARG OPENCLAW_VERSION=(\S+)/m.exec(readFileSync('docker/Dockerfile.runtime', 'utf8'))?.[1]; } catch { return undefined; } })();
-    const outVersion = version ?? dockerfileVersion;
     const outTag = baseBuildTag(baseBuildEnv({ version, packages: packages.value, engine, candidate }), dockerfileVersion);
     const refused = await buildRefusal(RUNTIME_REPO, outTag ? `${RUNTIME_REPO}:${outTag}` : undefined, outVersion, candidate, ownerIdOf(req));
     if (refused) return reply.code(409).send({ error: refused });
@@ -340,10 +358,12 @@ export function registerImageRoutes(app: FastifyInstance, ctx: RouteContext): vo
       const { name, dockerfile } = parsed.data;
       const dfProblem = dockerfileProblem(dockerfile);
       if (dfProblem) return reply.code(400).send({ error: dfProblem });
-      const base = parsed.data.base ?? DEFAULT_BASE;
-
       const nameErr = derivedNameProblem(name);
       if (nameErr) return reply.code(400).send({ error: nameErr });
+      // None named: the fleet's default, or, pinned by digest, a tag here of that image, said (HB-1353).
+      const fallback = parsed.data.base === undefined ? await derivedBase(store.listHosts(ownerIdOf(req)).find((h) => h.kind === 'local')) : undefined;
+      if (fallback && 'problem' in fallback) return reply.code(400).send({ error: fallback.problem });
+      const base = parsed.data.base ?? fallback!.base;
       // The fleet's own repository, as Promote and the base build use it (HB-0882).
       const baseErr = baseProblem(base, RUNTIME_REPO);
       if (baseErr) return reply.code(400).send({ error: baseErr });
@@ -358,11 +378,15 @@ export function registerImageRoutes(app: FastifyInstance, ctx: RouteContext): vo
         return reply.code(409).send({ error: `An image called ${name} already exists. Send replace to change its lines (its agents get them at their next rebuild), or pick another name.` });
       }
 
+      // A replaced image keeps its base packages: judged with the lines as the
+      // build will judge them, before the record is marked building.
+      const buildErr = derivedBuildProblem(dockerfile, store.getDerivedImage(name)?.basePackages);
+      if (buildErr) return reply.code(400).send({ error: buildErr });
       // A replaced image keeps the tag its agents pin; a new one is named in the fleet's repository.
       const tag = store.getDerivedImage(name)?.tag ?? deriveTag(name, RUNTIME_REPO);
       store.upsertDerivedImage({ name, tag, base, dockerfile, createdBy: ownerIdOf(req) });
       kickImageBuild(name);
-      return reply.code(202).send({ building: true, tag });
+      return reply.code(202).send({ building: true, tag, base, ...(fallback && 'said' in fallback && fallback.said ? { said: fallback.said } : {}) });
     },
   );
 
@@ -382,6 +406,13 @@ export function registerImageRoutes(app: FastifyInstance, ctx: RouteContext): vo
       const base = body.data.base?.trim() || rec.base;
       const baseErr = baseProblem(base, RUNTIME_REPO);
       if (baseErr) return reply.code(400).send({ error: baseErr });
+      // The record's lines held to today's rules before anything is written:
+      // lines saved before a rule (a COPY --from, HB-1473) are refused, and
+      // the record, its base and its status stay as they were. Marked
+      // building first, a refused build marked a working image FAILED, with
+      // no log of why (review of HB-1473).
+      const buildErr = derivedBuildProblem(rec.dockerfile, rec.basePackages);
+      if (buildErr) return reply.code(400).send({ error: buildErr });
       store.upsertDerivedImage({
         name: rec.name, tag: rec.tag, base, dockerfile: rec.dockerfile, createdBy: rec.createdBy,
       });
@@ -471,10 +502,10 @@ export function registerImageRoutes(app: FastifyInstance, ctx: RouteContext): vo
       npmExtendedStable: extendedStable,
       upgradeAvailable: !!(imageVersion && latest && imageVersion !== latest),
       /** 2026.8+ images carry no memory search engine: buildable only with the shared service on. Say so rather than invite a build that must fail. */
-      upgradeNeedsSharedEmbedder: needsSharedEmbedder(latest),
+      upgradeNeedsSharedEmbedder: needsSharedEmbedder(latest) === true,
       // Yes or no, never the address: anyone signed in reads this, and an external server's address
       // may carry credentials (it went out as this value, HB-0854).
-      upgradeBuildable: !needsSharedEmbedder(latest) || embedder.enabled || !!embedder.external,
+      upgradeBuildable: needsSharedEmbedder(latest) !== true || embedder.enabled || !!embedder.external,
     };
   });
 }

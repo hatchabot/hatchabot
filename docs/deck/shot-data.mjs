@@ -110,7 +110,7 @@ export const STUB = `(() => {
     '/v1/ai-profiles/usage': USAGE,
     '/v1/hosts': [{ id: 'h1', name: 'This machine', hostname: 'home-server', kind: 'local', online: true, status: 'online' }],
     '/v1/pool': { availableBots: 3, bots: [] },
-    '/v1/inbox': { shares: [] },
+    '/v1/inbox': { shares: [], total: 0 },
     '/v1/events': [
       { at: ago(4), agentName: 'Meal Planner', event: 'agent.online', text: 'came online' },
       { at: ago(26), agentName: 'Homework Helper', event: 'member.admitted', text: 'let someone in' },

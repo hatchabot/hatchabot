@@ -5,7 +5,7 @@ import { Store } from '../src/store/store.js';
 import { createFiles, type Files } from '../src/orchestrator/files/files.js';
 import { TurnRefused } from '../src/orchestrator/files/coreFileTurns.js';
 import { cleanRelPath } from '../src/orchestrator/files/agentFiles.js';
-import { AgentBusyError, clearBusy, markBusy } from '../src/orchestrator/lifecycle/busy.js';
+import { AgentBusyError, markBusy } from '../src/orchestrator/lifecycle/busy.js';
 import type { Agent } from '../src/domain/types.js';
 import type { ExecResult } from '../src/providers/provider.js';
 
@@ -34,7 +34,6 @@ interface World {
 const made: World[] = [];
 afterEach(() => {
   for (const w of made.splice(0)) w.files.stop();
-  for (const id of ['a1', 'a2']) clearBusy(id);
   vi.useRealTimers();
 });
 

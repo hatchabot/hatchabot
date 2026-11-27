@@ -216,6 +216,16 @@ exit 0`);
     expect(t.called()).toMatch(/enable --now hatchabot\.service/);
   });
 
+  it('export lines are renamed as plain ones are, and an exported database line goes for the one it pins (HB-1232)', () => {
+    const t = legacy();
+    writeFileSync(join(t.old, '.env'), `export AGENTCLAW_SECRET_KEY=made-up-old-key\nexport  AGENTCLAW_DB=${join(t.old, 'data', 'agentclaw.sqlite')}\nAGENTCLAW_PREFIX=agentclaw\nexport PORT=8080\n# AGENTCLAW_NOTE stays a comment\n`);
+    const r = t.run();
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(readFileSync(join(t.home, 'hatchabot-prod', '.env'), 'utf8')).toBe(
+      `export HATCHABOT_SECRET_KEY=made-up-old-key\nHATCHABOT_PREFIX=agentclaw\nexport PORT=8080\n# AGENTCLAW_NOTE stays a comment\nHATCHABOT_DB=${join(t.home, 'hatchabot-data', 'hatchabot.sqlite')}\n`);
+    expect(readFileSync(join(t.home, 'hatchabot-data', 'hatchabot.sqlite'), 'utf8')).toBe('old-db');
+  });
+
   it('a run that fails after the stop says how to start AgentClaw again, and leaves no part-written .env (review of HB-1072)', () => {
     const t = legacy();
     const units = join(t.home, '.config', 'systemd', 'user'); mkdirSync(units, { recursive: true });
@@ -309,6 +319,27 @@ exit 0`);
     const again = t.run();
     expect(again.status, again.stdout + again.stderr).toBe(0);
     expect(readFileSync(moved, 'utf8')).toBe('old-db');
+  });
+
+  it('a run stopped after moving the backups, before the link at their old path, says so, and a run again makes the link (HB-1350)', () => {
+    const t = legacy();
+    const oldB = join(t.home, 'agentclaw-backups'), newB = join(t.home, 'hatchabot-backups');
+    mkdirSync(join(oldB, '2026-10-01'), { recursive: true });
+    writeFileSync(join(oldB, '2026-10-01', 'made-up.tgz'), 'set');
+    // The link at the old path cannot be made, however it is made: a disk that just failed.
+    const bin = join(t.home, '..', 'bin');
+    for (const tool of ['ln', 'mv']) shim(bin, tool, `case "\${@: -1}" in */agentclaw-backups) echo "${tool}: Input/output error" >&2; exit 1 ;; esac\nexec /bin/${tool} "$@"`);
+    const r = t.run();
+    expect(r.status, r.stdout + r.stderr).toBe(1);
+    expect(readFileSync(join(newB, '2026-10-01', 'made-up.tgz'), 'utf8')).toBe('set');
+    expect(existsSync(oldB)).toBe(false);
+    expect(r.stdout).toContain(`AgentClaw's backups are in ${newB} now, and ${oldB} does not lead there yet. Before starting AgentClaw:`);
+    for (const tool of ['ln', 'mv']) rmSync(join(bin, tool));
+    const again = t.run();
+    expect(again.status, again.stdout + again.stderr).toBe(0);
+    expect(readlinkSync(oldB)).toBe(newB);
+    expect(readFileSync(join(oldB, '2026-10-01', 'made-up.tgz'), 'utf8')).toBe('set');
+    expect(readdirSync(t.home).filter((n) => n.startsWith('agentclaw-backups'))).toEqual(['agentclaw-backups']); // nothing left beside it
   });
 
   it('a show that answers nothing is not taken for "not there" either (HB-1072 review)', () => {

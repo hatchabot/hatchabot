@@ -40,7 +40,7 @@ import {
   SEARCH_KEY_REF,
 } from '../orchestrator/lifecycle/provision.js';
 import { AgentBusyError, freedWithin, isBusy, OWED_BUSY_WAIT_MS, OWED_BUSY_WAITS, whileBusy } from '../orchestrator/lifecycle/busy.js';
-import { NAME_TAKEN_WHY, retryPendingSchedulesWhenUp } from '../orchestrator/lifecycle/provision.js';
+import { retryPendingSchedulesWhenUp, waitsForItsOwner } from '../orchestrator/lifecycle/provision.js';
 import { containerUp, sleepUnref, UP_TRIES, upEveryMs, type UpWait } from '../orchestrator/lifecycle/afterRestart.js';
 import { listCrons } from '../orchestrator/schedules/crons.js';
 import { TASK_NOTES_PER_HOUR } from '../orchestrator/schedules/taskNotes.js';
@@ -116,6 +116,7 @@ import { createAppsAndSources } from '../orchestrator/apps/appsAndSources.js';
 import { createConsoles } from '../orchestrator/console/consoles.js';
 import { createMembersAndInvites } from '../orchestrator/members/membersAndInvites.js';
 import { resumeFirstContacts } from '../orchestrator/members/claim.js';
+import { inChannelConfigTurn } from '../orchestrator/members/members.js';
 import { registerBrowserRoutes } from './console/browserRoutes.js';
 import { consoleSessionWatch, registerConsoleRoutes } from './console/consoleRoutes.js';
 import { createMachines } from '../orchestrator/machines/machines.js';
@@ -613,8 +614,6 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   // never finished), so holds let go there lasted ten more minutes after
   // the work, and a lapse at ten minutes let a second request in while a
   // slow first one (a big import, a clone's export) still worked.
-  // How long an AI source's hold counts for (sourceHolds.ts).
-  const HOLD_MS = 10 * 60_000;
   const onceHeld = new Map<string, string>(); // key → request
   const holdOnce = (req: FastifyRequest, key: string): boolean => {
     const holder = onceHeld.get(key);
@@ -696,7 +695,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     dmChannelPeople: (agent, kind, secretRef, text) => channels.bots.dmChannelPeople(agent, kind, secretRef, text),
     parkArchivedChannels: (agent) => parkArchivedChannels(agent),
     forgetSettings: (agentId) => settings.forgetAgent(agentId),
-    // Defined further down (a const in this scope); called only by a delete.
+    // Defined further down (a const in this scope); called only by a delete or an archive.
     forgetConversations: (agentId) => conversations.forgetAgent(agentId),
     // The agent list (agentList.ts).
     publicAgent: (agent, extra) => publicAgent(agent, extra),
@@ -791,10 +790,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     store, providerFor, trace, agentGone, withAgentsMdTurn,
     warn: (detail, event) => { app.log.warn(detail, event); },
     inFlight,
-    sourceHoldMs: HOLD_MS,
     // A budget's switch to a cheaper model the boot's write could not put on
     // (HB-1404): the usage service, built further down; called only at resume.
-    owedRefused: (id, ask) => usage.budgets.cheaperRefused(id, ask),
+    owedRefused: (id, ask, how) => usage.budgets.cheaperRefused(id, ask, how),
   });
   const { applyModelToRuntime, imagePinCheck, subscriptionRuntimeProblem, finalModelCheck } = settings.models;
   const { inLimitsTurn, applyCurrentLimits, tellMemoryBudget, setMemoryCap, setSwapAllowance } = settings.limits;
@@ -943,7 +941,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     authMode: () => deps.authMode,
     localAccountsOn,
     consoleAccess,
-    restDoor: (agent) => channels.knocks.restDoor(agent),
+    restDoor: async (agent) => { await channels.knocks.restDoor(agent); },
     forgetKnocks: (agentId) => channels.knocks.forgetKnocks(agentId),
     // Told on the owner's phone (opsPush, defined further down: called only once an invitee's window has lapsed).
     opsPush: { waiting: (ownerId, headline, detail) => opsPush.waiting(ownerId, headline, detail) },
@@ -1210,7 +1208,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     // Defined further down (a const in this scope); called only by a request.
     syncDocsHeld: (a) => syncDocsHeld(a),
   });
-  const agentSecrets = createAgentSecrets({ store, secrets, trace, agentGone, channel: deps.channel, provisionWhenFree });
+  const agentSecrets = createAgentSecrets({ store, secrets, trace, agentGone, channel: deps.channel, provisionWhenFree, ...(deps.oauthFetch ? { telegramFetch: deps.oauthFetch } : {}) });
   // ---- the home screen and the model steward's reads (HB-0808 step 15, part C) --
   // The home screen service (orchestrator/homeScreen/homeScreen.ts): the
   // order and groups, icons (with their two locks) and planned agents. Its
@@ -1255,7 +1253,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   // and pageRoutes.ts.
   const reach = createReach({
     publicUrl: () => deps.publicUrl,
-    port: () => Number(process.env.PORT ?? 8080),
+    port: () => Number(process.env.PORT) || 8080,
     proxyPort: () => proxyPort(),
     proxyListener: () => proxyListenerState(),
     envPath: () => join(process.cwd(), '.env'),
@@ -1530,9 +1528,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
    */
   const owedAfterStart = (a: Agent): boolean =>
     !!a.rebuildHookDue || store.connectionRemovals(a.id).length > 0 || store.dataSourceRemovals(a.id).length > 0
-    // Not a task parked as a clash with another of its name: it waits for its
-    // owner to rename or remove that one, and is not owed at every boot (HB-0833 review).
-    || store.getPendingSchedules(a.id).some((s) => s.why !== NAME_TAKEN_WHY);
+    // Not a task parked as a clash with another of its name, or one the agent
+    // refused: each waits for its owner, and is not owed at every boot (HB-0833 review, HB-1409).
+    || store.getPendingSchedules(a.id).some((s) => !waitsForItsOwner(s.why));
   /** What follows a start the boot owes an agent, once its own operations are over (resumeOperations). Never rejects. */
   const afterItsOperation = async (was: Agent): Promise<void> => {
     if (!(await operationsOverFor(store, was.id, routesStop.signal))) return;
@@ -1793,28 +1791,44 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
    * it; a stopped agent's volume is edited). In the agent's limits turn, and
    * read as it is once that comes: a fleet default's pass, holding an agent
    * read before its wait for the agents ahead, wrote the default over a
-   * ceiling of its own saved meanwhile (HB-0917).
+   * ceiling of its own saved meanwhile (HB-0917). Each write in the agent's
+   * turn at its chat apps' section of openclaw.json too: the CLI writes the
+   * whole file back, and landing in the middle of a member's removal it put
+   * the removed person back on the agent's allowFrom (HB-1554). Where it
+   * runs, and how, read once its turn comes: stopped, rebuilt or moved while
+   * it waited, it wrote to the container it ran on before. `skipped`: it had
+   * nothing to write to (being set up, rebuilt, moved or deleted, then or in
+   * its turn), which says nothing of its machine: a fleet default's pass read
+   * a skip as a runner it could not reach, and passed the runner's other
+   * agents by (HB-1554 review).
    */
-  const applyFilesCap = (agent: Agent, only?: ChannelKindForFiles): Promise<{ applied: number; gone: boolean }> => inLimitsTurn(agent.id, async () => {
+  const applyFilesCap = (agent: Agent, only?: ChannelKindForFiles): Promise<{ applied: number; gone: boolean; skipped?: true }> => inLimitsTurn(agent.id, async () => {
     const a = store.getAgent(agent.id);
-    if (!a?.runtimeRef || (a.state !== 'RUNNING' && a.state !== 'STOPPED')) return { applied: 0, gone: false };
+    if (!a?.runtimeRef || (a.state !== 'RUNNING' && a.state !== 'STOPPED')) return { applied: 0, gone: false, skipped: true };
     const provider = providerFor(a.hostId);
-    let n = 0, gone = false;
+    let n = 0, gone = false, moved = false, failed = false;
     for (const kind of new Set(store.listChannelsForAgent(a.id).map((c) => c.kind))) {
       if (kind !== 'telegram' && kind !== 'discord' && kind !== 'slack') continue;
       if (only && kind !== only) continue;
       const mb = String(filesMb(kind, a.filesMaxMb));
-      const res = a.state === 'RUNNING'
-        ? await provider.exec(a.runtimeRef, ['config', 'set', `channels.${kind}.mediaMaxMb`, mb]).catch(() => undefined)
-        : await provider.execShellOnVolume(a.runtimeRef, `openclaw config set channels.${kind}.mediaMaxMb ${mb} >/dev/null`, { image: a.image ?? undefined }).catch(() => undefined);
+      const res = await inChannelConfigTurn(store, a.id, async () => {
+        const now = store.getAgent(a.id);
+        if (!now?.runtimeRef || (now.state !== 'RUNNING' && now.state !== 'STOPPED') || now.hostId !== a.hostId) return 'moved' as const;
+        return now.state === 'RUNNING'
+          ? provider.exec(now.runtimeRef, ['config', 'set', `channels.${kind}.mediaMaxMb`, mb])
+          : provider.execShellOnVolume(now.runtimeRef, `openclaw config set channels.${kind}.mediaMaxMb ${mb} >/dev/null`, { image: now.image ?? undefined });
+      }).catch(() => undefined);
+      // Being set up, rebuilt, moved or deleted meanwhile: the build writes the ceiling from the setting.
+      if (res === 'moved') { moved = true; continue; }
       if (res?.code === 0) n++;
       else {
+        failed = true;
         // Its one agent's loss, not a machine that is asleep (HB-0373).
         gone ||= res?.volumeMissing === true;
         trace(a.id)('files.cap_failed', { kind, error: String(res?.stderr ?? 'no answer').slice(0, 200) });
       }
     }
-    return { applied: n, gone };
+    return { applied: n, gone, ...(moved && !n && !failed ? { skipped: true as const } : {}) };
   });
 
   // ---- the agent lifecycle's routes (HB-0808 step 11) ----------------------
@@ -2005,15 +2019,18 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       if (kicked && p.recoverOn && store.getAgent(op.agentId!)?.aiProfileId === p.recoverOn) memory.history.afterRebuild(op.agentId!);
       return kicked;
     },
+    // The same for a rebuild the pass finishes itself (HB-1445).
+    recoverAfterRebuild: (agentId, done) => memory.history.afterRebuild(agentId, done),
     appDeps: (agentId) => { const a = store.getAgent(agentId); return a?.runtimeRef ? appDeps(a) : undefined; },
     tellOwner: (ownerId, agentId, text) => tellOwner(ownerChat, ownerId, agentId, text),
     afterStart: startHooksFor,
     // An adopt's starts are the Start button's (HB-0980 review): the owner's own
     // choice as the owner asked, one a restart left as the machine's own.
-    startStopped: (agentId, { ownerAsked }) => {
+    startStopped: (agentId, opts) => {
       const a = store.getAgent(agentId);
-      return a ? lifecycle.power.startStopped(a, { ownerAsked }) : Promise.resolve({ ok: false, error: 'Not found' });
+      return a ? lifecycle.power.startStopped(a, opts) : Promise.resolve({ ok: false, error: 'Not found' });
     },
+    isInFlight,
     parkOtherChannels: parkArchivedChannels,
   };
 
@@ -2085,6 +2102,10 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       // its next setup or rebuild, as one stopped at the change does.
       const docsOwed = store.agentHolds('docs-sync');
       try { pass = startResumeOperations(opsCtx); } finally { settingsResumed = settings.resume(pass?.settledFor); }
+      // A door to open once its agent is free ("Anyone can knock" turned on
+      // while a change held it), whose wait the restart cut off: opened once
+      // the agent's own operations are settled and its container is up (HB-1264).
+      try { channels.knocks.resumeKnockDoors(pass?.settledFor, bootUpWait); } catch (err) { app.log.error({ err: String(err) }, 'doors to open could not be taken up'); }
       // Six agents at a time, each once its own operations are settled.
       const afterStartOwed = sixAtATimeWhenReady(runningAtBoot, (was) => pass!.settledFor(was.id), async (was) => {
         const now = store.getAgent(was.id);
@@ -2157,8 +2178,27 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     /** Ask again, every 10 minutes, the questions a held operation is waiting on. */
     startOperationRetryLoop: (intervalMs?: number) => startOperationRetryLoop(opsCtx, intervalMs),
     clientSecretSweep: google.delivery.clientSecretSweep,
-    /** At shutdown: the services' timers end (HB-0807; each feature's service joins as it moves, HB-0808). */
-    stop: () => { routesStop.abort(); lifecycle.stop(); settings.stop(); channels.stop(); backups.stop(); consoles.stop(); machines.stop(); usage.stop(); schedules.stop(); google.stop(); hatchabotAgent.stop(); health.stop(); skills.stop(); files.stop(); memorySearch.stop(); machineSettings.stop(); memory.stop(); reach.stop(); accounts.stop(); },
+    /**
+     * At shutdown: the services' timers end (HB-0807; each feature's service
+     * joins as it moves, HB-0808). Each on its own: one that throws (a build
+     * stopped as the process ends) kept every one after it from stopping.
+     * The memory service first: it is the one that writes to the store as it
+     * stops, putting back a merge the shutdown cuts off (HB-1171).
+     */
+    stop: () => {
+      const stops: Array<[string, () => void]> = [
+        ['memory', () => memory.stop()], ['routes', () => routesStop.abort()], ['lifecycle', () => lifecycle.stop()],
+        ['settings', () => settings.stop()], ['channels', () => channels.stop()], ['backups', () => backups.stop()],
+        ['consoles', () => consoles.stop()], ['machines', () => machines.stop()], ['usage', () => usage.stop()],
+        ['schedules', () => schedules.stop()], ['google', () => google.stop()], ['hatchabotAgent', () => hatchabotAgent.stop()],
+        ['health', () => health.stop()], ['skills', () => skills.stop()], ['files', () => files.stop()],
+        ['memorySearch', () => memorySearch.stop()], ['machineSettings', () => machineSettings.stop()], ['reach', () => reach.stop()],
+        ['accounts', () => accounts.stop()],
+      ];
+      for (const [service, stopIt] of stops) {
+        try { stopIt(); } catch (err) { app.log.error({ service, err: String((err as Error)?.message ?? err) }, 'shutdown: a service did not stop'); }
+      }
+    },
   };
 }
 

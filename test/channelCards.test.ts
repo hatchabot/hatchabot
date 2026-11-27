@@ -5,6 +5,7 @@ import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { urlHost } from './helpers/urlHost.js';
+import { SecretNotFoundError } from '../src/secrets/secretStore.js';
 
 /**
  * An agent's channel cards (GET /v1/agents/:id/channels): what each card
@@ -17,8 +18,13 @@ const H = { 'x-hatchabot-owner': OWNER };
 
 class MemSecrets {
   map = new Map<string, string>();
+  /** Refs whose read fails as a store that did not answer, the token there all the same. */
+  failing = new Set<string>();
   async put(r: string, v: string) { this.map.set(r, v); }
-  async get(r: string) { const v = this.map.get(r); if (v === undefined) throw new Error('no secret'); return v; }
+  async get(r: string) {
+    if (this.failing.has(r)) throw new Error('made-up read failure');
+    const v = this.map.get(r); if (v === undefined) throw new SecretNotFoundError(r); return v;
+  }
   async delete(r: string) { this.map.delete(r); }
 }
 
@@ -244,6 +250,33 @@ describe('the bot inventory while Telegram is not answering properly (HB-1261)',
       tgNames.set('tok-meal', 'Meal Planner');
       const bots = await inventory(w);
       expect(bots.map((b) => [b.username, b.alive, b.displayName])).toEqual([['mealplannerbot', true, 'Meal Planner'], ['sparebot', false, undefined]]);
+    } finally { await w.f.close(); }
+  });
+
+  it('a bot whose token this server no longer has is said so, not taken for one Telegram rejects, and Telegram is not asked (HB-1384)', async () => {
+    const spare = { username: 'sparebot', secretRef: 'telegram/bot/sparebot', ownerId: OWNER };
+    const w = await world({ list: () => [spare] });
+    try {
+      await w.telegram('mealplannerbot', 'tok-meal');
+      w.secrets.map.delete('telegram/bot/mealplannerbot');
+      const bots = await inventory(w) as Array<{ username: string; alive?: boolean; tokenMissing?: boolean; where: string }>;
+      expect(bots.map((b) => [b.username, b.where, b.alive, b.tokenMissing])).toEqual([['mealplannerbot', 'agent', undefined, true], ['sparebot', 'pool-free', undefined, true]]);
+      expect(getMes).toBe(0);
+      // One with its token is judged as before, and carries no such mark.
+      await w.secrets.put(spare.secretRef, 'tok-spare');
+      tgNames.set('tok-spare', 'Spare');
+      const again = await inventory(w) as Array<{ username: string; alive?: boolean; tokenMissing?: boolean }>;
+      expect(again.find((b) => b.username === 'sparebot')).toMatchObject({ alive: true });
+      expect(again.find((b) => b.username === 'sparebot')).not.toHaveProperty('tokenMissing');
+      // A read that failed is not a token gone: said as such, with nothing offered that would scrub it (HB-1384 review).
+      w.secrets.failing.add(spare.secretRef);
+      const asked = getMes;
+      const unread = await inventory(w) as Array<{ username: string; alive?: boolean; tokenMissing?: boolean; tokenUnreadable?: boolean }>;
+      expect(getMes).toBe(asked);
+      const s = unread.find((b) => b.username === 'sparebot');
+      expect(s).toMatchObject({ tokenUnreadable: true });
+      expect(s).not.toHaveProperty('tokenMissing');
+      expect(s?.alive).toBeUndefined();
     } finally { await w.f.close(); }
   });
 });

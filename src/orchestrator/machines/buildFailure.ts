@@ -23,11 +23,15 @@ export function buildFailureReason(log: string, code: number | null): string {
  * every agent on it uses the machine's shared memory search service
  * (docs/embedder-and-openclaw-port-design.md). Building one is only worth
  * offering when that service is on.
+ *
+ * No version known (or one that is not a version) gives no answer: the
+ * caller decides, by the version its build will use. A build with no version
+ * builds the Dockerfile's, and was judged as one that bakes (HB-1185).
  */
 export const FIRST_ENGINELESS_OPENCLAW = [2026, 8, 0] as const;
-export function needsSharedEmbedder(version: string | undefined): boolean {
+export function needsSharedEmbedder(version: string | undefined): boolean | undefined {
   const m = /^(\d+)\.(\d+)\.(\d+)/.exec(version ?? '');
-  if (!m) return false; // unknown: let the build itself be the judge
+  if (!m) return undefined;
   const v = [Number(m[1]), Number(m[2]), Number(m[3])];
   for (let i = 0; i < 3; i++) {
     const have = v[i] ?? 0, first = FIRST_ENGINELESS_OPENCLAW[i] ?? 0;

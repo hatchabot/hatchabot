@@ -6,7 +6,7 @@ import { buildRecipeOn, namedHere, recipeDockerfile, recipeFor, recipeProblem, s
 import { chainId } from '../src/orchestrator/machines/buildInputs.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { LocalDockerProvider } from '../src/providers/localDockerProvider.js';
-import { parseImageFacts, ProviderError } from '../src/providers/provider.js';
+import { parseImageFacts, ProviderError, runConfigId } from '../src/providers/provider.js';
 
 const dirs: string[] = [];
 afterEach(() => { vi.unstubAllEnvs(); for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
@@ -30,6 +30,35 @@ describe("an imported file's image names, in this fleet's repository (HB-1183)",
     const r = namedHere('example-runtime:derived-media', 'example-runtime:2026.9.8', fleet);
     expect(r).toEqual({ tag: `${fleet}:derived-media`, base: `${fleet}:2026.9.8` });
     expect(recipeProblem({ tag: r.tag, base: r.base!, packages: [], channels: [], lines: 'RUN true' }, fleet)).toBeNull();
+  });
+});
+
+describe('an engine-free image is told by its label, its name only when it has none (HB-1347)', () => {
+  const engineFree = (tag: string) => `${tag} is an engine-free image with its own build, so it cannot be rebuilt from a recipe`;
+  const inputs = (engine: 'none' | 'baked', openclaw: string, packages: string[]) => `v1;openclaw=${openclaw};engine=${engine};packages=${packages.join(' ')};node=node:24-slim;channels=slack,discord;channel-plugins=${openclaw};plugins=;plugin-install=link;embed-plugin=2026.7.1;claude-code=2.1.224;by-hand=;release=2.190.0`;
+  const on = (t: Parameters<MockProvider['tags']['push']>[0]) => { const m = new MockProvider(); m.tags = [t]; return recipeFor(m, t.tag, () => undefined); };
+  it('reads the label first', async () => {
+    // Engine-free with packages, from before HB-1120 gave it a -lite name: only its embed-engine label says so.
+    const old = 'hatchabot-runtime:2026.7.1-2-plus-jq';
+    expect(await on({ tag: old, imageId: 'a', openclawVersion: '2026.7.1-2', extraPackages: ['jq'], embedEngine: 'none' })).toEqual({ problem: engineFree(old) });
+    // A package whose name ends in -lite, on an image with its engine.
+    const pkg = 'hatchabot-runtime:2026.7.1-2-plus-foo-lite';
+    expect(await on({ tag: pkg, imageId: 'b', openclawVersion: '2026.7.1-2', extraPackages: ['foo-lite'], embedEngine: 'baked' })).toMatchObject({ base: 'hatchabot-runtime:2026.7.1-2', packages: ['foo-lite'] });
+    expect(await on({ tag: pkg, imageId: 'b', openclawVersion: '2026.7.1-2', buildInputs: inputs('baked', '2026.7.1-2', ['foo-lite']), embedEngine: 'baked' })).toMatchObject({ packages: ['foo-lite'] });
+    // Its build-inputs label says the same, and decides first.
+    const lite = 'hatchabot-runtime:2026.7.1-2-lite-plus-jq';
+    expect(await on({ tag: lite, imageId: 'c', openclawVersion: '2026.7.1-2', buildInputs: inputs('none', '2026.7.1-2', ['jq']), extraPackages: ['jq'] })).toEqual({ problem: engineFree(lite) });
+    // 2026.8+ has no engine to bake: engine-free is its standard build, rebuilt from its recipe as before.
+    expect(await on({ tag: 'hatchabot-runtime:2026.9.8-plus-jq', imageId: 'd', openclawVersion: '2026.9.8', buildInputs: inputs('none', '2026.9.8', ['jq']), embedEngine: 'none' })).toMatchObject({ base: 'hatchabot-runtime:2026.9.8', packages: ['jq'] });
+  });
+  it('a version the rule cannot read is engine-free by its label, as by its name before', async () => {
+    const dev = 'hatchabot-runtime:main-plus-jq';
+    expect(await on({ tag: dev, imageId: 'g', openclawVersion: 'main', extraPackages: ['jq'], embedEngine: 'none' })).toEqual({ problem: engineFree(dev) });
+  });
+  it('an image with no label is told by its name, as before', async () => {
+    const lite = 'hatchabot-runtime:2026.7.1-2-lite';
+    expect(await on({ tag: lite, imageId: 'e', openclawVersion: '2026.7.1-2' })).toEqual({ problem: engineFree(lite) });
+    expect(await on({ tag: 'hatchabot-runtime:2026.7.1-2', imageId: 'f', openclawVersion: '2026.7.1-2' })).toMatchObject({ base: 'hatchabot-runtime:2026.7.1-2' });
   });
 });
 
@@ -216,6 +245,23 @@ describe("a recipe's build is used only once it runs as node, on its base (HB-10
     expect(m.tags.map((t) => t.tag)).toEqual(before);
   }
 
+  // A file's lines may not copy another image's files in: any image on the
+  // importer's machine, or one docker there pulls with its logins, then
+  // sent anywhere by a RUN of the same build (HB-1473). Nor build on another
+  // derived image, which a machine without it cannot rebuild (HB-1470).
+  const COPY_FROM = "COPY --from is not allowed in a derived image: it copies another image's files into this one (any image on this machine, or one Docker can pull with this machine's logins). Install what you need with RUN instead, such as apt-get install or a download.";
+  // Nor fetch a URL with ADD, which the importer's Docker does from that
+  // machine's own network (HB-1500).
+  const ADD_URL = "ADD of a URL is not allowed in a derived image: Docker fetches it from this machine's own network, where it can reach services only this machine can (a git address, or a source named by a variable such as $X, counts as one). Download it with RUN curl instead, which runs in the build's own network.";
+  it.each([
+    ['RUN apt-get install -y jq\nCOPY --from=registry.example/fixture-secrets:1 /app/.env /tmp/x\nRUN true', COPY_FROM],
+    ['COPY --from=hatchabot-runtime:derived-office / /', COPY_FROM],
+    ['RUN true\nADD http://127.0.0.1:11434/api/tags /tmp/x', ADD_URL],
+    ['ADD git@git.example:team/repo.git /opt/repo', ADD_URL],
+  ])("a COPY --from or an ADD of a URL in a file's recipe is refused, and nothing is built: %j", async (lines, why) => {
+    await refusedBeforeBuilding(lines, why);
+  });
+
   it('an image that cannot be seen is not used: the check fails closed', async () => {
     const m = machine();
     const real = m.inspectImage.bind(m);
@@ -346,8 +392,10 @@ describe("the Docker provider's image listing, read for a recipe (HB-0973)", () 
   const LA = `sha256:${'a'.repeat(64)}`, LB = `sha256:${'b'.repeat(64)}`, LC = `sha256:${'c'.repeat(64)}`;
   const STAMP = `sha256:${'5'.repeat(64)}`;
   const INPUTS = 'v1;openclaw=2026.9.6;engine=none;packages=ffmpeg;node=node:24-slim;channels=slack;channel-plugins=2026.9.6;plugins=;plugin-install=npm;embed-plugin=;claude-code=2.1.224;by-hand=;release=2.190.0';
-  /** With `built`: each line ends with the image's layers and all its labels, as JSON (HB-0986). */
-  const built = (layers: string, labels: string) => `|${layers}|${labels}`;
+  /** How the runtime image runs, as docker's config gives it (HB-1330). */
+  const RUNS = { User: 'node', Env: ['PATH=/usr/local/bin:/usr/bin:/bin', 'HOME=/home/node'], Entrypoint: ['agentclaw-entrypoint'], Cmd: ['openclaw', 'gateway'] };
+  /** With `built`: each line ends with the image's layers and its whole config, its labels in it, as JSON (HB-0986, HB-1330). */
+  const built = (layers: string, labels: string, runs: Record<string, unknown> = RUNS) => `|${layers}|${JSON.stringify({ ...runs, Labels: '@' }).replace('"@"', labels)}`;
   function world(o: { images?: 'fail'; inspect?: 'fail' | 'one gone'; built?: boolean } = {}) {
     const dir = mkdtempSync(join(tmpdir(), 'hb-recipe-docker-'));
     dirs.push(dir);
@@ -367,8 +415,8 @@ if (a[0] === 'images') {
 } else if (a[0] === 'image' && a[1] === 'inspect') {
   ${o.inspect === 'fail' ? "fail('error during connect: context deadline exceeded');" : ''}
   console.log(${JSON.stringify(`sha256:0b0b0b0b0b0b0000|2026.9.6|slack|ffmpeg||${o.built ? built(JSON.stringify([LA, LB]), JSON.stringify({ 'org.hatchabot.build-inputs': INPUTS, 'org.hatchabot.extra-packages': 'ffmpeg' })) : ''}`)});
-  console.log(${JSON.stringify(`sha256:0d0d0d0d0d0d0000|2026.9.6|slack|ffmpeg||${o.built ? built(JSON.stringify([LA, LB, LC]), JSON.stringify({ 'org.hatchabot.build-inputs': INPUTS, 'org.hatchabot.derived': 'media', 'org.hatchabot.recipe': STAMP })) : ''}`)});
-  ${o.inspect === 'one gone' ? "fail('Error: No such image: 0e0e0e0e0e0e');" : `console.log(${JSON.stringify(`sha256:0e0e0e0e0e0e0000|2026.9.5|||${o.built ? built('["sha256:short"]', '{"org.hatchabot.build-inputs":"","org.hatchabot.derived":7}') : ''}`)});`}
+  console.log(${JSON.stringify(`sha256:0d0d0d0d0d0d0000|2026.9.6|slack|ffmpeg||${o.built ? built(JSON.stringify([LA, LB, LC]), JSON.stringify({ 'org.hatchabot.build-inputs': INPUTS, 'org.hatchabot.derived': 'media', 'org.hatchabot.recipe': STAMP }), { ...RUNS, Env: [...RUNS.Env, 'MEDIA=1'] }) : ''}`)});
+  ${o.inspect === 'one gone' ? "fail('Error: No such image: 0e0e0e0e0e0e');" : `console.log(${JSON.stringify(`sha256:0e0e0e0e0e0e0000|2026.9.5|||${o.built ? built('["sha256:short"]', '{"org.hatchabot.build-inputs":"","org.hatchabot.derived":7}', { User: 'node', Env: 'PATH=/bin' }) : ''}`)});`}
 }
 `, { mode: 0o755 });
     return new LocalDockerProvider({ docker, image: 'hatchabot-runtime:latest' });
@@ -380,6 +428,14 @@ if (a[0] === 'images') {
     expect(await recipeFor(world(), derived.tag, byTag)).toMatchObject({ base: derived.base, packages: ['ffmpeg'], channels: ['slack'], lines: 'RUN true' });
     // One image removed since it was listed is only gone: the rest still read.
     expect(await recipeFor(world({ inspect: 'one gone' }), derived.tag, byTag)).toMatchObject({ packages: ['ffmpeg'], channels: ['slack'] });
+  });
+
+  it('an image removed since the listing is not listed, rather than listed with nothing read of it (HB-1161)', async () => {
+    const tags = await world({ inspect: 'one gone' }).listImageTags();
+    expect(tags.map((t) => t.tag)).toEqual(['hatchabot-runtime:2026.9.6-plus-ffmpeg', 'hatchabot-runtime:derived-media']);
+    expect(tags[0]).toMatchObject({ openclawVersion: '2026.9.6', extraPackages: ['ffmpeg'], channels: ['slack'] });
+    // All of them there: all listed.
+    expect((await world().listImageTags()).map((t) => t.tag)).toContain('hatchabot-runtime:2026.9.5');
   });
 
   it('reads what each image was built from, and its layers, and a recipe carries them (HB-0986)', async () => {
@@ -395,8 +451,30 @@ if (a[0] === 'images') {
     expect(by('hatchabot-runtime:2026.9.5').derived).toBeUndefined();
     expect(by('hatchabot-runtime:2026.9.5').recipe).toBeUndefined();
     // A daemon that printed the older form says nothing of it either.
-    expect((await world().listImageTags()).every((t) => !t.layers && !t.buildInputs)).toBe(true);
+    expect((await world().listImageTags()).every((t) => !t.layers && !t.buildInputs && !t.config)).toBe(true);
     expect(await recipeFor(world({ built: true }), derived.tag, byTag)).toMatchObject({ inputs: INPUTS, layers: chainId([LA, LB]), packages: ['ffmpeg'] });
+  });
+
+  it('reads how each image runs, and a recipe carries how its base runs, not how a derived image\'s lines run it (HB-1330)', async () => {
+    const tags = await world({ built: true }).listImageTags();
+    const by = (t: string) => tags.find((x) => x.tag === t)!;
+    expect(by('hatchabot-runtime:2026.9.6-plus-ffmpeg').config).toBe(runConfigId(RUNS));
+    expect(by('hatchabot-runtime:derived-media').config).toBe(runConfigId({ ...RUNS, Env: [...RUNS.Env, 'MEDIA=1'] }));
+    expect(by('hatchabot-runtime:derived-media').config).not.toBe(runConfigId(RUNS));
+    // A config whose settings are not what docker gives says nothing.
+    expect(by('hatchabot-runtime:2026.9.5').config).toBeUndefined();
+    expect(await recipeFor(world({ built: true }), derived.tag, byTag)).toMatchObject({ config: runConfigId(RUNS) });
+    expect(await recipeFor(world({ built: true }), 'hatchabot-runtime:2026.9.6-plus-ffmpeg', () => undefined)).toMatchObject({ config: runConfigId(RUNS) });
+    expect(await recipeFor(world(), derived.tag, byTag)).not.toHaveProperty('config');
+    // One id for the same settings: the environment in any order, none said as an empty list (podman leaves them out).
+    expect(runConfigId({ ...RUNS, Env: [...RUNS.Env].reverse(), Labels: { a: 'b' } })).toBe(runConfigId(RUNS));
+    expect(runConfigId({ User: 'node', Entrypoint: null, Cmd: null, Env: null })).toBe(runConfigId({ User: 'node' }));
+    // Another patch of the same Node: its version stamps are not how it runs (images built the same way stand for each other across one).
+    expect(runConfigId({ ...RUNS, Env: [...RUNS.Env, 'NODE_VERSION=24.1.0', 'YARN_VERSION=1.22.22'] })).toBe(runConfigId({ ...RUNS, Env: [...RUNS.Env, 'NODE_VERSION=24.3.0'] }));
+    for (const other of [{ ...RUNS, User: 'root' }, { ...RUNS, User: '' }, { ...RUNS, Entrypoint: ['sh'] }, { ...RUNS, Cmd: ['sh'] }, { ...RUNS, Env: [...RUNS.Env, 'HTTP_PROXY=http://proxy.example:3128'] }]) {
+      expect(runConfigId(other)).not.toBe(runConfigId(RUNS));
+    }
+    for (const bad of [null, [], 'node', { ...RUNS, User: 0 }, { ...RUNS, Env: [1] }, { ...RUNS, Cmd: 'openclaw gateway' }]) expect(runConfigId(bad)).toBeUndefined();
   });
 
   it('a listing or a label read that failed gives no recipe, not one without the extras', async () => {
@@ -406,5 +484,66 @@ if (a[0] === 'images') {
       expect(await recipeFor(p, derived.tag, byTag)).toMatchObject({ problem: expect.stringMatching(/could not be read/) });
       expect(await recipeFor(p, 'hatchabot-runtime:2026.9.6-plus-ffmpeg', () => undefined)).toMatchObject({ problem: expect.stringMatching(/could not be read/) });
     }
+  });
+});
+
+describe("two builds of one recipe's tag at once (HB-1322)", () => {
+  it("build one at a time: the second waits for the first, and neither checks, names or removes the other's image", async () => {
+    // A plain name (a -plus- image, a base with packages) has no record to
+    // claim as a derived name does, and every build of a tag builds to its
+    // one check name: two moves or imports at once built there together.
+    const V = 'hatchabot-runtime:2026.9.6', CHECK = 'hatchabot-runtime-check:2026.9.6';
+    let building = 0, most = 0;
+    const gates: Array<() => void> = [];
+    class Slow extends MockProvider {
+      override async buildImage(tag: string, dockerfile: string, labels: Record<string, string>) {
+        building++;
+        most = Math.max(most, building);
+        await new Promise<void>((r) => gates.push(r));
+        try { return await super.buildImage(tag, dockerfile, labels); } finally { building--; }
+      }
+    }
+    const m = new Slow();
+    m.publishedBases.add(V);
+    const recipe = { tag: V, base: V, packages: ['jq'], channels: [] };
+    let done = 0;
+    const both = [buildRecipeOn(m, recipe), buildRecipeOn(m, recipe)].map((p) => p.finally(() => { done++; }));
+    for (const t0 = Date.now(); !gates.length && Date.now() - t0 < 2000;) await new Promise((r) => setTimeout(r, 10));
+    await new Promise((r) => setTimeout(r, 100));
+    expect(gates).toHaveLength(1); // the second waits for the first
+    // Each build let through as it comes, until both have ended.
+    for (let let_ = 0, t0 = Date.now(); done < 2 && Date.now() - t0 < 5000;) {
+      if (gates.length > let_) gates[let_++]!();
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    const [first, second] = await Promise.all(both);
+    expect(first).toMatchObject({ ok: true, built: true });
+    expect(second).toMatchObject({ ok: true });
+    expect(most).toBe(1);
+    expect(m.built.every((b) => b.tag === CHECK)).toBe(true);
+    expect(m.tags.map((t) => t.tag)).not.toContain(CHECK);
+  });
+
+  it("on two machines build side by side: each machine's docker has names of its own (review of HB-1322)", async () => {
+    const V = 'hatchabot-runtime:2026.9.6';
+    let building = 0, most = 0;
+    const gates: Array<() => void> = [];
+    class Slow extends MockProvider {
+      override async buildImage(tag: string, dockerfile: string, labels: Record<string, string>) {
+        building++;
+        most = Math.max(most, building);
+        await new Promise<void>((r) => gates.push(r));
+        try { return await super.buildImage(tag, dockerfile, labels); } finally { building--; }
+      }
+    }
+    const [a, b] = [new Slow(), new Slow()];
+    for (const m of [a, b]) m.publishedBases.add(V);
+    const recipe = { tag: V, base: V, packages: ['jq'], channels: [] };
+    const both = Promise.all([buildRecipeOn(a, recipe), buildRecipeOn(b, recipe)]);
+    for (const t0 = Date.now(); gates.length < 2 && Date.now() - t0 < 2000;) await new Promise((r) => setTimeout(r, 10));
+    expect(gates).toHaveLength(2); // neither waits for the other
+    expect(most).toBe(2);
+    for (const g of gates) g();
+    expect(await both).toMatchObject([{ ok: true, built: true }, { ok: true, built: true }]);
   });
 });

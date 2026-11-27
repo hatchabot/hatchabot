@@ -123,8 +123,13 @@ export function createResources(deps: ResourcesDeps): Resources {
    * machine-level containers (the memory search service, doormen).
    */
   const fleet: Resources['fleet'] = async (ownerId, owner) => {
-    const visible = new Map(store.listVisibleAgents(ownerId).map((a) => [containerOf(a), a]));
-    const everyone = owner ? new Map(store.listAllActiveAgents().map((a) => [containerOf(a), a])) : visible;
+    // By machine and container: a container of the agent's name on another
+    // machine (the copy a move left on its old one, HB-0904) was counted as
+    // the agent there too, and its readings went into the agent's peak and
+    // cap hits (HB-1259).
+    const at = (hostId: string, container: string) => `${hostId}\0${container}`;
+    const visible = new Map(store.listVisibleAgents(ownerId).map((a) => [at(a.hostId, containerOf(a)), a]));
+    const everyone = owner ? new Map(store.listAllActiveAgents().map((a) => [at(a.hostId, containerOf(a)), a])) : visible;
     const hosts = await Promise.all(store.listHosts(ownerId).map(async (h) => {
       const provider = providerFor(h.id);
       if (!provider.stats) return { id: h.id, name: h.name, kind: h.kind, containers: [], error: 'not measurable' };
@@ -134,12 +139,13 @@ export function createResources(deps: ResourcesDeps): Resources {
         const rows = await statsFor(h.id, provider);
         type Row = ContainerStats & { agentId?: string; agentName?: string; role: 'agent' | 'hatchabot' | 'embedder' | 'embed-door' | 'doorman'; mine?: boolean; shared?: boolean };
         const containers = rows.flatMap((r): Row[] => {
-          const a = everyone.get(r.name);
+          const key = at(h.id, r.name);
+          const a = everyone.get(key);
           if (a) {
-            if (!visible.has(r.name) && !owner) return [];
+            if (!visible.has(key) && !owner) return [];
             // Since the owner last cleared the peaks (Status → Resources), when they did.
             r = { ...r, memPeakBytes: peakSinceClear(a, r.memPeakBytes, r.memBytes), memCapHits: capHitsSince(a, r.memCapHits, r.startedAt), clearedAt: a.memoryPeakClearedAt } as typeof r & { clearedAt?: string };
-            return [{ ...r, agentId: a.id, agentName: a.name, role: a.ops ? 'hatchabot' as const : 'agent' as const, mine: a.ownerId === ownerId, shared: a.ownerId !== ownerId && visible.has(r.name) }];
+            return [{ ...r, agentId: a.id, agentName: a.name, role: a.ops ? 'hatchabot' as const : 'agent' as const, mine: a.ownerId === ownerId, shared: a.ownerId !== ownerId && visible.has(key) }];
           }
           if (!owner) return [];
           const role = /-embedder$/.test(r.name) ? 'embedder' : /-embed-door$/.test(r.name) ? 'embed-door' : /-doorman-/.test(r.name) ? 'doorman' : 'other';

@@ -20,6 +20,7 @@ import { parseTemplate } from '../src/orchestrator/transfer/template.js';
 import { moveAgentToHost } from '../src/orchestrator/transfer/moveHost.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { markBusy } from '../src/orchestrator/lifecycle/busy.js';
+import { eventLabel } from '../src/orchestrator/health/eventLabels.js';
 
 const tmp = mkdtempSync(join(tmpdir(), 'acl-adopt-'));
 const cfgPath = join(tmp, 'openclaw.json');
@@ -128,6 +129,97 @@ describe('Adopt workspace — POST /v1/agents/:id/adopt-workspace', () => {
     const add = w.provider.execLog.find((a) => a[0] === 'cron' && a[1] === 'add');
     expect(add).toBeDefined();
     expect(add).toContain('--disabled');
+  });
+});
+
+// HB-1200, as the owner chose: a task carried before and edited in the old
+// workspace since is not brought again, and the adopt's answer says how
+// many; one put off until the agent runs says it on its timeline line.
+describe('Adopt again after a task was edited in the old workspace (HB-1200)', () => {
+  it('answers how many changed since they were carried, now and once the agent runs', async () => {
+    const ids = join(tmp, 'state-ids.sqlite');
+    const s = new Database(ids);
+    s.exec('CREATE TABLE cron_jobs (job_id TEXT, agent_id TEXT, declaration_key TEXT, job_json TEXT, updated_at INTEGER)');
+    const brief = { name: 'Daily brief', schedule: { kind: 'cron', expr: '0 8 * * *' }, payload: { kind: 'agentTurn', message: 'Write the brief' } };
+    s.prepare('INSERT INTO cron_jobs VALUES (?,?,?,?,?)').run('s0', 'tech', null, JSON.stringify(brief), 1);
+    s.close();
+    process.env.OPENCLAW_STATE_DB = ids;
+    try {
+      const w = await makeWorld();
+      await seedRunningAgent(w, { id: 'a1', slug: 'garden-adv' });
+      w.provider.execResponses.set('cron add', { code: 0, stdout: JSON.stringify({ id: 'c1' }), stderr: '' });
+      const adopt = async () => {
+        const res = await w.f.inject({ method: 'POST', url: '/v1/agents/a1/adopt-workspace', headers: as(), payload: { path: wsTech } });
+        expect(res.statusCode).toBe(200);
+        return res.json().crons;
+      };
+      expect(await adopt()).toEqual({ total: 1, carried: 1, failed: 0 });
+      w.provider.execResponses.set('cron list', { code: 0, stdout: JSON.stringify({ jobs: [{ id: 'c1', enabled: false, ...brief }] }), stderr: '' });
+      expect(await adopt()).toEqual({ total: 1, carried: 1, failed: 0 });
+      const t = new Database(ids);
+      t.prepare('UPDATE cron_jobs SET job_json = ? WHERE job_id = ?').run(JSON.stringify({ ...brief, payload: { ...brief.payload, message: 'Write a shorter brief' } }), 's0');
+      t.close();
+      expect(await adopt()).toEqual({ total: 1, carried: 1, failed: 0, changed: 1 });
+      expect(w.provider.execLog.filter((a) => a[0] === 'cron' && a[1] === 'add')).toHaveLength(1);
+      // Into the agent stopped: put off, and said on the line the pass writes once it runs. Its one task
+      // was carried before, so none is said as to be carried (HB-1475 review).
+      await w.provider.stop(w.store.getAgent('a1')!.runtimeRef!);
+      w.store.setAgentState('a1', 'STOPPED');
+      expect(await adopt()).toEqual({ total: 1, carried: 0, failed: 0 });
+      await w.provider.start(w.store.getAgent('a1')!.runtimeRef!);
+      w.store.setAgentState('a1', 'RUNNING');
+      await (w.f as unknown as { quickCronRetarget: () => Promise<void> }).quickCronRetarget();
+      const done = w.store.listEvents(['a1']).find((e) => e.event === 'adopt.deferred_done');
+      expect(done?.detail).toMatchObject({ total: 1, carried: 1, failed: 0, changed: 1 });
+      expect(eventLabel('adopt.deferred_done', done?.detail)).toBe(
+        "the adopted workspace's paths and tasks were brought over once it was running (0 of 1 tasks; 1 changed in the old workspace since it was carried — not brought)");
+      expect(eventLabel('adopt.deferred_done', { total: 3, carried: 3, failed: 0, changed: 1 })).toBe(
+        "the adopted workspace's paths and tasks were brought over once it was running (2 of 3 tasks; 1 changed in the old workspace since it was carried — not brought)");
+      expect(w.provider.execLog.filter((a) => a[0] === 'cron' && a[1] === 'add')).toHaveLength(1);
+    } finally {
+      process.env.OPENCLAW_STATE_DB = dbPath;
+    }
+  });
+});
+
+// HB-1475 review: an adopt into a stopped agent says how many tasks will be
+// carried once it runs. It counted every task read, so an adopt again whose
+// tasks were all carried said they would be, while none would be added.
+describe('Adopt again into a stopped agent (HB-1475 review)', () => {
+  it('says only the tasks it will add: none carried before, and one with no record, or whose record names no copy', async () => {
+    const ids = join(tmp, 'state-put-off.sqlite');
+    const s = new Database(ids);
+    s.exec('CREATE TABLE cron_jobs (job_id TEXT, agent_id TEXT, declaration_key TEXT, job_json TEXT, updated_at INTEGER)');
+    const brief = { name: 'Daily brief', schedule: { kind: 'cron', expr: '0 8 * * *' }, payload: { kind: 'agentTurn', message: 'Write the brief' } };
+    const water = { name: 'Water check', schedule: { kind: 'every', everyMs: 3_600_000 }, payload: { kind: 'agentTurn', message: 'Check the beds' } };
+    s.prepare('INSERT INTO cron_jobs VALUES (?,?,?,?,?)').run('s0', 'tech', null, JSON.stringify(brief), 1);
+    s.close();
+    process.env.OPENCLAW_STATE_DB = ids;
+    try {
+      const w = await makeWorld();
+      await seedRunningAgent(w, { id: 'a1', slug: 'garden-adv' });
+      w.provider.execResponses.set('cron add', { code: 0, stdout: JSON.stringify({ id: 'c1' }), stderr: '' });
+      const adopt = async () => {
+        const res = await w.f.inject({ method: 'POST', url: '/v1/agents/a1/adopt-workspace', headers: as(), payload: { path: wsTech } });
+        expect(res.statusCode).toBe(200);
+        return res.json().crons;
+      };
+      expect(await adopt()).toEqual({ total: 1, carried: 1, failed: 0 });
+      await w.provider.stop(w.store.getAgent('a1')!.runtimeRef!);
+      w.store.setAgentState('a1', 'STOPPED');
+      // Its one task carried before: none to add.
+      expect(await adopt()).toEqual({ total: 1, carried: 0, failed: 0 });
+      // A task made in the old workspace since: that one.
+      const t = new Database(ids);
+      t.prepare('INSERT INTO cron_jobs VALUES (?,?,?,?,?)').run('s1', 'tech', null, JSON.stringify(water), 2);
+      t.close();
+      expect(await adopt()).toEqual({ total: 2, carried: 0, failed: 0, deferred: 1 });
+      // A record that names no copy (the gateway did not say one): it may be added, so it is said.
+      w.store.recordCarriedTask('a1', 'tech', 's0', undefined);
+      expect(await adopt()).toEqual({ total: 2, carried: 0, failed: 0, deferred: 2 });
+    } finally {
+      process.env.OPENCLAW_STATE_DB = dbPath;
+    }
   });
 });
 

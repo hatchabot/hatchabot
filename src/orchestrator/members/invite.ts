@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import type { Store } from '../../store/store.js';
+import { NAMES_NOBODY, type Store } from '../../store/store.js';
 
 /**
  * §12.3 invite & join, MVP-shaped for a world without user accounts yet:
@@ -59,15 +59,21 @@ export function createInvite(
   return { code, expiresAt };
 }
 
+/** An invite an older release made for a bare link, with no name in it (checkInvite). */
+export const NAMES_NOBODY_INVITE = 'This invite names nobody: ask its owner for a new one.';
+
 export type InviteCheck =
   | { valid: true; agentId: string; webChat: boolean }
-  | { valid: false; reason: 'unknown' | 'expired' | 'used' };
+  | { valid: false; reason: 'unknown' | 'expired' | 'used' | 'names-nobody' };
 
 export function checkInvite(store: Store, code: string): InviteCheck {
   const invite = store.getInviteByCode(code.trim().toUpperCase());
   if (!invite) return { valid: false, reason: 'unknown' };
   if (invite.redeemedAt) return { valid: false, reason: 'used' };
   if (new Date(invite.expiresAt).getTime() < Date.now()) return { valid: false, reason: 'expired' };
+  // Made by an older release for a bare link, with no name in it: redeemed, it
+  // let nobody in. Left unused, and its owner asked for a new one (HB-1439 review).
+  if (!invite.webChat && invite.expectHandle === NAMES_NOBODY) return { valid: false, reason: 'names-nobody' };
   // The agent may have been deleted after the link was minted — joining a
   // tombstone would create a membership against an agent with no bot to talk
   // to and a triumphant "you're in!" page. Treat it as a dead link.
@@ -156,7 +162,7 @@ export function redeemInvite(
 export const ALREADY_MEMBER = 'You are already on this agent, so this invite was not used.';
 
 export class InviteInvalidError extends Error {
-  constructor(readonly reason: 'unknown' | 'expired' | 'used' | 'signin' | 'member') {
+  constructor(readonly reason: 'unknown' | 'expired' | 'used' | 'names-nobody' | 'signin' | 'member') {
     super(`Invite invalid: ${reason}`);
     this.name = 'InviteInvalidError';
   }
@@ -166,6 +172,8 @@ export class InviteInvalidError extends Error {
         return 'This invite has expired. Ask for a new one.';
       case 'used':
         return 'This invite was already used. Ask for a new one.';
+      case 'names-nobody':
+        return NAMES_NOBODY_INVITE;
       case 'signin':
         return 'Sign in to this Hatchabot first — chatting on the web is done signed in.';
       case 'member':

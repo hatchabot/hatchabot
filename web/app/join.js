@@ -30,7 +30,8 @@ async function init() {
     return;
   }
   if (!info.valid) {
-    const why = { expired: 'This invite has expired.', used: 'This invite was already used.' }[info?.reason]
+    // names-nobody: made by an older release for a bare t.me link, with no name in it (HB-1439 review).
+    const why = { expired: 'This invite has expired.', used: 'This invite was already used.', 'names-nobody': 'This invite names nobody.' }[info?.reason]
       ?? "This invite link isn't valid.";
     card.innerHTML = `<div class="agent">Hmm.</div><div class="notice">${why} Ask the person who sent it for a new one.</div>`;
     return;
@@ -128,16 +129,18 @@ async function join(idToken, asAccount = false) {
     if (chosen !== 'telegram') {
       const label = LABEL[chosen] || chosen;
       const w = ways.find((x) => x.kind === chosen) || {};
+      // No link from the app: no button below to open it with (HB-1279).
+      const linked = /^https:\/\//i.test(data.deepLink || '');
       card.innerHTML = `
       <div class="agent">You're in 🎉</div>
       <ol class="steps">
         ${chosen === 'slack' ? `<li>You need to be in the <b>${esc(w.team || 'same')}</b> Slack workspace.</li>`
           : `<li>You need to share a server with it${w.servers?.length ? `: join <b>${esc(w.servers.join(', '))}</b> first if you haven't` : ''}.</li>`}
-        <li>Open <b>${esc(data.agentName)}</b> in ${esc(label)} below and send it a direct message — that links you to the agent.</li>
+        <li>${linked ? 'Open' : 'Find'} <b>${esc(data.agentName)}</b> in ${esc(label)}${linked ? ' below' : ''} and send it a direct message — that links you to the agent.</li>
         <li>Give it a few seconds, then just chat.</li>
       </ol>
       ${waits}
-      ${/^https:\/\//i.test(data.deepLink || '') /* https only: never a javascript: link (review, 2026-10-09) */ ? `<a class="btn" href="${esc(data.deepLink)}" target="_blank" rel="noopener">Open in ${esc(label)}</a>`
+      ${linked /* https only: never a javascript: link (review, 2026-10-09) */ ? `<a class="btn" href="${esc(data.deepLink)}" target="_blank" rel="noopener">Open in ${esc(label)}</a>`
         // No link from the app: said as that, with where to look. "Isn't running" was said here, whatever the agent's state (HB-1218).
         : `<div class="notice">${esc(label)} gave no link to it, so there is no button here. Look for <b>${esc(data.agentName)}</b> ${chosen === 'slack'
           ? `under Apps in the ${w.team ? `<b>${esc(w.team)}</b> ` : ''}Slack workspace`
@@ -145,10 +148,11 @@ async function join(idToken, asAccount = false) {
           and send it a direct message. Not there under that name? Ask the person who invited you what its bot is called.</div>`}`;
       return;
     }
+    // No bot name: the agent has no Telegram bot yet, so there is nothing to message. "Isn't running" was said, whatever its state (HB-1279).
     card.innerHTML = `
       <div class="agent">You're in 🎉</div>
       <ol class="steps">
-        <li>Open <b>${esc(data.agentName)}</b> in Telegram below.</li>
+        <li>${data.botUsername ? `Open <b>${esc(data.agentName)}</b> in Telegram below.` : `Once it has a Telegram bot, open <b>${esc(data.agentName)}</b> in Telegram.`}</li>
         <li>Send it any message — that links your Telegram to the agent.</li>
         <li>Give it a few seconds, then just chat.</li>
       </ol>
@@ -156,7 +160,7 @@ async function join(idToken, asAccount = false) {
       ${data.botUsername ? `
         <a class="btn" href="https://t.me/${esc(data.botUsername)}">Open in Telegram app</a>
         <a class="btn alt" href="https://web.telegram.org/k/#?tgaddr=${encodeURIComponent('tg://resolve?domain=' + data.botUsername)}" target="_blank">Open Telegram Web instead</a>
-      ` : `<div class="notice">The agent isn't running right now — ask the owner to start it, then message the bot.</div>`}`;
+      ` : `<div class="notice"><b>${esc(data.agentName)}</b> has no Telegram bot yet, so there is no button here. Ask the person who invited you to give it one, then message it.</div>`}`;
   } catch (e) {
     document.getElementById('err').textContent = e.message;
     btn.disabled = false;

@@ -64,7 +64,8 @@ export function registerAppRoutes(app: FastifyInstance, ctx: RouteContext): void
   // A codebase with a hatchabot.json, installed into an agent as a release with
   // its config, tests and scheduled commands. The source is read on the host, so
   // only the machine's owner may install or update (host paths, host git login).
-  const appFail = (reply: FastifyReply, e: unknown) => {
+  /** `did`: what was pressed, as a failure that is not one of the App rules says it: an Update's or a roll back's said "The install did not finish". */
+  const appFail = (reply: FastifyReply, e: unknown, did: string) => {
     const conflict = (e as { conflict?: string[] })?.conflict;
     // How it left the agent (apps.ts, outcome): the page says "unchanged" only when this does.
     const o = (e ?? {}) as { unchanged?: boolean; held?: boolean };
@@ -73,7 +74,7 @@ export function registerAppRoutes(app: FastifyInstance, ctx: RouteContext): void
     if (e instanceof AppError && (e as { stale?: boolean }).stale) return reply.code(409).send({ error: e.message, unchanged: true });
     const needs = (e as { needs?: unknown })?.needs;
     if (e instanceof AppError) return reply.code(400).send({ error: e.message, test: (e as AppError & { test?: unknown }).test, ...(needs ? { needs } : {}), ...state });
-    return reply.code(502).send({ error: `The install did not finish: ${(e as Error)?.message ?? e}`, ...state });
+    return reply.code(502).send({ error: `${did} did not finish: ${(e as Error)?.message ?? e}`, ...state });
   };
   const appTarget = (req: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply) => {
     if (!ownsLocalHost(req)) { reply.code(403).send({ error: "Only this machine's owner can install or change an app (it reads this machine's folders and git login)." }); return undefined; }
@@ -103,7 +104,7 @@ export function registerAppRoutes(app: FastifyInstance, ctx: RouteContext): void
       // `name`: a new agent's, so its chat comes with {app_dir}, {agent}… filled in for it (HB-0259).
       const name = typeof body.name === 'string' && body.name.trim() ? body.name : undefined;
       return await inspect(body.source ?? '', body.ref || 'HEAD', name);
-    } catch (e) { return appFail(reply, e); }
+    } catch (e) { return appFail(reply, e, 'Reading the app'); }
   });
 
   app.get<{ Params: { id: string } }>('/v1/agents/:id/app', async (req, reply) => {
@@ -129,7 +130,7 @@ export function registerAppRoutes(app: FastifyInstance, ctx: RouteContext): void
       const done = await installFromSource(a, body.source ?? '', body.ref || 'HEAD', body.values ?? {}, body.allowShared === true, ownerIdOf(req));
       if (waiting) await dropAppPending(store, secrets, a.id, waiting.gen);
       return { app: appView(a), test: done.test ?? null };
-    } catch (e) { return appFail(reply, e); } finally {
+    } catch (e) { return appFail(reply, e, 'The install'); } finally {
       // A request saved while this one ran found the agent busy: it goes in now.
       const now = store.getAppPending(a.id);
       if (now && !now.error && now.gen !== waiting?.gen) void runPendingApp(a.id);
@@ -155,7 +156,7 @@ export function registerAppRoutes(app: FastifyInstance, ctx: RouteContext): void
       if ('missing' in r) return reply.code(400).send({ error: `Needs a value for: ${r.missing.join(', ')}.` });
       if (!r.saved) return reply.code(409).send({ error: 'It was deleted or archived meanwhile, so nothing was saved.' });
       return { pending: true, app: r.app, name: r.name };
-    } catch (e) { return appFail(reply, e); }
+    } catch (e) { return appFail(reply, e, 'Saving it to install later'); }
   });
 
   /** Install the newest commit (or a given ref) from where it came. */
@@ -175,7 +176,7 @@ export function registerAppRoutes(app: FastifyInstance, ctx: RouteContext): void
       }
       const { done, refreshed } = u;
       return { app: appView(a), test: done.test ?? null, ...(refreshed.length ? { refreshed } : {}) };
-    } catch (e) { return appFail(reply, e); }
+    } catch (e) { return appFail(reply, e, 'The update'); }
   });
 
   /** Back to the release before the last install or update. */
@@ -186,7 +187,7 @@ export function registerAppRoutes(app: FastifyInstance, ctx: RouteContext): void
     try {
       await rollback(a, had, ownerIdOf(req));
       return { app: appView(a) };
-    } catch (e) { return appFail(reply, e); }
+    } catch (e) { return appFail(reply, e, 'The roll back'); }
   });
 
   /** Stop running it: its scheduled commands go; the code and its data stay in the agent. */
@@ -197,7 +198,7 @@ export function registerAppRoutes(app: FastifyInstance, ctx: RouteContext): void
     try {
       const n = await remove(a, had);
       return { removed: true, tasks: n };
-    } catch (e) { return appFail(reply, e); }
+    } catch (e) { return appFail(reply, e, 'Stopping the app'); }
   });
 
   // ---- data sources (docs/data-sources.md) ---------------------------------

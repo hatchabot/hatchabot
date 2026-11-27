@@ -15,8 +15,12 @@ const SAMPLES: Record<string, { title: string; prompt: string; facts: string }> 
 
 export const SKILL_TRIAL_LIMITS = { timeoutSeconds: 60, maxOutputTokensPerResponse: 512 } as const;
 export type SkillTrialStatus = 'completed' | 'not_observed' | 'timeout' | 'unavailable' | 'unsupported';
-/** What a practice run spent on one model (HB-0933): its calls and their four parts. */
-export interface PracticeSpent { model: string; calls: number; input: number; output: number; cacheRead: number; cacheWrite: number }
+/**
+ * What a practice run spent on one model (HB-0933): its calls and their four
+ * parts, and `refused`: the calls its source refused (a rate limit), which
+ * answered nothing, so they are in no other count (HB-1497).
+ */
+export interface PracticeSpent { model: string; calls: number; input: number; output: number; cacheRead: number; cacheWrite: number; refused?: number }
 export interface SkillTrialResult {
   status: SkillTrialStatus;
   output?: string;
@@ -124,21 +128,28 @@ const zlib=require('node:zlib');
 let sqlite=null;try{sqlite=require('node:sqlite');}catch{}
 const n=x=>typeof x==='number'&&isFinite(x)&&x>0?x:0;
 const MODEL=/^[A-Za-z0-9._:@\/-]{1,240}$/;
+// A call the source refused, as the usage reader tells a rate-limited turn
+// (usage.ts LIMITED): it answered nothing, so it has no tokens (HB-1497).
+const LIMITED=/rate_limit|rate limit|\b429\b/i;
+const refusal=msg=>msg.role==='assistant'&&(msg.stopReason==='error'||msg.stopReason==='aborted'||msg.stopReason==='timeout')&&LIMITED.test(String(msg.errorMessage||''));
 function tally(fallback){
   const models={},seen=new Set();
+  const entry=k=>models[k]||(models[k]={model:k,calls:0,input:0,output:0,cacheRead:0,cacheWrite:0});
   const t={found:false,ids:[],
     add(e){
       const msg=object(e)?e.message:null;
-      if(!object(msg)||!object(msg.usage))return;
+      if(!object(msg))return;
+      const u=object(msg.usage)?msg.usage:null;
+      const spent=u?n(u.input)+n(u.output)+n(u.cacheRead)+n(u.cacheWrite):0;
+      if(!spent&&!refusal(msg))return;
       if(e.id){if(seen.has(e.id))return;seen.add(e.id);}
-      const u=msg.usage;
-      if(!(n(u.input)+n(u.output)+n(u.cacheRead)+n(u.cacheWrite)))return;
       const k=typeof msg.model==='string'&&MODEL.test(msg.model)?msg.model:fallback;
-      const m=models[k]||(models[k]={model:k,calls:0,input:0,output:0,cacheRead:0,cacheWrite:0});
-      m.calls++;m.input+=n(u.input);m.output+=n(u.output);m.cacheRead+=n(u.cacheRead);m.cacheWrite+=n(u.cacheWrite);t.found=true;
+      const m=entry(k);t.found=true;
+      if(!spent){m.refused=(m.refused||0)+1;return;}
+      m.calls++;m.input+=n(u.input);m.output+=n(u.output);m.cacheRead+=n(u.cacheRead);m.cacheWrite+=n(u.cacheWrite);
       if(e.id&&t.ids.length<200)t.ids.push(String(e.id));
     },
-    line(j){if(typeof j!=='string'||j.indexOf('"usage"')<0)return;try{t.add(JSON.parse(j));}catch{}},
+    line(j){if(typeof j!=='string'||(j.indexOf('"usage"')<0&&j.indexOf('"errorMessage"')<0))return;try{t.add(JSON.parse(j));}catch{}},
     list(){return Object.values(models).slice(0,20);}};
   return t;
 }
@@ -342,7 +353,9 @@ function spentOf(v: unknown): PracticeSpent[] | undefined {
   for (const s of v) {
     if (!record(s) || typeof s.model !== 'string' || !/^[A-Za-z0-9._:@/-]{1,240}$/.test(s.model) || !Number.isSafeInteger(s.calls) || !number(s.calls)) return undefined;
     if (!part(s.input) || !part(s.output) || !part(s.cacheRead) || !part(s.cacheWrite)) return undefined;
-    out.push({ model: s.model, calls: s.calls as number, input: s.input as number, output: s.output as number, cacheRead: s.cacheRead as number, cacheWrite: s.cacheWrite as number });
+    if (s.refused !== undefined && (!Number.isSafeInteger(s.refused) || !number(s.refused) || (s.refused as number) > 1e6)) return undefined;
+    out.push({ model: s.model, calls: s.calls as number, input: s.input as number, output: s.output as number, cacheRead: s.cacheRead as number, cacheWrite: s.cacheWrite as number,
+      ...((s.refused as number) > 0 ? { refused: s.refused as number } : {}) });
   }
   return out;
 }
